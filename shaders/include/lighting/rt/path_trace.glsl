@@ -31,33 +31,11 @@ vec3 sample_cosine_hemisphere(vec3 normal, vec2 u) {
 }
 #endif
 
-// GGX Visible Normal Distribution Function (VNDF) sampling (Heitz 2018 / Zombye 2023)
-vec3 sample_ggx_vndf_local(vec3 viewer_dir, vec2 alpha, vec2 hash) {
-    viewer_dir = normalize(vec3(alpha * viewer_dir.xy, viewer_dir.z));
-    const float tau = 6.28318530718;
-    float phi = tau * hash.x;
-    float cos_theta = fma(1.0 - hash.y, 1.0 + viewer_dir.z, -viewer_dir.z);
-    float sin_theta = sqrt(clamp(1.0 - cos_theta * cos_theta, 0.0, 1.0));
-    vec3 reflected = vec3(vec2(cos(phi), sin(phi)) * sin_theta, cos_theta);
-    vec3 halfway = reflected + viewer_dir;
-    return normalize(vec3(alpha * halfway.xy, halfway.z));
-}
-
-vec3 sample_specular_direction(vec3 normal, vec3 viewer_dir, float roughness, vec2 hash) {
-    mat3 tbn = build_orthonormal_basis(normal);
-    vec3 local_v = transpose(tbn) * viewer_dir;
-    float alpha = max(roughness * roughness, 0.002);
-    vec3 local_m = sample_ggx_vndf_local(local_v, vec2(alpha), hash);
-    vec3 m = tbn * local_m;
-    return reflect(-viewer_dir, m);
-}
-
-// Evaluates explicit path tracing for one sample ray.
-// Returns vec4(radiance, norm_hit_dist) and writes hit_source (RTGI_HIT_*).
+// RGB is demodulated diffuse radiance. A is the first opaque hit distance in
+// blocks, or -1 when the primary segment has no recorded opaque hit.
 vec4 evaluate_path_trace(
     vec3 scene_pos,
     vec3 world_normal,
-    vec3 mapped_normal,
     vec2 dither,
     float receiver_skylight,
     usampler3D voxel_grid,
@@ -71,15 +49,12 @@ vec4 evaluate_path_trace(
 
     vec3 L = vec3(0.0);
     vec3 throughput = vec3(1.0);
-    float primary_hit_dist = 32.0;
+    float primary_hit_dist = -1.0;
 
     vec2 u0 = r2(ray_index * PT_BOUNCES, dither);
 
-    // Initial ray direction sampled from primary shading normal
-    vec3 current_dir = sample_cosine_hemisphere(mapped_normal, u0);
-    if (dot(current_dir, world_normal) <= 0.0) {
-        current_dir = reflect(current_dir, world_normal);
-    }
+    // The Lambertian cosine and the proposal density use the same normal.
+    vec3 current_dir = sample_cosine_hemisphere(world_normal, u0);
 
     vec3 ray_origin = scene_pos;
     vec3 surf_normal = world_normal;
@@ -120,7 +95,6 @@ vec4 evaluate_path_trace(
 
             if (b == 0) {
                 hit_source = (escaped_sky_gate > 0.0) ? RTGI_HIT_SKY : RTGI_HIT_NONE;
-                primary_hit_dist = 32.0;
             }
             break;
         }
@@ -160,35 +134,11 @@ vec4 evaluate_path_trace(
         vec2 bounce_seed = hash2(vec3(dither, float(ray_index * PT_BOUNCES + b + 1)));
         vec2 next_u = r2(ray_index * PT_BOUNCES + (b + 1), bounce_seed);
 
-#if defined PT_GLOSSY_TRANSPORT
-        // Optional glossy bounce on smooth materials using an independent lobe selector
-        float lobe_rand = hash1(vec3(dither.xy, float(ray_index * PT_BOUNCES + b + 31)));
-        if (hit.roughness < 0.45 && lobe_rand < 0.2) {
-            vec3 viewer_dir = -current_dir;
-            current_dir = sample_specular_direction(surf_normal, viewer_dir, hit.roughness, next_u);
-        } else {
-            current_dir = sample_cosine_hemisphere(surf_normal, next_u);
-        }
-#else
         current_dir = sample_cosine_hemisphere(surf_normal, next_u);
-#endif
-
-        if (dot(current_dir, surf_normal) <= 0.0) {
-            current_dir = reflect(current_dir, surf_normal);
-        }
         current_dither = hash1(vec3(dither.yx, float(ray_index * PT_BOUNCES + b + 1)));
     }
 
-    // Numerical safety guard: reject non-finite or negative values
-    if (!all(equal(L, L)) || any(lessThan(L, vec3(0.0)))) {
-        return vec4(0.0);
-    }
-
-    // Saturating normalized primary hit distance (ReBLUR-style contact guide):
-    // ~0.05 at 0.1m contact corners, 0.50 at 2m, ~0.94 on far/sky rays.
-    float norm_hit_dist = primary_hit_dist / (primary_hit_dist + 2.0);
-
-    return vec4(L, norm_hit_dist);
+    return vec4(L, primary_hit_dist);
 }
 
 #endif // INCLUDE_LIGHTING_RT_PATH_TRACE

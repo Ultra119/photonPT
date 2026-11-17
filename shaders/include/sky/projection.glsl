@@ -9,10 +9,13 @@ const ivec2 sky_map_res = ivec2(191, 108);
 const vec2 sky_map_pixel_size = rcp(vec2(sky_map_res));
 
 vec2 project_sky(vec3 direction) {
-    vec2 projected_dir = normalize(direction.xz);
-
-    float azimuth_angle = pi + atan(projected_dir.x, -projected_dir.y);
-    float altitude_angle = half_pi - fast_acos(direction.y);
+    float azimuth_angle = pi;
+    if (direction.z != 0.0) {
+        azimuth_angle += atan(direction.x, -direction.z);
+    } else if (direction.x != 0.0) {
+        azimuth_angle += sign(direction.x) * half_pi;
+    }
+    float altitude_angle = half_pi - fast_acos(clamp(direction.y, -1.0, 1.0));
 
     vec2 coord;
     coord.x = azimuth_angle * (1.0 / tau);

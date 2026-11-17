@@ -1,9 +1,6 @@
-// Trace diffuse indirect GI rays (world-space voxel RT)
+// Trace one diffuse frame estimate at each registered opaque raster anchor.
 
 #include "/include/global.glsl"
-
-
-
 #if RTGI_RESOLUTION == 0
 const vec2 workGroupsRender = vec2(0.25, 0.25);
 #elif RTGI_RESOLUTION == 2
@@ -14,7 +11,9 @@ const vec2 workGroupsRender = vec2(0.5, 0.5);
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(rgba16f) writeonly uniform image2D rtgi_raw_img;
-layout(rgba16f) writeonly uniform image2D rtgi_state_img;
+layout(rgba32ui) writeonly uniform uimage2D rtgi_guide_even_img;
+layout(rgba32ui) writeonly uniform uimage2D rtgi_guide_odd_img;
+layout(rgba32ui) writeonly uniform uimage2D rtgi_frame_state_img;
 
 #if GI_DEBUG == GI_DEBUG_HIT
 layout(rgba8) writeonly uniform image2D rtgi_hit_img;
@@ -25,31 +24,21 @@ layout(rgba8) writeonly uniform image2D rtgi_hit_img;
 uniform sampler2DShadow shadowtex1;
 #define VOXEL_DDA_USE_SHADOWMAP
 #endif
-uniform sampler2D depthtex0;
 uniform sampler2D depthtex1;
-uniform sampler2D colortex1; // gbuffer0
-uniform sampler2D colortex2; // gbuffer1
+uniform sampler2D colortex1;
 uniform sampler2D colortex4; // sky map & light colors
 uniform sampler2D noisetex;
 
-uniform mat4 gbufferModelView;
 uniform mat4 gbufferModelViewInverse;
 uniform mat4 gbufferProjection;
 uniform mat4 gbufferProjectionInverse;
 
 uniform mat4 shadowModelView;
-uniform mat4 shadowModelViewInverse;
 uniform mat4 shadowProjection;
 
-uniform mat4 gbufferPreviousModelView;
-uniform mat4 gbufferPreviousProjection;
-
 uniform vec3 cameraPosition;
-uniform vec3 previousCameraPosition;
 uniform int frameCounter;
 
-uniform vec2 view_res;
-uniform vec2 view_pixel_size;
 uniform vec3 light_dir;
 
 uniform float near;
@@ -57,72 +46,74 @@ uniform float far;
 uniform vec2 taa_offset;
 uniform float eye_skylight;
 
-#define TEMPORAL_REPROJECTION
-#include "/include/utility/color.glsl"
-#include "/include/utility/encoding.glsl"
-#include "/include/utility/space_conversion.glsl"
-#include "/include/utility/random.glsl"
+#include "/include/lighting/rt/rtgi_opaque_depth.glsl"
 #include "/include/lighting/rt/path_trace.glsl"
 #include "/include/lighting/rt/pt_state.glsl"
 
+void store_trace(ivec2 texel, vec4 raw, uvec4 guide, vec4 hits) {
+    imageStore(rtgi_raw_img, texel, raw);
+    if ((frameCounter & 1) == 0) {
+        imageStore(rtgi_guide_even_img, texel, guide);
+    } else {
+        imageStore(rtgi_guide_odd_img, texel, guide);
+    }
+#if GI_DEBUG == GI_DEBUG_HIT
+    imageStore(rtgi_hit_img, texel, hits);
+#endif
+}
+
 void main() {
-#if RTGI_RESOLUTION == 0
-    const float render_scale = 0.25;
-#elif RTGI_RESOLUTION == 2
-    const float render_scale = 1.0;
-#else
-    const float render_scale = 0.5;
-#endif
-
     ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
-    ivec2 target_res = ivec2(view_res * render_scale);
-
-    if (texel.x >= target_res.x || texel.y >= target_res.y) {
+    ivec2 target_res = imageSize(rtgi_raw_img);
+    if (!rtgi_in_bounds(texel, target_res)) {
         return;
     }
 
-    // uv is a full-framebuffer UV. Under TAAU only the lower-left
-    // taau_render_scale x taau_render_scale region contains scene data.
-    vec2 uv = (vec2(texel) + 0.5) / vec2(target_res);
+    RtgiGrid grid = rtgi_grid(textureSize(depthtex1, 0), target_res);
+    vec2 jitter = rtgi_raster_jitter(taa_offset, grid.full_size);
+    if (texel == ivec2(0)) {
+        // Publish a single record for the parity that owns this raster lattice.
+        int bank = frameCounter & 1;
+        imageStore(rtgi_frame_state_img, ivec2(0, bank),
+                   uvec4(uint(frameCounter), rtgi_frame_tag, floatBitsToUint(jitter)));
+        imageStore(rtgi_frame_state_img, ivec2(1, bank),
+                   uvec4(grid.full_size, grid.full_active));
+        imageStore(rtgi_frame_state_img, ivec2(2, bank),
+                   uvec4(target_res, grid.gi_active));
+    }
 
-    if (taau_uv_outside_viewport(uv)) {
-        imageStore(rtgi_raw_img, texel, vec4(0.0));
-        imageStore(rtgi_state_img, texel, pt_state_pack(PT_RESET_NO_SURFACE, 1.0, 0.0, 0.0));
-#if GI_DEBUG == GI_DEBUG_HIT
-        imageStore(rtgi_hit_img, texel, vec4(0.0));
-#endif
+    if (!rtgi_in_bounds(texel, grid.gi_active)) {
+        store_trace(texel, vec4(0.0), uvec4(0u), vec4(0.0));
         return;
     }
 
-    ivec2 full_texel = ivec2(uv * view_res);
-
-    float depth = texelFetch(depthtex1, full_texel, 0).x;
-    if (depth >= 1.0) {
-        imageStore(rtgi_raw_img, texel, vec4(0.0));
-        imageStore(rtgi_state_img, texel, pt_state_pack(PT_RESET_NO_SURFACE, 1.0, 0.0, 0.0));
-#if GI_DEBUG == GI_DEBUG_HIT
-        imageStore(rtgi_hit_img, texel, vec4(0.0));
-#endif
+    ivec2 full_texel = rtgi_anchor(texel, grid);
+    RtgiOpaqueDepth surface = rtgi_opaque_depth(full_texel);
+    if (surface.kind != rtgi_world) {
+        // Hand and LoD are shaded by the receiver-local fallback in D4.
+        uvec4 guide = rtgi_pack_guide(full_texel, 0.0, vec2(0.0), 0u,
+                                      surface.kind, 0u);
+        store_trace(texel, vec4(0.0), guide, vec4(0.0));
         return;
     }
 
-    // Unpack surface data
+    vec3 view_pos = rtgi_opaque_view_pos(surface, vec2(full_texel) + 0.5, grid.full_size, jitter);
+    vec3 scene_pos = transform(gbufferModelViewInverse, view_pos);
     vec4 gbuf0 = texelFetch(colortex1, full_texel, 0);
-    vec3 world_normal = decode_unit_vector(unpack_unorm_2x8(gbuf0.z));
+    vec2 normal_oct = unpack_unorm_2x8(gbuf0.z);
+    vec3 world_normal = decode_unit_vector(normal_oct);
+    uint material = uint(round(255.0 * unpack_unorm_2x8(gbuf0.y).y));
     float receiver_skylight = unpack_unorm_2x8(gbuf0.w).y;
 
-#if defined NORMAL_MAPPING
-    vec4 gbuf1 = texelFetch(colortex2, full_texel, 0);
-    vec3 mapped_normal = decode_unit_vector(gbuf1.xy);
-#else
-    vec3 mapped_normal = world_normal;
-#endif
-
-    // Convert the framebuffer UV back to projection UV before inverting the
-    // (jittered, TAAU-scaled) projection.
-    vec3 screen_pos = vec3(taau_projection_uv(uv), depth);
-    vec3 view_pos = screen_to_view_space(screen_pos, true);
-    vec3 scene_pos = view_to_scene_space(view_pos);
+    bool valid_position = rtgi_finite(vec4(scene_pos, view_pos.z)) && view_pos.z < 0.0;
+    vec3 voxel_pos = scene_to_voxel_space(scene_pos);
+    if (!valid_position || any(lessThan(voxel_pos, vec3(0.0)))
+        || any(greaterThanEqual(voxel_pos, rt_voxel_size_f))) {
+        uvec4 guide = rtgi_pack_guide(full_texel, 0.0, normal_oct, material,
+                                      rtgi_world, 0u);
+        store_trace(texel, vec4(0.0), guide, vec4(0.0));
+        return;
+    }
 
     // Spatio-temporal blue-noise dither: wrap frameCounter to preserve fp32
     // mantissa precision across multi-hour play sessions.
@@ -134,47 +125,20 @@ void main() {
     );
     dither = r2(frame_wrapped, dither);
 
-    // Fast-path for distant surfaces outside the voxel volume: evaluate sky dome
-    // directly in 0 DDA steps instead of marching backward into the player's local grid.
-    if (!rt_voxel_contains_world(scene_pos + cameraPosition)) {
-        vec3 sky_dir = sample_cosine_hemisphere(mapped_normal, dither);
-        if (dot(sky_dir, world_normal) <= 0.0) {
-            sky_dir = reflect(sky_dir, world_normal);
-        }
-#if defined WORLD_OVERWORLD
-        float sky_vis = smoothstep(0.02, 0.25, receiver_skylight) * receiver_skylight;
-#else
-        const float sky_vis = 1.0;
-#endif
-        vec3 far_sky_rad = texture(colortex4, project_sky(sky_dir)).rgb * sky_vis;
-        imageStore(rtgi_raw_img, texel, vec4(far_sky_rad, 32.0 / 34.0));
-        imageStore(rtgi_state_img, texel, pt_state_pack(PT_RESET_NONE, 0.0, 1.0, 0.0));
-#if GI_DEBUG == GI_DEBUG_HIT
-        imageStore(rtgi_hit_img, texel, vec4(0.0, 0.0, float(sky_vis > 0.0), 1.0));
-#endif
-        return;
-    }
-
     // Direct sun/moon color encoded in colortex4 column 191
     vec3 direct_light_col = texelFetch(colortex4, ivec2(191, 0), 0).rgb;
 
-#ifndef RTGI_RAY_COUNT
-#define RTGI_RAY_COUNT 2
-#endif
-
-    vec4 accum_radiance = vec4(0.0);
-    float valid_paths = 0.0;
-
-#if GI_DEBUG == GI_DEBUG_HIT
-    vec3 hit_counts = vec3(0.0);
-#endif
+    vec3 accum_radiance = vec3(0.0);
+    float hit_distance_sum = 0.0;
+    uint hit_count = 0u;
+    uint sky_count = 0u;
+    bool valid_batch = true;
 
     for (int r = 0; r < RTGI_RAY_COUNT; ++r) {
         int hit_source = RTGI_HIT_NONE;
         vec4 radiance = evaluate_path_trace(
             scene_pos,
             world_normal,
-            mapped_normal,
             dither,
             receiver_skylight,
             voxel_sampler,
@@ -185,47 +149,29 @@ void main() {
             hit_source
         );
 
-#if GI_DEBUG == GI_DEBUG_HIT
-        if (hit_source == RTGI_HIT_VOXEL) {
-            hit_counts.g += 1.0;
-        } else if (hit_source == RTGI_HIT_SKY) {
-            hit_counts.b += 1.0;
-        }
-#endif
-
-        // Firefly suppression
         float lum = dot(radiance.rgb, luminance_weights);
-#ifndef RTGI_MAX_RADIANCE
-#define RTGI_MAX_RADIANCE 24.0
-#endif
-        if (lum > RTGI_MAX_RADIANCE) {
-            radiance.rgb *= RTGI_MAX_RADIANCE / lum;
+        if (!rtgi_finite(radiance) || isinf(lum) || any(lessThan(radiance.rgb, vec3(0.0)))) {
+            valid_batch = false;
+            break;
         }
+        // Keep the existing user-configured cap before conversion to FP16.
+        accum_radiance += radiance.rgb * min(1.0, RTGI_MAX_RADIANCE / max(lum, eps));
 
-        // Exclude non-finite radiance
-        bool path_valid = all(equal(radiance, radiance))
-            && all(greaterThanEqual(radiance.rgb, vec3(0.0)));
-
-        if (path_valid) {
-            valid_paths += 1.0;
-            accum_radiance += radiance;
+        if (hit_source == RTGI_HIT_VOXEL) {
+            hit_distance_sum += radiance.a;
+            ++hit_count;
+        } else if (hit_source == RTGI_HIT_SKY) {
+            ++sky_count;
         }
     }
 
-    // Divide by valid contributing paths
-    float path_divisor = max(valid_paths, 1.0);
-    vec4 final_radiance = accum_radiance * (1.0 / path_divisor);
-    final_radiance.a = clamp01(final_radiance.a);
-    float valid_path_fraction = valid_paths / float(RTGI_RAY_COUNT);
-
-    imageStore(rtgi_raw_img, texel, final_radiance);
-    imageStore(
-        rtgi_state_img,
-        texel,
-        pt_state_pack(PT_RESET_NONE, 0.0, valid_path_fraction, 0.0)
-    );
-
-#if GI_DEBUG == GI_DEBUG_HIT
-    imageStore(rtgi_hit_img, texel, vec4(hit_counts / float(RTGI_RAY_COUNT), 1.0));
-#endif
+    float hit_distance = hit_count > 0u ? hit_distance_sum / float(hit_count) : -1.0;
+    uint flags = rtgi_guide_covered | (valid_batch ? rtgi_guide_raw_valid : 0u);
+    uvec4 guide = rtgi_pack_guide(full_texel, -view_pos.z, normal_oct, material,
+                                 rtgi_world, flags);
+    vec4 raw = valid_batch ? vec4(accum_radiance / float(RTGI_RAY_COUNT), hit_distance)
+                           : vec4(0.0, 0.0, 0.0, -2.0);
+    vec4 hits = valid_batch ? vec4(0.0, vec2(hit_count, sky_count) / float(RTGI_RAY_COUNT), 1.0)
+                            : vec4(1.0, 0.0, 0.0, 1.0);
+    store_trace(texel, raw, guide, hits);
 }

@@ -4,6 +4,7 @@
 #include "/include/utility/color.glsl"
 #include "/include/lighting/voxel/voxel_storage.glsl"
 #include "/include/lighting/rt/pt_state.glsl"
+#include "/include/lighting/rt/rtgi_surface.glsl"
 
 // GI debug view encoding
 const vec3 gi_debug_palette[16] = vec3[16](
@@ -28,10 +29,11 @@ vec3 gi_debug_tonemap(vec3 radiance) {
 
 #if GI_DEBUG == GI_DEBUG_COVERAGE
 // Voxel volume coverage: red = populated voxel, dark red = inside bounds, magenta = outside volume
-vec3 gi_debug_coverage(vec3 world_pos) {
-    if (!rt_voxel_contains_world(world_pos)) return vec3(0.6, 0.0, 0.6);
-
-    vec3 local = world_pos - rt_voxel_origin_world();
+vec3 gi_debug_coverage(vec3 scene_pos) {
+    vec3 local = scene_to_voxel_space(scene_pos);
+    if (any(lessThan(local, vec3(0.0))) || any(greaterThanEqual(local, rt_voxel_size_f))) {
+        return vec3(0.6, 0.0, 0.6);
+    }
     ivec3 coord = ivec3(local);
 
     uint packed_val = texelFetch(voxel_sampler, coord, 0).r;
@@ -81,7 +83,7 @@ vec3 gi_debug_voxel_albedo(uint packed_val) {
     return srgb_eotf(voxel.color);
 }
 
-// Ray hit source: R = screen-space, G = voxel DDA, B = sky
+// Ray hit source: R = invalid observation, G = opaque hit, B = modeled sky.
 vec3 gi_debug_hit_mask(vec4 hit) {
     float total = hit.r + hit.g + hit.b;
     if (total <= 0.0) {
@@ -182,15 +184,14 @@ vec3 gi_debug_view(ivec2 texel, vec2 uv, vec3 fallback) {
 #elif GI_DEBUG == GI_DEBUG_FILTERED
     return gi_debug_tonemap(texture(rtgi_filtered_sampler, rtgi_uv).rgb);
 #elif GI_DEBUG == GI_DEBUG_VARIANCE
-    ivec2 var_size = textureSize(rtgi_sky_accum_sampler, 0);
-    ivec2 var_texel = clamp(ivec2(rtgi_uv * vec2(var_size)), ivec2(0), var_size - 1);
-    vec4 aux_sample = ping ? texelFetch(rtgi_sky_accum_sampler, var_texel, 0)
-                           : texelFetch(rtgi_sky_history_sampler, var_texel, 0);
+    ivec2 var_size = rtgi_active_size(textureSize(rtgi_stats_even_sampler, 0));
+    ivec2 var_texel = clamp(ivec2(uv * vec2(var_size)), ivec2(0), var_size - 1);
+    vec4 stats = ping ? texelFetch(rtgi_stats_even_sampler, var_texel, 0)
+                      : texelFetch(rtgi_stats_odd_sampler, var_texel, 0);
     vec4 accum_sample = ping ? texelFetch(rtgi_accum_sampler, var_texel, 0)
                              : texelFetch(rtgi_history_sampler, var_texel, 0);
     float m1 = dot(accum_sample.rgb, luminance_weights);
-    float m2 = aux_sample.r;
-    float variance = max(0.0, m2 - m1 * m1);
+    float variance = rtgi_mean_variance(stats);
     float rel_std_dev = sqrt(variance) / (m1 + 0.05);
     vec3 col_blue = vec3(0.0, 0.25, 0.95);
     vec3 col_green = vec3(0.1, 0.85, 0.25);
@@ -202,58 +203,52 @@ vec3 gi_debug_view(ivec2 texel, vec2 uv, vec3 fallback) {
                    : mix(col_yellow, col_red, (t_var - 0.66) * 3.0);
     return var_color;
 #elif GI_DEBUG == GI_DEBUG_SPP
-    // Accumulated samples per pixel (0..RTGI_SPP_CAP), point-sampled to preserve packed integer code.
-    ivec2 spp_size = textureSize(rtgi_sky_accum_sampler, 0);
-    ivec2 spp_texel = clamp(ivec2(rtgi_uv * vec2(spp_size)), ivec2(0), spp_size - 1);
-    vec4 spp_aux = ping ? texelFetch(rtgi_sky_accum_sampler, spp_texel, 0)
-                        : texelFetch(rtgi_sky_history_sampler, spp_texel, 0);
-    float spp = unpack_hit_count(spp_aux.g).y;
+    ivec2 spp_size = rtgi_active_size(textureSize(rtgi_stats_even_sampler, 0));
+    ivec2 spp_texel = clamp(ivec2(uv * vec2(spp_size)), ivec2(0), spp_size - 1);
+    vec4 stats = ping ? texelFetch(rtgi_stats_even_sampler, spp_texel, 0)
+                      : texelFetch(rtgi_stats_odd_sampler, spp_texel, 0);
+    float spp = stats.z * float(RTGI_RAY_COUNT);
     float spp_t = clamp01(spp / max(float(RTGI_SPP_CAP), 1.0));
     return mix(vec3(0.0, 0.15, 0.45), vec3(1.0, 0.85, 0.20), spp_t);
 #elif GI_DEBUG == GI_DEBUG_RESET
     // Temporal reset reason visualization.
-    ivec2 state_size = textureSize(rtgi_state_sampler, 0);
+    ivec2 state_size = rtgi_active_size(textureSize(rtgi_state_sampler, 0));
     ivec2 state_texel = clamp(
-        ivec2(rtgi_uv * vec2(state_size)),
+        ivec2(uv * vec2(state_size)),
         ivec2(0),
         state_size - 1
     );
     vec4 state_sample = texelFetch(rtgi_state_sampler, state_texel, 0);
-    float reason = pt_state_reset(state_sample);
-    if (reason < 0.5) {
-        return vec3(0.05, 0.10, 0.15);          // NONE: history kept
-    } else if (reason < 1.5) {
-        return vec3(0.20, 0.20, 0.20);          // NO_SURFACE: sky / outside
-    } else if (reason < 2.5) {
-        return vec3(0.60, 0.00, 0.80);          // OFFSCREEN
-    } else if (reason < 3.5) {
-        return vec3(0.95, 0.10, 0.10);          // DEPTH disocclusion
-    } else if (reason < 4.5) {
-        return vec3(0.95, 0.55, 0.05);          // NORMAL disocclusion
-    } else if (reason < 5.5) {
-        return vec3(0.10, 0.55, 0.95);          // CAMERA moved
-    } else if (reason < 6.5) {
-        return vec3(0.10, 0.90, 0.60);          // PROJECTION changed
-    } else if (reason < 7.5) {
-        return vec3(1.00, 0.00, 1.00);          // NON_FINITE guard tripped
-    } else if (reason < 8.5) {
-        return vec3(0.85, 0.85, 0.85);          // FIRST: no usable history
-    } else if (reason < 9.5) {
-        return vec3(1.00, 0.65, 0.00);          // ADAPTIVE: stale history
+    float reason = state_sample.r;
+    if (reason == rtgi_reset_none) {
+        return vec3(0.05, 0.10, 0.15);
+    } else if (reason == rtgi_reset_sky) {
+        return vec3(0.20, 0.20, 0.20);
+    } else if (reason == rtgi_reset_offscreen) {
+        return vec3(0.60, 0.00, 0.80);
+    } else if (reason == rtgi_reset_geometry) {
+        return vec3(0.95, 0.10, 0.10);
+    } else if (reason == rtgi_reset_hand) {
+        return vec3(0.10, 0.55, 0.95);
+    } else if (reason == rtgi_reset_coverage) {
+        return vec3(0.10, 0.90, 0.60);
+    } else if (reason == rtgi_reset_invalid) {
+        return vec3(1.00, 0.00, 1.00);
+    } else if (reason == rtgi_reset_first) {
+        return vec3(0.85, 0.85, 0.85);
     }
-    return vec3(0.00, 0.70, 0.65);              // SPATIAL: fallback gather
+    return vec3(1.00, 0.65, 0.00); // Adaptive change
 #elif GI_DEBUG == GI_DEBUG_BYPASS
-    // Filter convergence & hit-distance guide debug visualization.
-    ivec2 bp_size = textureSize(rtgi_sky_accum_sampler, 0);
-    ivec2 bp_texel = clamp(ivec2(rtgi_uv * vec2(bp_size)), ivec2(0), bp_size - 1);
-    vec4 bp_aux = ping ? texelFetch(rtgi_sky_accum_sampler, bp_texel, 0)
-                       : texelFetch(rtgi_sky_history_sampler, bp_texel, 0);
+    // Filter convergence and estimated error of the temporal mean.
+    ivec2 bp_size = rtgi_active_size(textureSize(rtgi_stats_even_sampler, 0));
+    ivec2 bp_texel = clamp(ivec2(uv * vec2(bp_size)), ivec2(0), bp_size - 1);
+    vec4 stats = ping ? texelFetch(rtgi_stats_even_sampler, bp_texel, 0)
+                      : texelFetch(rtgi_stats_odd_sampler, bp_texel, 0);
     vec4 bp_accum = ping ? texelFetch(rtgi_accum_sampler, bp_texel, 0)
                          : texelFetch(rtgi_history_sampler, bp_texel, 0);
-    float bp_count = unpack_hit_count(bp_aux.g).y;
+    float bp_count = stats.z * float(RTGI_RAY_COUNT);
     float bp_m1 = dot(bp_accum.rgb, luminance_weights);
-    float bp_var = max(0.0, bp_aux.r - bp_m1 * bp_m1);
-    float bp_se = sqrt(bp_var / max(bp_count, 1.0)) / (bp_m1 + 0.02);
+    float bp_se = sqrt(rtgi_mean_variance(stats)) / (bp_m1 + 0.02);
     float bp_count_ramp
         = smoothstep(float(RTGI_SPP_CAP) * 0.25, float(RTGI_SPP_CAP), bp_count);
     float bp_se_gate = 1.0 - smoothstep(0.05, 0.15, bp_se);
@@ -267,9 +262,9 @@ vec3 gi_debug_view(ivec2 texel, vec2 uv, vec3 fallback) {
         vec4(gi_debug_smooth_3x3(rtgi_hit_sampler, rtgi_uv), 1.0)
     );
 #elif GI_DEBUG == GI_DEBUG_REJECT
-    return gi_debug_reject_mask(
-        vec4(gi_debug_smooth_3x3(rtgi_reject_sampler, rtgi_uv), 1.0)
-    );
+    ivec2 reject_size = rtgi_active_size(textureSize(rtgi_reject_sampler, 0));
+    ivec2 reject_texel = clamp(ivec2(uv * vec2(reject_size)), ivec2(0), reject_size - 1);
+    return gi_debug_reject_mask(texelFetch(rtgi_reject_sampler, reject_texel, 0));
 #else
     // Voxel views: reconstruct the opaque surface position and read the voxel.
     ivec2 depth_texel = ivec2(taau_framebuffer_uv(uv) * view_res);
@@ -294,7 +289,7 @@ vec3 gi_debug_view(ivec2 texel, vec2 uv, vec3 fallback) {
     vec3 scene_pos = view_to_scene_space(view_pos) - scene_normal * 0.12;
 
 #if GI_DEBUG == GI_DEBUG_COVERAGE
-    return gi_debug_coverage(scene_pos + cameraPosition);
+    return gi_debug_coverage(scene_pos);
 #endif
 
     ivec3 voxel_coord = ivec3(floor(scene_to_voxel_space(scene_pos)));

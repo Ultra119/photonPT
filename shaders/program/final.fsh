@@ -89,8 +89,8 @@ uniform sampler2D rtgi_hit_sampler;
 uniform sampler2D rtgi_reject_sampler;
 #endif
 #if GI_DEBUG == GI_DEBUG_VARIANCE || GI_DEBUG == GI_DEBUG_SPP || GI_DEBUG == GI_DEBUG_BYPASS
-uniform sampler2D rtgi_sky_accum_sampler;
-uniform sampler2D rtgi_sky_history_sampler;
+uniform sampler2D rtgi_stats_even_sampler;
+uniform sampler2D rtgi_stats_odd_sampler;
 #endif
 #if GI_DEBUG == GI_DEBUG_RESET
 uniform sampler2D rtgi_state_sampler;

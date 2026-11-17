@@ -16,12 +16,10 @@
 #if defined PROGRAM_DEFERRED4
 #define DIFFUSE_USE_RTGI
 uniform sampler2D rtgi_filtered_sampler;
-uniform sampler2D rtgi_sky_accum_sampler;
-uniform sampler2D rtgi_sky_history_sampler;
-#include "/include/utility/encoding.glsl"
-#include "/include/utility/space_conversion.glsl"
+uniform usampler2D rtgi_guide_even_sampler;
+uniform usampler2D rtgi_guide_odd_sampler;
+#include "/include/lighting/rt/rtgi_surface.glsl"
 #include "/include/lighting/voxel/voxel_constants.glsl"
-#include "/include/lighting/rt/pt_state.glsl"
 #endif
 
 const float sss_density = 14.0;
@@ -83,95 +81,139 @@ vec3 sss_approx(
 #endif
 
 #ifdef DIFFUSE_USE_RTGI
-// Joint bilateral upsample of the RTGI buffer.
-vec4 sample_rtgi_smooth(
-    sampler2D rtgi_sampler,
-    vec2 coord,
-    float center_linear_depth,
-    vec3 center_world_normal,
-    float cos_slope
+vec3 rtgi_fallback_radiance(vec2 light_levels) {
+    // Reuse the underlying lightmap falloff only where traced diffuse has no
+    // compatible support. Keep the fallback deterministic and in E/pi units.
+    float blocklight = light_levels.x;
+    float falloff = pow8(blocklight) + 0.18 * sqr(blocklight) + 0.16 * dampen(blocklight);
+    vec3 block = (rcp_pi * blocklight_scale * falloff) * blocklight_color;
+
+#if defined WORLD_OVERWORLD
+    vec3 environment = ambient_color * (rcp_pi * SKYLIGHT_I * sqr(light_levels.y));
+#elif defined WORLD_NETHER
+    vec3 environment = ambient_color;
+#else
+    vec3 environment = 0.1 * ambient_color;
+#endif
+    return block + environment;
+}
+
+float rtgi_upsample_weight(
+    ivec2 tap, RtgiGrid grid, vec2 jitter, bool even, vec3 view_pos,
+    vec3 normal, uint material, float footprint, float max_chord
 ) {
-    ivec2 gi_res = textureSize(rtgi_sampler, 0);
-    ivec2 active_gi_res = max(ivec2(1), ivec2(vec2(gi_res) * taau_render_scale));
-    ivec2 depth_res = textureSize(depthtex1, 0);
-    ivec2 active_depth_res = max(ivec2(1), ivec2(vec2(depth_res) * taau_render_scale));
+    if (!rtgi_in_bounds(tap, grid.gi_active)) {
+        return 0.0;
+    }
+
+    uvec4 guide = even ? texelFetch(rtgi_guide_even_sampler, tap, 0)
+                       : texelFetch(rtgi_guide_odd_sampler, tap, 0);
+    vec3 tap_view;
+    if (!rtgi_guide_matches(guide, material)
+        || !rtgi_view_from_guide(guide, grid.full_size, jitter, gbufferProjection, tap_view)) {
+        return 0.0;
+    }
+    vec3 tap_normal = mat3(gbufferModelView) * rtgi_guide_normal(guide);
+    return rtgi_geometry_weight(tap_view - view_pos, normal, tap_normal, footprint, max_chord);
+}
+
+vec3 sample_rtgi_diffuse(
+    ivec2 pixel, ivec2 full_size, vec3 view_pos, vec3 scene_pos,
+    vec3 flat_normal, uint material, uint kind, vec2 light_levels
+) {
+    vec3 fallback = rtgi_fallback_radiance(light_levels);
+    if (kind != rtgi_world || !rtgi_finite(vec4(scene_pos, view_pos.z)) || view_pos.z >= 0.0) {
+        return fallback;
+    }
+
+    vec3 local = scene_to_voxel_space(scene_pos);
+    vec3 edge = min(local, rt_voxel_size_f - local);
+    float coverage = smoothstep(0.0, 4.0, min(edge.x, min(edge.y, edge.z)));
+    RtgiGrid grid = rtgi_grid(full_size, textureSize(rtgi_filtered_sampler, 0));
+    if (coverage <= 0.0 || !rtgi_in_bounds(pixel, grid.full_active)
+        || any(equal(grid.gi_active, ivec2(0)))) {
+        return fallback;
+    }
+
+    vec2 jitter = rtgi_raster_jitter(taa_offset, full_size);
+    vec3 normal = mat3(gbufferModelView) * flat_normal;
+    float footprint = rtgi_view_footprint(-view_pos.z, grid.gi_active, gbufferProjection);
+    float grazing = max(abs(dot(normal, normalize(view_pos))), 0.15);
+    float max_chord = min(1.5, 0.05 + 2.0 * footprint / grazing);
+    bool even = (frameCounter & 1) == 0;
 
 #if RTGI_RESOLUTION == 2
-    // 1:1 -- there is nothing to upsample.
-    return texelFetch(
-        rtgi_sampler,
-        clamp(ivec2(coord * vec2(gi_res)), ivec2(0), active_gi_res - 1),
-        0
-    );
+    float weight = rtgi_upsample_weight(pixel, grid, jitter, even, view_pos,
+                                        normal, material, footprint, max_chord);
+    if (weight > 0.0) {
+        vec4 sample_value = texelFetch(rtgi_filtered_sampler, pixel, 0);
+        if (sample_value.a >= 0.0) {
+            return mix(fallback, sample_value.rgb, coverage);
+        }
+    }
 #else
-    // The GI buffers are ping-ponged by the temporal pass; read the half that
-    // was written this frame.
-    bool ping = (frameCounter & 1) == 0;
+    vec2 center = vec2(pixel) + 0.5;
+    ivec2 base;
+    vec2 fraction;
+    rtgi_footprint(center, grid, base, fraction);
 
-    vec2 texel_size = 1.0 / vec2(gi_res);
-    vec2 pos = coord * vec2(gi_res) - 0.5;
-    ivec2 base = ivec2(floor(pos));
-    vec2 f = pos - floor(pos);
-
-    float sigma_z = max(0.03 * center_linear_depth, 0.04) / max(cos_slope, 0.15);
-
-    vec4 sum = vec4(0.0);
+    vec3 sum = vec3(0.0);
     float sum_weight = 0.0;
-
-    for (int j = 0; j <= 1; ++j) {
-        for (int i = 0; i <= 1; ++i) {
-            ivec2 t = clamp(base + ivec2(i, j), ivec2(0), active_gi_res - 1);
-
-            float bilinear = (i == 0 ? 1.0 - f.x : f.x)
-                           * (j == 0 ? 1.0 - f.y : f.y);
-
-            vec2 t_uv = (vec2(t) + 0.5) * texel_size;
-            ivec2 t_px = ivec2(clamp(t_uv * view_res, vec2(0.0),
-                                     vec2(active_depth_res) - 1.0));
-            float t_depth = linearize_depth(texelFetch(depthtex1, t_px, 0).x);
-            float weight_depth
-                = exp(-abs(t_depth - center_linear_depth) / sigma_z);
-
-            vec4 t_aux = ping ? texelFetch(rtgi_sky_accum_sampler, t, 0)
-                              : texelFetch(rtgi_sky_history_sampler, t, 0);
-            float weight_normal = pow(
-                max(0.0, dot(unpack_oct_normal_f16(t_aux.b),
-                             center_world_normal)),
-                32.0
-            );
-
-            float weight = bilinear * weight_depth * weight_normal;
-            sum += texelFetch(rtgi_sampler, t, 0) * weight;
-            sum_weight += weight;
+    for (int y = 0; y <= 1; ++y) {
+        for (int x = 0; x <= 1; ++x) {
+            ivec2 offset = ivec2(x, y);
+            ivec2 tap = base + offset;
+            float weight = rtgi_bilinear_weight(offset, fraction);
+            if (weight <= 0.0) {
+                continue;
+            }
+            weight *= rtgi_upsample_weight(tap, grid, jitter, even, view_pos,
+                                           normal, material, footprint, max_chord);
+            if (weight > 0.0) {
+                vec4 sample_value = texelFetch(rtgi_filtered_sampler, tap, 0);
+                if (sample_value.a >= 0.0) {
+                    sum += weight * sample_value.rgb;
+                    sum_weight += weight;
+                }
+            }
         }
     }
-
     if (sum_weight > 1e-4) {
-        return sum / sum_weight;
+        return mix(fallback, sum / sum_weight, coverage);
     }
 
-    const ivec2 fallback_offsets[8] = ivec2[8](
-        ivec2(-1, 0), ivec2(2, 0), ivec2(0, -1), ivec2(0, 2),
-        ivec2(-1, -1), ivec2(2, -1), ivec2(-1, 2), ivec2(2, 2)
-    );
-    for (int k = 0; k < 8; ++k) {
-        ivec2 t = clamp(base + fallback_offsets[k], ivec2(0), active_gi_res - 1);
-        vec2 t_uv = (vec2(t) + 0.5) * texel_size;
-        ivec2 t_px = ivec2(clamp(t_uv * view_res, vec2(0.0), vec2(active_depth_res) - 1.0));
-        float t_depth = linearize_depth(texelFetch(depthtex1, t_px, 0).x);
-        vec4 t_aux = ping ? texelFetch(rtgi_sky_accum_sampler, t, 0)
-                          : texelFetch(rtgi_sky_history_sampler, t, 0);
-        float weight_normal = pow(
-            max(0.0, dot(unpack_oct_normal_f16(t_aux.b), center_world_normal)),
-            32.0
-        );
-        if (abs(t_depth - center_linear_depth) < 2.0 * sigma_z && weight_normal > 0.1) {
-            return texelFetch(rtgi_sampler, t, 0);
+    // A thin receiver may have no compatible anchor in the primary four.
+    // Try the nearby independent anchors with the same plane and chord gates.
+    ivec2 cell = rtgi_cell(pixel, grid);
+    vec3 nearest = fallback;
+    float best_score = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            ivec2 tap = cell + ivec2(x, y);
+            ivec2 offset = tap - base;
+            if (all(greaterThanEqual(offset, ivec2(0))) && all(lessThanEqual(offset, ivec2(1)))
+                && rtgi_bilinear_weight(offset, fraction) > 0.0) {
+                continue;
+            }
+            float weight = rtgi_upsample_weight(tap, grid, jitter, even, view_pos,
+                                                normal, material, footprint, max_chord);
+            if (weight <= 0.0) {
+                continue;
+            }
+            vec2 delta = vec2(rtgi_anchor(tap, grid) - pixel);
+            float score = weight / (1.0 + dot(delta, delta));
+            if (score > best_score) {
+                vec4 sample_value = texelFetch(rtgi_filtered_sampler, tap, 0);
+                if (sample_value.a >= 0.0) {
+                    nearest = sample_value.rgb;
+                    best_score = score;
+                }
+            }
         }
     }
-
-    return textureLod(rtgi_sampler, coord, 0.0);
+    return mix(fallback, nearest, coverage);
 #endif
+    return fallback;
 }
 #endif
 
@@ -194,19 +236,17 @@ vec3 get_diffuse_lighting(
     float NoV,
     float NoH,
     float LoV,
-    out vec3 direct_diffuse
+    vec3 indirect_radiance
 ) {
 #if defined PROGRAM_GBUFFERS_WATER
     // Small optimization, don't calculate diffuse lighting when albedo is 0 (eg
     // water)
     if (max_of(material.albedo) < eps) {
-        direct_diffuse = vec3(0.0);
         return vec3(0.0);
     }
 #endif
 
     vec3 direct_lighting = vec3(0.0);
-    vec3 indirect_lighting = vec3(0.0);
 
     // Arbitrary directional shading to make faces easier to distinguish
     float directional_lighting
@@ -276,27 +316,6 @@ vec3 get_diffuse_lighting(
 #endif
 #endif
 
-    // Indirect lighting (RTGI)
-#if defined DIFFUSE_USE_RTGI
-    vec2 rtgi_coord = taau_framebuffer_uv(uv);
-    ivec2 depth_px = ivec2(clamp(rtgi_coord * view_res, vec2(0.0),
-                                 vec2(textureSize(depthtex1, 0)) - 1.0));
-    float geom_cos_slope = abs(dot(flat_normal, normalize(-scene_pos + vec3(1e-6))));
-    vec4 rtgi_sample = sample_rtgi_smooth(
-        rtgi_filtered_sampler,
-        rtgi_coord,
-        linearize_depth(texelFetch(depthtex1, depth_px, 0).x),
-        flat_normal,
-        geom_cos_slope
-    );
-    // RTGI stores mean incoming radiance; convert to irradiance for the
-    // shared (albedo / pi) diffuse composition below.
-    indirect_lighting = rtgi_sample.rgb * (pi * (RTGI_INTENSITY * RTGI_BRIGHTNESS));
-
-#else
-    indirect_lighting = vec3(0.0);
-#endif
-
     direct_lighting += material.emission * emission_scale;
 
 #if defined WORLD_OVERWORLD
@@ -307,16 +326,13 @@ vec3 get_diffuse_lighting(
     direct_lighting += nightVision * night_vision_scale * directional_lighting * ao;
 #endif
 
-    direct_diffuse = max0(direct_lighting) * material.albedo * rcp_pi
-        * mix(1.0, metal_diffuse_amount, float(material.is_metal));
-    direct_diffuse = conserve_diffuse_energy(direct_diffuse, material.f0, NoV);
-
-    vec3 final_diffuse = max0(direct_lighting + indirect_lighting) * material.albedo * rcp_pi
-        * mix(1.0, metal_diffuse_amount, float(material.is_metal));
+    // The raster term is irradiance, and RTGI already includes the diffuse 1/pi.
+    vec3 final_diffuse = (max0(direct_lighting) * rcp_pi + indirect_radiance)
+        * material.albedo * mix(1.0, metal_diffuse_amount, float(material.is_metal));
     return conserve_diffuse_energy(final_diffuse, material.f0, NoV);
 }
 
-// 14-parameter overload for callers that do not require direct_diffuse
+// Forward callers have no opaque RTGI receiver.
 vec3 get_diffuse_lighting(
     Material material,
     vec3 scene_pos,
@@ -336,7 +352,6 @@ vec3 get_diffuse_lighting(
     float NoH,
     float LoV
 ) {
-    vec3 direct_diffuse;
     return get_diffuse_lighting(
         material,
         scene_pos,
@@ -355,7 +370,7 @@ vec3 get_diffuse_lighting(
         NoV,
         NoH,
         LoV,
-        direct_diffuse
+        vec3(0.0)
     );
 }
 

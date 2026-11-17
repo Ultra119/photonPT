@@ -4,6 +4,8 @@
 // global.glsl included by parent program
 #include "/include/utility/fast_math.glsl"
 
+uniform vec3 cameraPositionFract;
+
 // Single-volume fine voxel grid layout: 1 block per voxel.
 #ifndef RT_CLIPMAP_SIZE
 #define RT_CLIPMAP_SIZE 256
@@ -33,24 +35,16 @@ const uint VOXEL_SHAPE_GLASS         = 6u; // Transparent full cube
 const uint VOXEL_SHAPE_OTHER         = 7u; // Non-standard shape
 const uint VOXEL_SHAPE_COVER         = 8u; // Thin covers (carpets, pressure plates, snow)
 
-// Grid-snapped world-space origin (1 block per voxel)
-vec3 rt_voxel_origin_world() {
-    return floor(cameraPosition - rt_voxel_size_f * 0.5);
-}
-
+// Grid-snapped origin in camera-relative space (1 block per voxel).
 vec3 rt_voxel_origin_scene() {
-    return rt_voxel_origin_world() - cameraPosition;
-}
-
-bool rt_voxel_contains_world(vec3 world_pos) {
-    vec3 local = world_pos - rt_voxel_origin_world();
-    return all(greaterThanEqual(local, vec3(0.0)))
-        && all(lessThan(local, rt_voxel_size_f));
+    vec3 fractional_camera = cameraPositionFract == vec3(0.0)
+        ? fract(cameraPosition) : cameraPositionFract;
+    return -0.5 * rt_voxel_size_f - fractional_camera;
 }
 
 // Voxel space conversions: 1 block per voxel
 vec3 scene_to_voxel_space(vec3 scene_pos) {
-    return (scene_pos + cameraPosition - rt_voxel_origin_world());
+    return scene_pos - rt_voxel_origin_scene();
 }
 
 vec3 voxel_to_scene_space(vec3 voxel_pos) {

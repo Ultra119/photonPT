@@ -1,8 +1,4 @@
-// ReBLUR-Style Self-Stabilizing World-Space Tangent-Plane GI Denoiser
-//   Pass 1 (deferred3_a): Dense 3x3 bilateral pre-stabilizer + Karis outlier dampening + pooled SE
-//   Pass 2 (deferred3_b): Self-stabilizing recurrent writeback + wide tangent-plane rotated Poisson disk
-//   Pass 3 (deferred3_c): Medium tangent-plane rotated Poisson disk (decorrelated angle)
-//   Pass 4 (deferred3_d): Dense 5x5 stride-1 bilateral polish (erases disk rotation grain)
+// Display-only RTGI reconstruction. Temporal history is read-only here.
 
 #include "/include/global.glsl"
 
@@ -19,396 +15,212 @@ layout(local_size_x = 8, local_size_y = 8) in;
 #define RTGI_FILTER_PASS 1
 #endif
 
-#if RTGI_FILTER_PASS == 1
+#if RTGI_FILTER_PASS == 1 || RTGI_FILTER_PASS == 3
 layout(rgba16f) writeonly uniform image2D rtgi_filter_inter_img;
+#define filter_output rtgi_filter_inter_img
+#else
+layout(rgba16f) writeonly uniform image2D rtgi_filtered_img;
+#define filter_output rtgi_filtered_img
+#endif
+
+#if RTGI_FILTER_PASS == 1
 uniform sampler2D rtgi_accum_sampler;
 uniform sampler2D rtgi_history_sampler;
-#elif RTGI_FILTER_PASS == 2
-layout(rgba16f) writeonly uniform image2D rtgi_filtered_img;
-layout(rgba16f) uniform image2D rtgi_accum_img;
-layout(rgba16f) uniform image2D rtgi_history_img;
-uniform sampler2D rtgi_filter_inter_sampler;
+uniform sampler2D rtgi_stats_even_sampler;
+uniform sampler2D rtgi_stats_odd_sampler;
 #elif RTGI_FILTER_PASS == 3
-layout(rgba16f) writeonly uniform image2D rtgi_filter_inter_img;
 uniform sampler2D rtgi_filtered_sampler;
 #else
-layout(rgba16f) writeonly uniform image2D rtgi_filtered_img;
 uniform sampler2D rtgi_filter_inter_sampler;
 #endif
 
-uniform sampler2D rtgi_sky_accum_sampler;
-uniform sampler2D rtgi_sky_history_sampler;
-uniform sampler2D depthtex1;
-uniform sampler2D colortex1; // gbuffer0
-uniform sampler2D noisetex;
+uniform usampler2D rtgi_frame_state_sampler;
+uniform usampler2D rtgi_guide_even_sampler;
+uniform usampler2D rtgi_guide_odd_sampler;
 
 uniform mat4 gbufferModelView;
-uniform mat4 gbufferModelViewInverse;
 uniform mat4 gbufferProjection;
-uniform mat4 gbufferProjectionInverse;
-
-uniform vec3 cameraPosition;
 uniform int frameCounter;
 
-uniform vec2 view_res;
-uniform vec2 view_pixel_size;
-
-uniform float near;
-uniform float far;
-uniform vec2 taa_offset;
-
-#include "/include/utility/encoding.glsl"
-#include "/include/utility/geometry.glsl"
-#include "/include/utility/space_conversion.glsl"
-#include "/include/utility/color.glsl"
+#include "/include/lighting/rt/rtgi_surface.glsl"
 #include "/include/lighting/rt/pt_state.glsl"
+#include "/include/utility/color.glsl"
+#include "/include/utility/geometry.glsl"
 
+const vec4 no_filter_sample = vec4(0.0, 0.0, 0.0, -1.0);
+
+vec4 read_filter_input(ivec2 texel, bool even, out float age) {
 #if RTGI_FILTER_PASS == 1
-vec4 sample_accum_data(ivec2 t, bool ping) {
-    return ping ? texelFetch(rtgi_accum_sampler, t, 0)
-                : texelFetch(rtgi_history_sampler, t, 0);
-}
-#endif
-
-vec4 sample_aux_data(ivec2 t, bool ping) {
-    return ping ? texelFetch(rtgi_sky_accum_sampler, t, 0)
-                : texelFetch(rtgi_sky_history_sampler, t, 0);
-}
-
-const float gauss3_kernel[3] = float[3](0.25, 0.5, 0.25);
-
-// 12-tap isotropic Vogel spiral disk inside the unit circle
-const vec2 vogel_disk_12[12] = vec2[12](
-    vec2( 0.204124,  0.000000),
-    vec2(-0.260662,  0.238509),
-    vec2( 0.048048, -0.454032),
-    vec2( 0.354729,  0.379799),
-    vec2(-0.569820, -0.118824),
-    vec2( 0.230927, -0.609515),
-    vec2( 0.335224,  0.630519),
-    vec2(-0.752572,  0.145020),
-    vec2( 0.525620, -0.604259),
-    vec2( 0.052882,  0.846926),
-    vec2(-0.781962, -0.440894),
-    vec2( 0.858847, -0.312272)
-);
-
-#define PHI_COLOUR RTGI_FILTER_PHI
-
-void store_filter_output(ivec2 texel, vec4 val) {
-#if RTGI_FILTER_PASS == 1 || RTGI_FILTER_PASS == 3
-    imageStore(rtgi_filter_inter_img, texel, val);
+    vec4 stats = even ? texelFetch(rtgi_stats_even_sampler, texel, 0)
+                      : texelFetch(rtgi_stats_odd_sampler, texel, 0);
+    age = stats.z;
+    if (age < 1.0) {
+        return no_filter_sample;
+    }
+    vec3 mean = even ? texelFetch(rtgi_accum_sampler, texel, 0).rgb
+                     : texelFetch(rtgi_history_sampler, texel, 0).rgb;
+    return vec4(mean, sqrt(rtgi_mean_variance(stats)));
 #else
-    imageStore(rtgi_filtered_img, texel, val);
+    age = 0.0;
+#if RTGI_FILTER_PASS == 3
+    return texelFetch(rtgi_filtered_sampler, texel, 0);
+#else
+    return texelFetch(rtgi_filter_inter_sampler, texel, 0);
+#endif
 #endif
 }
+
+#if RTGI_FILTER_PASS == 2 || RTGI_FILTER_PASS == 3
+const vec2 vogel_disk[8] = vec2[8](
+    vec2(0.250000, 0.000000), vec2(-0.319290, 0.292496),
+    vec2(0.048872, -0.556877), vec2(0.402444, 0.524918),
+    vec2(-0.738535, -0.130636), vec2(0.699605, -0.445028),
+    vec2(-0.233999, 0.870485), vec2(-0.446271, -0.859268)
+);
+#else
+const float gauss3_kernel[3] = float[3](0.25, 0.5, 0.25);
+#endif
 
 void main() {
-#if RTGI_RESOLUTION == 0
-    const float render_scale = 0.25;
-#elif RTGI_RESOLUTION == 2
-    const float render_scale = 1.0;
-#else
-    const float render_scale = 0.5;
-#endif
-
     ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
-    ivec2 target_res = ivec2(view_res * render_scale);
-
-    if (texel.x >= target_res.x || texel.y >= target_res.y) {
+    ivec2 size = imageSize(filter_output);
+    if (!rtgi_in_bounds(texel, size)) {
         return;
     }
 
-    vec2 target_pixel_size = 1.0 / vec2(target_res);
-    vec2 center_uv = (vec2(texel) + 0.5) * target_pixel_size;
-    ivec2 active_res = max(ivec2(1), ivec2(vec2(target_res) * taau_render_scale));
-
-    if (taau_uv_outside_viewport(center_uv)) {
-        store_filter_output(texel, vec4(0.0));
+    int bank = frameCounter & 1;
+    bool even = bank == 0;
+    ivec2 active_size = rtgi_active_size(size);
+    if (!rtgi_in_bounds(texel, active_size)) {
+        imageStore(filter_output, texel, no_filter_sample);
         return;
     }
 
-    ivec2 center_full = ivec2(center_uv * view_res);
-    float center_depth = texelFetch(depthtex1, center_full, 0).x;
-    if (center_depth >= 1.0) {
-        store_filter_output(texel, vec4(0.0));
-        return;
-    }
-
-    bool ping = (frameCounter & 1) == 0;
-
-    vec3 center_screen_pos = vec3(taau_projection_uv(center_uv), center_depth);
-    vec3 center_view_pos = screen_to_view_space(center_screen_pos, true);
-    float center_dist = -center_view_pos.z;
-
-    vec4 center_aux = sample_aux_data(texel, ping);
-    vec3 center_world_normal = unpack_oct_normal_f16(center_aux.b);
-    vec3 center_view_normal = mat3(gbufferModelView) * center_world_normal;
-    float cos_view = max(abs(center_view_normal.z), 0.15);
-
-    vec2 center_hc = unpack_hit_count(center_aux.g);
-    float center_hit_norm = clamp01(center_hc.x);
-    float accum_count = max(center_hc.y, 1.0);
-
-    float texel_world_size = (2.0 * center_dist)
-        / max(gbufferProjection[1][1] * float(active_res.y), 1.0);
-    float sigma_z = max(center_dist * 0.025, 0.06) + 0.5 * texel_world_size;
-
+    float age;
+    vec4 center = read_filter_input(texel, even, age);
+    float center_y = dot(center.rgb, luminance_weights);
 #if RTGI_FILTER_PASS == 1
-    // -------------------------------------------------------------------------
-    // Pass 1: Dense 3x3 Bilateral Pre-Stabilizer + Pooled Standard Error (.a)
-    // -------------------------------------------------------------------------
-    vec4 center_sample = sample_accum_data(texel, ping);
-    vec3 center_radiance = center_sample.rgb;
-    float center_m1 = dot(center_radiance, luminance_weights);
-    float center_var = max(0.0, center_aux.r - center_m1 * center_m1);
-    float center_se = sqrt(center_var / accum_count);
-
-    float relative_se = center_se / (center_m1 + 0.04);
-    float sigma_n = mix(128.0, 12.0, clamp01(relative_se));
-    float sigma_l = PHI_COLOUR * (center_se + max(0.08 * center_m1, 0.03) + 1e-4);
-    float karis_strength = 1.0 - smoothstep(4.0, 24.0, accum_count);
-    float max_chord_sq = sqr(3.0 * texel_world_size / cos_view + 0.25);
-
-    vec3 sum_rad = vec3(0.0);
-    float sum_se2 = 0.0;
-    float sum_w = 0.0;
-
-    for (int dy = -1; dy <= 1; ++dy) {
-        float wy = gauss3_kernel[dy + 1];
-        for (int dx = -1; dx <= 1; ++dx) {
-            float w_spatial = gauss3_kernel[dx + 1] * wy;
-            ivec2 n_texel = clamp(texel + ivec2(dx, dy), ivec2(0), active_res - 1);
-            vec2 n_uv = (vec2(n_texel) + 0.5) * target_pixel_size;
-            if (taau_uv_outside_viewport(n_uv)) {
-                continue;
-            }
-            vec4 n_sample = sample_accum_data(n_texel, ping);
-            float n_dist = n_sample.a;
-            if (n_dist <= 0.05) {
-                continue;
-            }
-            vec2 n_ndc = taau_projection_uv(n_uv) * 2.0 - 1.0;
-            vec3 n_view_pos = vec3(
-                (n_ndc.x + gbufferProjection[2][0]) * n_dist / max(gbufferProjection[0][0], 1e-4),
-                (n_ndc.y + gbufferProjection[2][1]) * n_dist / max(gbufferProjection[1][1], 1e-4),
-                -n_dist
-            );
-            vec4 n_aux = sample_aux_data(n_texel, ping);
-            vec3 n_world_norm = unpack_oct_normal_f16(n_aux.b);
-            vec3 n_view_norm = mat3(gbufferModelView) * n_world_norm;
-
-            vec3 pos_diff = n_view_pos - center_view_pos;
-            if (dot(pos_diff, pos_diff) > max_chord_sq) {
-                continue;
-            }
-            float plane_dist = max(
-                abs(dot(pos_diff, center_view_normal)),
-                abs(dot(pos_diff, n_view_norm))
-            );
-            float w_depth = exp(-sqr(plane_dist / sigma_z));
-            float w_norm = pow(max(0.0, dot(center_world_normal, n_world_norm)), sigma_n);
-
-            float n_m1 = dot(n_sample.rgb, luminance_weights);
-            float n_cnt = max(unpack_hit_count(n_aux.g).y, 1.0);
-            float n_se2 = max(0.0, n_aux.r - n_m1 * n_m1) / n_cnt;
-
-            float w_luma = exp(-abs(n_m1 - center_m1) / sigma_l);
-            float w_karis = mix(1.0, 1.0 / (1.0 + n_m1 / (3.0 * center_m1 + 0.5)), karis_strength);
-
-            float w = w_spatial * w_depth * w_norm * w_luma * w_karis;
-            sum_rad += n_sample.rgb * w;
-            sum_se2 += n_se2 * w;
-            sum_w += w;
-        }
-    }
-
-    vec3 out_rad = (sum_w > 1e-4) ? (sum_rad / sum_w) : center_radiance;
-    float out_se = (sum_w > 1e-4) ? sqrt(max(sum_se2 / sum_w, 0.0)) : center_se;
-    store_filter_output(texel, vec4(out_rad, out_se));
-
-#elif RTGI_FILTER_PASS == 2 || RTGI_FILTER_PASS == 3
-    // -------------------------------------------------------------------------
-    // Pass 2 & 3: World-Space Tangent-Plane Rotated Vogel Disk (ReBLUR)
-    // -------------------------------------------------------------------------
-    #if RTGI_FILTER_PASS == 2
-    vec4 center_sample = texelFetch(rtgi_filter_inter_sampler, texel, 0);
-    // Self-stabilizing recurrent writeback for low-SPP pixels (0 weight once count >= 12)
-    float recurrent_w = 0.55 * (1.0 - smoothstep(1.0, 12.0, accum_count));
-    if (recurrent_w > 1e-3) {
-        if (ping) {
-            vec4 prev_out = imageLoad(rtgi_accum_img, texel);
-            imageStore(rtgi_accum_img, texel, vec4(mix(prev_out.rgb, center_sample.rgb, recurrent_w), prev_out.a));
-        } else {
-            vec4 prev_out = imageLoad(rtgi_history_img, texel);
-            imageStore(rtgi_history_img, texel, vec4(mix(prev_out.rgb, center_sample.rgb, recurrent_w), prev_out.a));
-        }
-    }
-    const float base_max_world = 2.6;
-    const float max_texel_span = 24.0;
-    const float pass_angle_offset = 0.0;
-    #else
-    vec4 center_sample = texelFetch(rtgi_filtered_sampler, texel, 0);
-    const float base_max_world = 1.15;
-    const float max_texel_span = 11.0;
-    const float pass_angle_offset = 2.0943951;
-    #endif
-
-    vec3 center_radiance = center_sample.rgb;
-    float center_se = max(center_sample.a, 0.0);
-    float center_m1 = dot(center_radiance, luminance_weights);
-    float relative_se = center_se / (center_m1 + 0.04);
-
-    float sigma_n = mix(128.0, 10.0, clamp01(relative_se));
-    float sigma_l = PHI_COLOUR * (center_se + max(0.06 * center_m1, 0.025) + 1e-4);
-
-    // Hit-distance contact sharpening + convergence radius tightening
-    float contact_scale = mix(0.12, 1.0, smoothstep(0.02, 0.75, center_hit_norm));
-    float conv_t = smoothstep(4.0, float(RTGI_SPP_CAP) * 0.75, accum_count)
-        * (1.0 - smoothstep(0.06, 0.25, relative_se));
-    float desired_world_radius = base_max_world * contact_scale * mix(1.0, 0.30, conv_t);
-    float radius_world = clamp(
-        desired_world_radius,
-        1.25 * texel_world_size,
-        max_texel_span * texel_world_size
-    );
-    float max_chord_sq = sqr(1.35 * radius_world + texel_world_size / cos_view + 0.15);
-
-    mat3 plane_tbn = build_orthonormal_basis(center_view_normal);
-    float blue = texelFetch(noisetex, texel & 511, 0).b;
-    float rot_angle = fract(blue + float(frameCounter & 4095) * 0.6180339887) * 6.28318530718
-        + pass_angle_offset;
-    vec2 cs = vec2(cos(rot_angle), sin(rot_angle));
-    mat2 rot = mat2(cs.x, -cs.y, cs.y, cs.x);
-
-    vec3 sum_rad = center_radiance * 0.25;
-    float sum_se = center_se * 0.25;
-    float sum_w = 0.25;
-
-    for (int k = 0; k < 12; ++k) {
-        vec2 d_local = rot * vogel_disk_12[k];
-        vec3 expected_view_pos = center_view_pos
-            + radius_world * (d_local.x * plane_tbn[0] + d_local.y * plane_tbn[1]);
-        if (expected_view_pos.z >= -0.05) {
-            continue;
-        }
-
-        vec2 tap_proj_uv = view_to_screen_space(expected_view_pos, true).xy;
-        vec2 tap_fb_uv = taau_framebuffer_uv(tap_proj_uv);
-        if (clamp01(tap_proj_uv) != tap_proj_uv || taau_uv_outside_viewport(tap_fb_uv)) {
-            continue;
-        }
-
-        ivec2 n_texel = clamp(ivec2(tap_fb_uv * vec2(target_res)), ivec2(0), active_res - 1);
-        if (n_texel == texel) {
-            continue;
-        }
-
-        vec2 n_uv = (vec2(n_texel) + 0.5) * target_pixel_size;
-        ivec2 n_full = clamp(ivec2(n_uv * view_res), ivec2(0), ivec2(view_res) - 1);
-        float n_depth = texelFetch(depthtex1, n_full, 0).x;
-        if (n_depth >= 1.0) {
-            continue;
-        }
-
-        vec3 n_view_pos = screen_to_view_space(vec3(taau_projection_uv(n_uv), n_depth), true);
-        vec3 pos_diff = n_view_pos - center_view_pos;
-        if (dot(pos_diff, pos_diff) > max_chord_sq) {
-            continue;
-        }
-
-        #if RTGI_FILTER_PASS == 2
-        vec4 n_sample = texelFetch(rtgi_filter_inter_sampler, n_texel, 0);
-        #else
-        vec4 n_sample = texelFetch(rtgi_filtered_sampler, n_texel, 0);
-        #endif
-        vec4 n_aux = sample_aux_data(n_texel, ping);
-        vec3 n_world_norm = unpack_oct_normal_f16(n_aux.b);
-        vec3 n_view_norm = mat3(gbufferModelView) * n_world_norm;
-
-        float plane_dist = max(
-            abs(dot(pos_diff, center_view_normal)),
-            abs(dot(pos_diff, n_view_norm))
-        );
-        float w_depth = exp(-sqr(plane_dist / sigma_z));
-        float w_norm = pow(max(0.0, dot(center_world_normal, n_world_norm)), sigma_n);
-
-        float n_m1 = dot(n_sample.rgb, luminance_weights);
-        float w_luma = exp(-abs(n_m1 - center_m1) / sigma_l);
-        float w_kernel = exp(-0.85 * dot(vogel_disk_12[k], vogel_disk_12[k]));
-
-        float w = w_kernel * w_depth * w_norm * w_luma;
-        sum_rad += n_sample.rgb * w;
-        sum_se += max(n_sample.a, 0.0) * w * 0.85;
-        sum_w += w;
-    }
-
-    float inv_w = 1.0 / max(sum_w, 1e-4);
-    store_filter_output(texel, vec4(sum_rad * inv_w, sum_se * inv_w));
-
+    bool copy_through = RTGI_SPATIAL_FALLBACK == 0 || age >= 3.0;
 #else
-    // -------------------------------------------------------------------------
-    // Pass 4: Dense 3x3 Stride-1 Bilateral Polish (removes disk rotation grain)
-    // -------------------------------------------------------------------------
-    vec4 center_sample = texelFetch(rtgi_filter_inter_sampler, texel, 0);
-    vec3 center_radiance = center_sample.rgb;
-    float center_se = max(center_sample.a, 0.0);
-    float center_m1 = dot(center_radiance, luminance_weights);
-    float relative_se = center_se / (center_m1 + 0.04);
-
-    float sigma_n = mix(128.0, 16.0, clamp01(relative_se));
-    float sigma_l = PHI_COLOUR * (center_se + max(0.05 * center_m1, 0.02) + 1e-4);
-    float max_chord_sq = sqr(3.0 * texel_world_size / cos_view + 0.25);
-
-    vec3 sum_rad = vec3(0.0);
-    float sum_se = 0.0;
-    float sum_w = 0.0;
-
-    for (int dy = -1; dy <= 1; ++dy) {
-        float wy = gauss3_kernel[dy + 1];
-        for (int dx = -1; dx <= 1; ++dx) {
-            float w_spatial = gauss3_kernel[dx + 1] * wy;
-            ivec2 n_texel = clamp(texel + ivec2(dx, dy), ivec2(0), active_res - 1);
-            vec2 n_uv = (vec2(n_texel) + 0.5) * target_pixel_size;
-            if (taau_uv_outside_viewport(n_uv)) {
-                continue;
-            }
-            ivec2 n_full = ivec2(n_uv * view_res);
-            float n_depth = texelFetch(depthtex1, n_full, 0).x;
-            if (n_depth >= 1.0) {
-                continue;
-            }
-
-            vec3 n_view_pos = screen_to_view_space(vec3(taau_projection_uv(n_uv), n_depth), true);
-            vec3 pos_diff = n_view_pos - center_view_pos;
-            if (dot(pos_diff, pos_diff) > max_chord_sq) {
-                continue;
-            }
-
-            vec4 n_sample = texelFetch(rtgi_filter_inter_sampler, n_texel, 0);
-            vec4 n_aux = sample_aux_data(n_texel, ping);
-            vec3 n_world_norm = unpack_oct_normal_f16(n_aux.b);
-            vec3 n_view_norm = mat3(gbufferModelView) * n_world_norm;
-
-            float plane_dist = max(
-                abs(dot(pos_diff, center_view_normal)),
-                abs(dot(pos_diff, n_view_norm))
-            );
-            float w_depth = exp(-sqr(plane_dist / sigma_z));
-            float w_norm = pow(max(0.0, dot(center_world_normal, n_world_norm)), sigma_n);
-
-            float n_m1 = dot(n_sample.rgb, luminance_weights);
-            float w_luma = exp(-abs(n_m1 - center_m1) / sigma_l);
-
-            float w = w_spatial * w_depth * w_norm * w_luma;
-            sum_rad += n_sample.rgb * w;
-            sum_se += max(n_sample.a, 0.0) * w;
-            sum_w += w;
-        }
+    bool copy_through = center.a <= 0.001 + 0.02 * center_y;
+#endif
+    if (center.a < 0.0 || copy_through) {
+        imageStore(filter_output, texel, center);
+        return;
     }
 
-    vec3 filtered = (sum_w > 1e-4) ? (sum_rad / sum_w) : center_radiance;
-    float filtered_se = (sum_w > 1e-4) ? (sum_se / sum_w) : center_se;
-    store_filter_output(texel, vec4(filtered, filtered_se));
+    uvec4 guide = even ? texelFetch(rtgi_guide_even_sampler, texel, 0)
+                       : texelFetch(rtgi_guide_odd_sampler, texel, 0);
+    uvec4 frame = texelFetch(rtgi_frame_state_sampler, ivec2(0, bank), 0);
+    uvec4 full_layout = texelFetch(rtgi_frame_state_sampler, ivec2(1, bank), 0);
+    RtgiGrid grid = RtgiGrid(ivec2(full_layout.xy), ivec2(full_layout.zw), active_size);
+    vec2 jitter = uintBitsToFloat(frame.zw);
+    vec3 center_view;
+    if (!rtgi_view_from_guide(guide, grid.full_size, jitter, gbufferProjection, center_view)) {
+        imageStore(filter_output, texel, no_filter_sample);
+        return;
+    }
+    uint material = rtgi_guide_material(guide);
+    vec3 normal = mat3(gbufferModelView) * rtgi_guide_normal(guide);
+    float footprint = rtgi_view_footprint(-center_view.z, grid.gi_active, gbufferProjection);
+    float luma_floor = 0.004 + 0.06 * center_y;
+
+#if RTGI_FILTER_PASS == 2 || RTGI_FILTER_PASS == 3
+    #if RTGI_FILTER_PASS == 2
+    const float world_cap = 1.5;
+    const float texel_cap = 6.0;
+    const mat2 rotation = mat2(1.0, 0.0, 0.0, 1.0);
+    #else
+    const float world_cap = 1.0;
+    const float texel_cap = 4.0;
+    const mat2 rotation = mat2(-0.5, 0.8660254, -0.8660254, -0.5);
+    #endif
+    float relative_se = center.a / (center_y + 0.04);
+    float radius = min(world_cap, texel_cap * footprint)
+        * mix(0.35, 1.0, smoothstep(0.03, 0.35, relative_se));
+    float max_chord = min(world_cap, radius + footprint);
+    mat3 basis = build_orthonormal_basis(normal);
+    ivec2 visited[8];
+    int visited_count = 0;
+#else
+    float grazing = max(abs(dot(normal, normalize(center_view))), 0.15);
+    float max_chord = min(1.0, 0.1 + 3.0 * footprint / grazing);
 #endif
+
+    vec4 sum = 0.25 * center;
+    float sum_weight = 0.25;
+#if RTGI_FILTER_PASS == 1
+    float local_error = 0.0;
+    float local_weight = 0.25;
+#endif
+
+    for (int k = 0; k < 8; ++k) {
+#if RTGI_FILTER_PASS == 2 || RTGI_FILTER_PASS == 3
+        vec2 offset = rotation * vogel_disk[k];
+        vec3 expected = center_view + radius * (offset.x * basis[0] + offset.y * basis[1]);
+        vec4 clip = gbufferProjection * vec4(expected, 1.0);
+        if (!rtgi_finite(clip) || clip.w <= 0.0 || abs(clip.z) > clip.w) {
+            continue;
+        }
+        vec2 pixel = rtgi_raster_position(clip.xy / clip.w, grid.full_size, jitter);
+        if (any(lessThan(pixel, vec2(0.0))) || any(greaterThanEqual(pixel, vec2(grid.full_active)))) {
+            continue;
+        }
+        ivec2 tap = rtgi_cell(ivec2(pixel), grid);
+        bool duplicate = tap == texel;
+        for (int i = 0; i < visited_count; ++i) {
+            duplicate = duplicate || visited[i] == tap;
+        }
+        if (duplicate) {
+            continue;
+        }
+        visited[visited_count++] = tap;
+        float kernel = 0.25 * exp(-dot(offset, offset));
+#else
+        int index = k + int(k >= 4); // Skip the center of the 3x3 kernel.
+        ivec2 offset = ivec2(index % 3, index / 3);
+        ivec2 tap = texel + offset - 1;
+        if (!rtgi_in_bounds(tap, active_size)) {
+            continue;
+        }
+        float kernel = gauss3_kernel[offset.x] * gauss3_kernel[offset.y];
+#endif
+        uvec4 tap_guide = even ? texelFetch(rtgi_guide_even_sampler, tap, 0)
+                               : texelFetch(rtgi_guide_odd_sampler, tap, 0);
+        vec3 tap_view;
+        if (!rtgi_guide_matches(tap_guide, material)
+            || !rtgi_view_from_guide(tap_guide, grid.full_size, jitter, gbufferProjection, tap_view)) {
+            continue;
+        }
+        vec3 tap_normal = mat3(gbufferModelView) * rtgi_guide_normal(tap_guide);
+        float weight = kernel * rtgi_geometry_weight(tap_view - center_view, normal,
+                                                     tap_normal, footprint, max_chord);
+        if (weight <= 0.0) {
+            continue;
+        }
+
+        float tap_age;
+        vec4 sample_value = read_filter_input(tap, even, tap_age);
+        if (sample_value.a < 0.0) {
+            continue;
+        }
+        float delta = dot(sample_value.rgb, luminance_weights) - center_y;
+        float luminance_scale = RTGI_FILTER_PHI * (center.a + sample_value.a + luma_floor);
+#if RTGI_FILTER_PASS == 1
+        local_error += weight * sqr(delta);
+        local_weight += weight;
+        luminance_scale += sqrt(sqr(delta) / age) * 0.5;
+#endif
+        weight *= exp(-abs(delta) / luminance_scale);
+        sum += weight * sample_value;
+        sum_weight += weight;
+    }
+
+    vec4 result = sum / sum_weight;
+#if RTGI_FILTER_PASS == 1
+    // Bootstrap display uncertainty from distinct same-surface neighbors.
+    // Subsequent passes propagate SE conservatively for shared support.
+    result.a = max(result.a, sqrt(local_error / (local_weight * age)));
+#endif
+    imageStore(filter_output, texel, result);
 }

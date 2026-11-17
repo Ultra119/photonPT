@@ -166,9 +166,7 @@ void update_rt_voxel_grid(
 #else
     vec3 scene_pos = (gbufferModelViewInverse * vec4(view_pos, 1.0)).xyz;
 #endif
-    vec3 world_pos = scene_pos + cameraPosition;
-
-    vec3 local = world_pos - rt_voxel_origin_world();
+    vec3 local = scene_to_voxel_space(scene_pos);
     if (any(lessThan(local, vec3(0.0))) || any(greaterThanEqual(local, rt_voxel_size_f))) {
         return;
     }

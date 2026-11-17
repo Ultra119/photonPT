@@ -74,6 +74,7 @@ uniform bool world_age_changed;
 
 #define TEMPORAL_REPROJECTION
 
+#include "/include/lighting/rt/rtgi_opaque_depth.glsl"
 #include "/include/misc/lod_mod_support.glsl"
 #include "/include/utility/bicubic.glsl"
 #include "/include/utility/checkerboard.glsl"
@@ -200,41 +201,27 @@ void main() {
 
     vec4 current = texelFetch(colortex9, src_texel, 0);
     vec2 current_data = texelFetch(colortex10, src_texel, 0).xy;
-    float depth = texelFetch(depthtex1, dst_texel, 0).x;
-
-    bool is_hand;
-    fix_hand_depth(depth, is_hand);
+    RtgiOpaqueDepth surface = rtgi_opaque_depth(dst_texel);
+    bool is_hand = surface.kind == rtgi_hand;
+    bool is_sky = surface.kind == rtgi_sky;
+    ivec2 full_size = textureSize(depthtex1, 0);
+    vec2 jitter = rtgi_raster_jitter(taa_offset, full_size);
+    vec3 view_pos = rtgi_opaque_view_pos(surface, gl_FragCoord.xy, full_size, jitter);
 
     // -----------------------------------------
     //   combined depth buffer for LoD terrain
     // -----------------------------------------
 
 #ifdef LOD_MOD_ACTIVE
-    // Check for LoD terrain
-    float depth_lod = texelFetch(lod_depth_tex_shading, dst_texel, 0).x;
-    bool is_lod = is_lod_terrain(depth, depth_lod);
-
-    float depth_linear
-        = screen_to_view_space_depth(gbufferProjectionInverse, depth);
-    float depth_linear_dh
-        = screen_to_view_space_depth(lod_projection_matrix_inverse, depth_lod);
-
-    combined_depth = is_lod
-        ? view_to_screen_space_depth(
-              combined_projection_matrix,
-              depth_linear_dh
-          )
-        : view_to_screen_space_depth(combined_projection_matrix, depth_linear);
-
-    if (depth >= 1.0 && !is_lod) {
-        // Sky
+    if (is_sky) {
         combined_depth = 1.0;
     } else if (is_hand) {
-        // 0 signals hand
+        // Preserve the hand marker for combined-depth consumers.
         combined_depth = 0.0;
+    } else {
+        vec4 clip = combined_projection_matrix * vec4(view_pos, 1.0);
+        combined_depth = clip.z / clip.w * 0.5 + 0.5;
     }
-#else
-    const bool is_lod = false;
 #endif
 
     // --------------------
@@ -263,9 +250,8 @@ void main() {
     );
 
     // Early exit if clouds covered by terrain
-    if (depth != 1.0) {
-        float view_distance_squared
-            = length_squared(screen_to_view_space(vec3(uv, depth), true));
+    if (!is_sky) {
+        float view_distance_squared = length_squared(view_pos);
         if (view_distance_squared < sqr(closest_distance) || is_hand) {
             clouds_history = current;
             clouds_data.x = 1e6; // apparent distance

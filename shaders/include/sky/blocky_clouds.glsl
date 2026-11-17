@@ -80,7 +80,7 @@ float blocky_clouds_density(
     // Minecraft cloud noise
 
     float density = texture_soft(
-        depthtex2,
+        blocky_clouds_tex,
         world_pos.xz * rcp(BLOCKY_CLOUDS_SIZE * 5000),
         roundness
     );

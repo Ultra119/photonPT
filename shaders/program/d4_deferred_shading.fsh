@@ -64,7 +64,7 @@ uniform sampler2D depthtex1;
 
 
 #ifdef BLOCKY_CLOUDS
-uniform sampler2D depthtex2; // minecraft cloud texture
+uniform sampler2D blocky_clouds_tex;
 #endif
 
 #ifndef WORLD_NETHER
@@ -147,6 +147,7 @@ const bool colortex11MipmapEnabled = true;
 
 #include "/include/fog/simple_fog.glsl"
 #include "/include/lighting/diffuse_lighting.glsl"
+#include "/include/lighting/rt/rtgi_opaque_depth.glsl"
 #include "/include/lighting/shadows/common.glsl"
 #include "/include/lighting/shadows/pcss.glsl"
 #include "/include/lighting/shadows/ssrt.glsl"
@@ -188,27 +189,19 @@ void main() {
 #endif
     vec4 overlays = texelFetch(colortex3, texel, 0);
 
-    // Check for LoD terrain
-
+    RtgiOpaqueDepth surface = rtgi_opaque_depth(texel);
+    bool is_hand = surface.kind == rtgi_hand;
+    bool is_sky = surface.kind == rtgi_sky;
 #ifdef LOD_MOD_ACTIVE
-    float depth_mc = texelFetch(depthtex1, texel, 0).x;
-    float depth_lod = texelFetch(lod_depth_tex_shading, texel, 0).x;
-    bool is_lod = is_lod_terrain(depth_mc, depth_lod);
-#else
-    const bool is_lod = false;
-#define depth_mc depth
+    bool is_lod = surface.kind == rtgi_lod;
+    float depth_lod = is_lod ? surface.depth : rtgi_lod_depth(texel);
 #endif
 
     // Space conversions
 
-    bool is_hand;
-    fix_hand_depth(depth_mc, is_hand);
-
-    vec3 position_view = screen_to_view_space(
-        combined_projection_matrix_inverse,
-        vec3(uv, depth),
-        true
-    );
+    ivec2 full_size = textureSize(depthtex1, 0);
+    vec2 jitter = rtgi_raster_jitter(taa_offset, full_size);
+    vec3 position_view = rtgi_opaque_view_pos(surface, gl_FragCoord.xy, full_size, jitter);
     vec3 position_scene = view_to_scene_space(position_view);
     vec3 position_world = position_scene + cameraPosition;
     vec3 direction_world
@@ -223,7 +216,7 @@ void main() {
         sun_dir,
         moon_color,
         moon_dir,
-        /* use_klein_nishina_phase */ depth == 1.0
+        /* use_klein_nishina_phase */ is_sky
     );
 
     // Read clouds/aurora/crepuscular rays
@@ -244,7 +237,7 @@ void main() {
     vec4 blocky_clouds = raymarch_blocky_clouds(
         world_start_pos,
         world_end_pos,
-        depth == 1.0,
+        is_sky,
         blocky_clouds_altitude_l0,
         dither
     );
@@ -254,7 +247,7 @@ void main() {
     vec4 blocky_clouds_l2 = raymarch_blocky_clouds(
         world_start_pos,
         world_end_pos,
-        depth == 1.0,
+        is_sky,
         blocky_clouds_altitude_l1,
         dither
     );
@@ -269,7 +262,7 @@ void main() {
 #endif
 #endif
 
-    if (depth == 1.0) { // Sky
+    if (is_sky) {
 #if defined WORLD_OVERWORLD
         fragment_color = draw_sky(
             direction_world,
@@ -323,7 +316,7 @@ void main() {
         );
 
         vec3 albedo = vec3(data[0], data[1].x);
-        uint material_mask = uint(255.0 * data[1].y);
+        uint material_mask = uint(round(255.0 * data[1].y));
         vec3 flat_normal = decode_unit_vector(data[2]);
         vec2 light_levels = data[3];
 
@@ -519,7 +512,10 @@ void main() {
 
         // Diffuse lighting
 
-        vec3 direct_diffuse;
+        vec3 indirect_radiance = sample_rtgi_diffuse(
+            texel, full_size, position_view, position_scene, flat_normal,
+            material_mask, surface.kind, light_levels
+        ) * (RTGI_INTENSITY * RTGI_BRIGHTNESS);
         fragment_color = get_diffuse_lighting(
             material,
             position_scene,
@@ -542,7 +538,7 @@ void main() {
             NoV,
             NoH,
             LoV,
-            direct_diffuse
+            indirect_radiance
         );
 
         // Specular highlight

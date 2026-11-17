@@ -59,8 +59,7 @@ void main() {
     // Clip to TAAU viewport
 
 #if defined TAA && defined TAAU
-    vec2 coord = gl_FragCoord.xy * view_pixel_size * rcp(taau_render_scale);
-    if (clamp01(coord) != coord) {
+    if (taau_uv_outside_viewport(gl_FragCoord.xy * view_pixel_size)) {
         discard;
     }
 #endif
