@@ -34,14 +34,9 @@ uniform mat4 gbufferProjection;
 uniform mat4 gbufferPreviousModelView;
 uniform mat4 gbufferPreviousProjection;
 
-uniform vec3 cameraPosition;
-uniform vec3 previousCameraPosition;
-uniform ivec3 cameraPositionInt;
-uniform ivec3 previousCameraPositionInt;
-uniform vec3 cameraPositionFract;
-uniform vec3 previousCameraPositionFract;
 uniform int frameCounter;
 
+#include "/include/utility/camera_motion.glsl"
 #include "/include/utility/color.glsl"
 #include "/include/lighting/rt/rtgi_surface.glsl"
 #include "/include/lighting/rt/pt_state.glsl"
@@ -74,16 +69,6 @@ void store_history(
     float visible = float(stats.z > 0.0);
     imageStore(rtgi_reject_img, texel, vec4(visible * (1.0 - weight), weight, 0.0, 1.0));
 #endif
-}
-
-vec3 camera_delta() {
-    bool has_split_uniforms = cameraPositionInt != ivec3(0)
-        || previousCameraPositionInt != ivec3(0)
-        || cameraPositionFract != vec3(0.0) || previousCameraPositionFract != vec3(0.0);
-    return has_split_uniforms
-        ? vec3(cameraPositionInt - previousCameraPositionInt)
-            + (cameraPositionFract - previousCameraPositionFract)
-        : cameraPosition - previousCameraPosition;
 }
 
 RtgiHistory gather_history(

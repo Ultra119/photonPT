@@ -87,15 +87,9 @@ vec3 rtgi_unproject(
     return position.xyz / position.w;
 }
 
-// Solve clip.xy = ndc * clip.w at a known view-space Z. This also supports
-// off-axis projections and uses the same convention for both history banks.
-bool rtgi_view_from_guide(
-    uvec4 guide, ivec2 full_size, vec2 jitter_pixels, mat4 projection,
-    out vec3 view_pos
-) {
-    vec2 pixel = vec2(guide.x & 65535u, guide.x >> 16u) + 0.5;
-    vec2 ndc = rtgi_raster_ndc(pixel, full_size, jitter_pixels);
-    float view_z = -uintBitsToFloat(guide.y);
+// Solve clip.xy = ndc * clip.w at a known view-space Z, including off-axis
+// projections. The caller supplies NDC in the selected lattice.
+bool rtgi_view_at_ndc(vec2 ndc, float view_z, mat4 projection, out vec3 view_pos) {
     vec4 origin = projection[3] + view_z * projection[2];
     vec2 x = projection[0].xy - ndc * projection[0].w;
     vec2 y = projection[1].xy - ndc * projection[1].w;
@@ -107,6 +101,15 @@ bool rtgi_view_from_guide(
     view_pos = vec3((b.x * y.y - b.y * y.x) / det,
                     (x.x * b.y - x.y * b.x) / det, view_z);
     return !any(isnan(view_pos)) && !any(isinf(view_pos));
+}
+
+bool rtgi_view_from_guide(
+    uvec4 guide, ivec2 full_size, vec2 jitter_pixels, mat4 projection,
+    out vec3 view_pos
+) {
+    vec2 pixel = vec2(guide.x & 65535u, guide.x >> 16u) + 0.5;
+    vec2 ndc = rtgi_raster_ndc(pixel, full_size, jitter_pixels);
+    return rtgi_view_at_ndc(ndc, -uintBitsToFloat(guide.y), projection, view_pos);
 }
 
 // RGBA32UI. XY is packed in R, positive metric view depth is in G, and B

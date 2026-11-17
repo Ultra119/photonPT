@@ -4,7 +4,9 @@
 // global.glsl included by parent program
 #include "/include/utility/fast_math.glsl"
 
+#ifndef INCLUDE_UTILITY_CAMERA_MOTION
 uniform vec3 cameraPositionFract;
+#endif
 
 // Single-volume fine voxel grid layout: 1 block per voxel.
 #ifndef RT_CLIPMAP_SIZE

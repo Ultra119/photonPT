@@ -48,7 +48,6 @@ uniform sampler2D colortex6; // ambient lighting data
 uniform sampler2D colortex7; // previous frame fog scattering
 uniform sampler2D colortex11; // clouds history
 uniform sampler2D colortex12; // clouds data
-uniform sampler2D colortex14; // ambient lighting history data
 
 #if defined WORLD_OVERWORLD && defined GALAXY
 uniform sampler2D colortex13;
@@ -147,6 +146,7 @@ const bool colortex11MipmapEnabled = true;
 
 #include "/include/fog/simple_fog.glsl"
 #include "/include/lighting/diffuse_lighting.glsl"
+#include "/include/lighting/rt/rt_ao_history.glsl"
 #include "/include/lighting/rt/rtgi_opaque_depth.glsl"
 #include "/include/lighting/shadows/common.glsl"
 #include "/include/lighting/shadows/pcss.glsl"
@@ -174,6 +174,51 @@ const bool colortex11MipmapEnabled = true;
 #if defined CLOUD_SHADOWS
 #include "/include/lighting/cloud_shadows.glsl"
 #endif
+
+float sample_rt_ao(
+    ivec2 pixel, ivec2 full_size, vec2 jitter, vec3 view_pos, vec3 world_normal,
+    uint kind
+) {
+    if (RT_AO_STRENGTH <= 0.0 || kind != rtgi_world || view_pos.z >= 0.0) {
+        return 1.0;
+    }
+
+    RtgiGrid grid = rt_ao_grid(full_size, textureSize(colortex6, 0));
+    if (!rtgi_in_bounds(pixel, grid.full_active) || any(equal(grid.gi_active, ivec2(0)))) {
+        return 1.0;
+    }
+
+    ivec2 base;
+    vec2 fraction;
+    rtgi_footprint(vec2(pixel) + 0.5, grid, base, fraction);
+    mat3 rotation = mat3(gbufferModelView);
+    vec3 normal = rotation * world_normal;
+    float footprint = rtgi_view_footprint(-view_pos.z, grid.gi_active, gbufferProjection);
+    float chord = rt_ao_chord(view_pos, normal, footprint);
+    float sum = 0.0;
+    float weight_sum = 0.0;
+
+    for (int y = 0; y <= 1; ++y) {
+        for (int x = 0; x <= 1; ++x) {
+            ivec2 offset = ivec2(x, y);
+            ivec2 tap = base + offset;
+            float weight = rtgi_bilinear_weight(offset, fraction);
+            if (weight <= 0.0 || !rtgi_in_bounds(tap, grid.gi_active)) {
+                continue;
+            }
+            vec4 sample_value = texelFetch(colortex6, tap, 0);
+            vec3 tap_view;
+            if (!rt_ao_view_pos(sample_value, tap, grid, jitter, gbufferProjection, tap_view)) {
+                continue;
+            }
+            vec3 tap_normal = rotation * decode_unit_vector(unpack_unorm_2x8(sample_value.a));
+            weight *= rtgi_geometry_weight(tap_view - view_pos, normal, tap_normal, footprint, chord);
+            sum += weight * sample_value.r;
+            weight_sum += weight;
+        }
+    }
+    return weight_sum > 1e-4 ? sum / weight_sum : 1.0;
+}
 
 void main() {
     colortex3_clear = vec4(0.0);
@@ -286,26 +331,6 @@ void main() {
         // Apply purkinje shift
         fragment_color = purkinje_shift(fragment_color, vec2(0.0, 1.0));
     } else { // Terrain
-        // Sample ambient occlusion a while before using it (latency hiding)
-
-        vec2 half_res_pos = gl_FragCoord.xy * (0.5 / taau_render_scale) - 0.5;
-
-        ivec2 i = ivec2(half_res_pos);
-        vec2 f = fract(half_res_pos);
-
-        ivec2 p10 = i + ivec2(1, 0);
-        ivec2 p01 = i + ivec2(0, 1);
-        ivec2 p11 = i + ivec2(1, 1);
-
-        vec4 ambient_00 = texelFetch(colortex6, i, 0);
-        vec4 ambient_10 = texelFetch(colortex6, p10, 0);
-        vec4 ambient_01 = texelFetch(colortex6, p01, 0);
-        vec4 ambient_11 = texelFetch(colortex6, p11, 0);
-        float ambient_depth_00 = texelFetch(colortex14, i, 0).x;
-        float ambient_depth_10 = texelFetch(colortex14, p10, 0).x;
-        float ambient_depth_01 = texelFetch(colortex14, p01, 0).x;
-        float ambient_depth_11 = texelFetch(colortex14, p11, 0).x;
-
         // Unpack gbuffer data
 
         mat4x2 data = mat4x2(
@@ -381,48 +406,7 @@ void main() {
         }
 #endif
 
-        // Upscale ambient occlusion
-
-        float lin_z = screen_to_view_space_depth(
-            combined_projection_matrix_inverse,
-            depth
-        );
-
-#define depth_weight(reversed_depth) \
-    exp2( \
-        -10.0 \
-        * abs( \
-            screen_to_view_space_depth( \
-                combined_projection_matrix_inverse, \
-                1.0 - reversed_depth \
-            ) \
-            - lin_z \
-        ) \
-    )
-        float w00 = depth_weight(ambient_depth_00) * (1.0 - f.x) * (1.0 - f.y);
-        float w10 = depth_weight(ambient_depth_10) * (f.x - f.x * f.y);
-        float w01 = depth_weight(ambient_depth_01) * (f.y - f.x * f.y);
-        float w11 = depth_weight(ambient_depth_11) * (f.x * f.y);
-#undef depth_weight
-
-        vec4 ambient_upscaled;
-        float weight_sum = w00 + w10 + w01 + w11;
-
-        if (abs(weight_sum) > eps) {
-            ambient_upscaled = ambient_00 * w00 + ambient_10 * w10
-                + ambient_01 * w01 + ambient_11 * w11;
-
-            ambient_upscaled *= rcp(weight_sum);
-        } else {
-            ambient_upscaled = ambient_00;
-        }
-
-        float ao = ambient_upscaled.x;
-
-        // The hand is outside the world-space voxel volume.
-        if (is_hand) {
-            ao = 1.0;
-        }
+        float ao = sample_rt_ao(texel, full_size, jitter, position_view, flat_normal, surface.kind);
 
         // Calculate lighting dot products
 
