@@ -477,7 +477,7 @@ option.HARDCODED_SSS                   = Hardcoded SSS
 option.HARDCODED_SSS.comment           = Hardcoded subsurface scattering for some blocks (eg leaves)
 option.RAIN_PUDDLES                    = Rain Puddles
 option.EMISSION_STRENGTH               = Emission Strength
-option.EMISSION_STRENGTH.comment       = Adjusts the brightness of emissive objects like torches. This does not affect the brightness of the light casted, only the brightness of the light source itself. This also effects the hardcoded emissives
+option.EMISSION_STRENGTH.comment       = Scales visible emission and the light cast by voxel emitters such as torches.
 option.POM_DEPTH                       = Parallax Depth
 option.POM_DEPTH.comment               = How far POM can recess into a block
 option.POM_SAMPLES                     = Parallax Samples
@@ -682,7 +682,7 @@ value.DEBUG_VIEW.DEBUG_VIEW_WEATHER    = Weather
 value.DEBUG_VIEW.DEBUG_VIEW_GI         = GI Buffers\n\nRequires Ray Traced GI to be enabled, otherwise the screen turns magenta.
 
 option.GI_DEBUG                        = GI Buffer
-option.GI_DEBUG.comment                = Which GI buffer the GI debug view displays.\n\nRaw - This frame's traced radiance, before temporal accumulation. Shows the per-frame noise directly.\nHistory - After temporal accumulation. Compare with Raw to see how much work the temporal filter is doing.\nFiltered - Exactly what surfaces are lit with.\nHit Source - Green: resolved in the voxel volume. Blue: escaped to the directional sky map. Red: unused, there is no screen-space GI.\nHistory Rejected - Red: temporal history discarded (disocclusion). Yellow: history accepted. Black: no history available.\nVoxel ID / Light / Albedo - Reads the voxel volume at the surface the camera sees. Magenta: outside the volume.\nVoxel Coverage - Bright red = populated voxel. Dark hue = inside bounds but unoccupied. Yellow = volume boundary. Magenta = outside voxel grid.\nConvergence - Disagreement between this frame's estimate and the accumulated history. Grey means stable. This is temporal spread, not a variance estimate.
+option.GI_DEBUG.comment                = Selects a GI buffer.\n\nRaw - This frame's diffuse estimate before temporal accumulation.\nHistory - Temporal mean.\nFiltered - Spatially reconstructed diffuse lighting.\nHit Source - Green for an opaque hit, blue for volume exit, amber for a distance cap, red for an invalid observation.\nDirect Emitter Sample - Weighted direct light sample. Dark red marks a rejected or blocked candidate. Black marks no candidate.\nHistory Rejected - Red shows discarded history weight. Green shows accepted weight.\nVoxel ID / Light / Albedo - Voxel data at the visible surface. Magenta marks pixels outside the volume.
 value.GI_DEBUG.GI_DEBUG_OFF            = OFF
 value.GI_DEBUG.GI_DEBUG_RAW            = Raw
 value.GI_DEBUG.GI_DEBUG_HISTORY        = History
@@ -697,6 +697,7 @@ value.GI_DEBUG.GI_DEBUG_PROBE          = Voxel Irradiance Volume
 value.GI_DEBUG.GI_DEBUG_COVERAGE = Voxel Coverage
 value.GI_DEBUG.GI_DEBUG_SPP          = Accumulated Samples
 value.GI_DEBUG.GI_DEBUG_RESET        = Reset Reason
+value.GI_DEBUG.GI_DEBUG_EMITTER      = Direct Emitter Sample
 
 value.tonemap_left.tonemap_aces_fit       = ACES Fit
 value.tonemap_left.tonemap_aces_full      = ACES Full
@@ -817,10 +818,13 @@ option.RTGI_ADAPT_STRENGTH                                           = Adaptive 
 option.RTGI_ADAPT_STRENGTH.comment                                   = How quickly history responds to a sustained lighting change supported by nearby surfaces. 0 disables the extra response.
 option.RTGI_SPATIAL_FALLBACK                                         = Spatial Fallback
 option.RTGI_SPATIAL_FALLBACK.comment                                 = Filter newly visible surfaces using nearby compatible samples. The temporal history continues to accumulate its own observations.
-option.RTGI_MAX_RADIANCE                                             = Ray Radiance Cap
-option.RTGI_MAX_RADIANCE.comment                                     = Per-ray radiance clamp applied during voxel tracing (firefly control). Keep at or above EMISSION_ANCHOR so bright emitters are not dimmed.
+option.RTGI_EMITTER_SAMPLING                                         = Sample Block Lights
+option.RTGI_EMITTER_SAMPLING.comment                                 = Samples one indexed block light per GI pixel in addition to the diffuse rays. Disable for a ray-only reference with the same voxel geometry.
+option.RTGI_MAX_RADIANCE                                             = GI Radiance Cap
+option.RTGI_MAX_RADIANCE.comment                                     = Limits the luminance of the combined GI observation before temporal accumulation. 0 uses the storage limit only for reference comparisons.
+value.RTGI_MAX_RADIANCE.0.0                                          = Reference
 option.EMISSION_ANCHOR                                               = Emission Radiance Anchor
-option.EMISSION_ANCHOR.comment                                       = Radiance of a light-15 emitter before EMISSION_STRENGTH. Anchored to the raster blocklight response; keep under RTGI_MAX_RADIANCE.
+option.EMISSION_ANCHOR.comment                                       = Radiance of a full-block light-15 emitter before EMISSION_STRENGTH. Compact sources scale radiance to preserve approximate flux.
 
 
 option.PHYSICAL_BSDF_ENERGY_COMP                                     = Multi-Scatter Conservation

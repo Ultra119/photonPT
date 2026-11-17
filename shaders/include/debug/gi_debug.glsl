@@ -63,11 +63,11 @@ vec3 gi_debug_voxel_id(uint packed_val) {
     return gi_debug_palette_color(voxel.block_id);
 }
 
-// R = block light, G = sky light
 vec3 gi_debug_voxel_light(uint packed_val) {
     VoxelSample voxel = unpack_voxel_data(packed_val);
     if (voxel.is_emitter) {
-        return max(voxel.color, vec3(0.2)) * 2.0;
+        vec3 emission = get_voxel_emission(voxel.block_id);
+        return srgb_eotf(emission / (1.0 + emission));
     }
     if (voxel.is_solid) {
         return max(vec3(voxel.block_light, voxel.sky_light, 0.0), vec3(0.05));
@@ -83,13 +83,9 @@ vec3 gi_debug_voxel_albedo(uint packed_val) {
     return srgb_eotf(voxel.color);
 }
 
-// Ray hit source: R = invalid observation, G = opaque hit, B = modeled sky.
+// Ray outcomes: invalid red, opaque green, volume exit blue, distance cap amber.
 vec3 gi_debug_hit_mask(vec4 hit) {
-    float total = hit.r + hit.g + hit.b;
-    if (total <= 0.0) {
-        return vec3(0.0);
-    }
-    return hit.rgb / total;
+    return clamp01(hit.rgb + hit.a * vec3(1.0, 0.5, 0.0));
 }
 
 // Temporal history decision
@@ -108,13 +104,13 @@ vec3 gi_debug_spread(vec3 raw, vec3 accumulated) {
     return mix(vec3(0.5), sign_colour * magnitude * 3.0, clamp01(magnitude * 3.0));
 }
 
-vec3 gi_debug_smooth_3x3(sampler2D source, vec2 uv) {
+vec4 gi_debug_smooth_3x3(sampler2D source, vec2 uv) {
     ivec2 size = textureSize(source, 0);
     ivec2 base = clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1);
-    vec3 sum = vec3(0.0);
+    vec4 sum = vec4(0.0);
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
-            sum += texelFetch(source, clamp(base + ivec2(x, y), ivec2(0), size - 1), 0).rgb;
+            sum += texelFetch(source, clamp(base + ivec2(x, y), ivec2(0), size - 1), 0);
         }
     }
     return sum * (1.0 / 9.0);
@@ -132,6 +128,8 @@ vec3 gi_debug_view_swatch() {
     return vec3(0.20, 1.0, 0.30);
 #elif GI_DEBUG == GI_DEBUG_HIT
     return vec3(1.0, 0.0, 1.0);
+#elif GI_DEBUG == GI_DEBUG_EMITTER
+    return vec3(0.95, 0.75, 0.30);
 #elif GI_DEBUG == GI_DEBUG_REJECT
     return vec3(1.0, 1.0, 1.0);
 #elif GI_DEBUG == GI_DEBUG_VOXEL_ID
@@ -258,9 +256,15 @@ vec3 gi_debug_view(ivec2 texel, vec2 uv, vec3 fallback) {
     vec3 bp_blurred = (bp_se_gate <= bp_count_ramp) ? bp_noisy : bp_fresh;
     return mix(bp_blurred, bp_sharp, bp_count_ramp * bp_se_gate);
 #elif GI_DEBUG == GI_DEBUG_HIT
-    return gi_debug_hit_mask(
-        vec4(gi_debug_smooth_3x3(rtgi_hit_sampler, rtgi_uv), 1.0)
-    );
+    return gi_debug_hit_mask(gi_debug_smooth_3x3(rtgi_hit_sampler, rtgi_uv));
+#elif GI_DEBUG == GI_DEBUG_EMITTER
+    ivec2 size = rtgi_active_size(textureSize(rtgi_emitter_debug_sampler, 0));
+    ivec2 pixel = clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1);
+    vec4 emitter = texelFetch(rtgi_emitter_debug_sampler, pixel, 0);
+    if (emitter.a < 2.0) {
+        return emitter.a > 0.0 ? vec3(0.24, 0.025, 0.015) : vec3(0.0);
+    }
+    return gi_debug_tonemap(emitter.rgb);
 #elif GI_DEBUG == GI_DEBUG_REJECT
     ivec2 reject_size = rtgi_active_size(textureSize(rtgi_reject_sampler, 0));
     ivec2 reject_texel = clamp(ivec2(uv * vec2(reject_size)), ivec2(0), reject_size - 1);

@@ -56,6 +56,13 @@ uint lowbias32(uint x) {
     return x;
 }
 
+// A stateless dimension with 23 random mantissa bits and open endpoints.
+// The half-bin offset stays exactly representable all the way up to 1.
+float random_dimension(uint seed, int dimension) {
+    uint bits = lowbias32(seed ^ (uint(dimension) * 0x9e3779b9u));
+    return (float(bits >> 9u) + 0.5) * (1.0 / 8388608.0);
+}
+
 uint lowbias32_inverse(uint x) {
     x ^= x >> 16;
     x *= 0x43021123u;

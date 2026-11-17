@@ -1,563 +1,259 @@
-#if !defined INCLUDE_LIGHTING_RT_VOXEL_DDA
+#ifndef INCLUDE_LIGHTING_RT_VOXEL_DDA
 #define INCLUDE_LIGHTING_RT_VOXEL_DDA
 
-// global.glsl included by parent program
-#include "/include/lighting/voxel/voxel_constants.glsl"
 #include "/include/lighting/voxel/voxel_storage.glsl"
-#include "/include/lighting/shadows/distortion.glsl"
-#include "/include/lighting/colors/blocklight_color.glsl"
 
-// Lambertian surfaces convert irradiance to radiance with 1/pi. Voxel DDA
-// only stores irradiance-like sun/sky/blocklight terms, so the bounce must be
-// divided by pi before being accumulated as GI radiance.
-const float voxel_bounce_rcp_pi = 0.31830988618;
+const int voxel_hit_surface = 1;
+const int voxel_distance_limit = 2;
+const int voxel_volume_exit = 3;
+const int voxel_step_limit = 4;
+const int voxel_inside_solid = 5;
+const int voxel_invalid_ray = 6;
 
-// Deterministic ray component safety: avoids division by zero and planar
-// seam lock without injecting random angular jitter.
-vec3 safe_ray_dir(vec3 dir) {
-    const float eps = 1e-5;
-    return vec3(
-        abs(dir.x) < eps ? (dir.x >= 0.0 ? eps : -eps) : dir.x,
-        abs(dir.y) < eps ? (dir.y >= 0.0 ? eps : -eps) : dir.y,
-        abs(dir.z) < eps ? (dir.z >= 0.0 ? eps : -eps) : dir.z
-    );
+const int voxel_ray_path = 0;
+const int voxel_ray_visibility = 1;
+const int voxel_ray_ao = 2;
+
+// All ray distances are in blocks along a unit direction in voxel space.
+struct VoxelRay {
+    vec3 origin;
+    vec3 direction;
+    vec3 inverse;
+    bvec3 parallel;
+};
+
+struct VoxelHit {
+    int status;
+    float distance;
+    ivec3 cell;
+    uint payload;
+    vec3 normal;
+    vec3 transmittance;
+    vec3 passed_emission;
+};
+
+const float voxel_infinity = 1e30;
+const float voxel_receiver_bias = 0.012;
+const float voxel_bounce_bias = 0.001;
+const float voxel_endpoint_epsilon = 0.001;
+
+bool voxel_box_interval(VoxelRay ray, vec3 lo, vec3 hi, out vec3 entry, out float leave) {
+    // A parallel ray on a cell boundary belongs to the higher-index cell.
+    vec3 parallel_origin = mix(lo, ray.origin, ray.parallel);
+    if (any(lessThan(parallel_origin, lo)) || any(greaterThanEqual(parallel_origin, hi))) {
+        return false;
+    }
+    vec3 a = (lo - ray.origin) * ray.inverse;
+    vec3 b = (hi - ray.origin) * ray.inverse;
+    entry = mix(min(a, b), vec3(-voxel_infinity), ray.parallel);
+    vec3 exit_t = mix(max(a, b), vec3(voxel_infinity), ray.parallel);
+    leave = min_of(exit_t);
+    return leave > max_of(entry);
 }
 
-// Analytic Ray-AABB intersection for sub-block shapes.
-// Williams et al. slab method with voxel-entry normal fallback.
-bool intersect_sub_box(
-    vec3 ray_start,
-    vec3 inv_dir,
-    vec3 box_min,
-    vec3 box_max,
-    float seg_start,
-    float seg_end,
-    vec3 voxel_entry_normal,
-    out float hit_t,
-    out vec3 hit_normal
+vec3 voxel_entry_normal(bvec3 axes, vec3 step_dir) {
+    if (axes.x) return vec3(-step_dir.x, 0.0, 0.0);
+    if (axes.y) return vec3(0.0, -step_dir.y, 0.0);
+    return vec3(0.0, 0.0, -step_dir.z);
+}
+
+bool voxel_box_hit(
+    VoxelRay ray, vec3 lo, vec3 hi, float segment_start, float segment_end,
+    out float distance, out vec3 normal
 ) {
-    vec3 t0 = (box_min - ray_start) * inv_dir;
-    vec3 t1 = (box_max - ray_start) * inv_dir;
-    vec3 tnear = min(t0, t1);
-    vec3 tfar = max(t0, t1);
-
-    float tenter = max(max(tnear.x, tnear.y), tnear.z);
-    float texit = min(min(tfar.x, tfar.y), tfar.z);
-
-    if (tenter <= texit && texit >= seg_start && tenter <= seg_end) {
-        hit_t = max(tenter, seg_start);
-        if (tenter > seg_start + 1e-4) {
-            if (tenter == tnear.x) hit_normal = vec3(-sign(inv_dir.x), 0.0, 0.0);
-            else if (tenter == tnear.y) hit_normal = vec3(0.0, -sign(inv_dir.y), 0.0);
-            else hit_normal = vec3(0.0, 0.0, -sign(inv_dir.z));
-        } else {
-            hit_normal = voxel_entry_normal;
-        }
-        return true;
+    vec3 entry;
+    float leave;
+    if (!voxel_box_interval(ray, lo, hi, entry, leave)) {
+        return false;
     }
-    return false;
-}
-
-// Point-in-solid test for a stored shape
-bool voxel_shape_contains(uint shape_class, ivec3 voxel_coord, vec3 voxel_space_pos) {
-    vec3 f = voxel_space_pos - vec3(voxel_coord);
-    if (shape_class == VOXEL_SHAPE_SLAB_BOTTOM) {
-        return f.y < 0.5;
-    } else if (shape_class == VOXEL_SHAPE_SLAB_TOP) {
-        return f.y >= 0.5;
-    } else if (shape_class == VOXEL_SHAPE_PANE_OR_FENCE) {
-        return f.x > 0.375 && f.x < 0.625 && f.z > 0.375 && f.z < 0.625;
-    } else if (shape_class == VOXEL_SHAPE_COVER) {
-        return f.y < 0.0625;
-    } else if (shape_class == VOXEL_SHAPE_STAIRS_B_N) {
-        return f.y < 0.5 || (f.y >= 0.5 && f.z < 0.5);
-    } else if (shape_class == VOXEL_SHAPE_STAIRS_B_E) {
-        return f.y < 0.5 || (f.y >= 0.5 && f.x > 0.5);
-    } else if (shape_class == VOXEL_SHAPE_STAIRS_B_S) {
-        return f.y < 0.5 || (f.y >= 0.5 && f.z > 0.5);
-    } else if (shape_class == VOXEL_SHAPE_STAIRS_B_W) {
-        return f.y < 0.5 || (f.y >= 0.5 && f.x < 0.5);
-    } else if (shape_class == VOXEL_SHAPE_STAIRS_T_N) {
-        return f.y >= 0.5 || (f.y < 0.5 && f.z < 0.5);
-    } else if (shape_class == VOXEL_SHAPE_STAIRS_T_E) {
-        return f.y >= 0.5 || (f.y < 0.5 && f.x > 0.5);
-    } else if (shape_class == VOXEL_SHAPE_STAIRS_T_S) {
-        return f.y >= 0.5 || (f.y < 0.5 && f.z > 0.5);
-    } else if (shape_class == VOXEL_SHAPE_STAIRS_T_W) {
-        return f.y >= 0.5 || (f.y < 0.5 && f.x < 0.5);
+    float enter = max_of(entry);
+    distance = max(enter, segment_start);
+    if (min(leave, segment_end) <= distance) {
+        return false;
     }
-    // CUBE / PLANT / GLASS / OTHER: treat as occupying the full cell.
+    // A start inside an opaque shape blocks the ray without creating an
+    // emissive or reflective entry event.
+    normal = enter >= segment_start
+        ? voxel_entry_normal(equal(entry, vec3(enter)), sign(ray.direction))
+        : vec3(0.0);
     return true;
 }
 
-// Stairs = slab box + tall-side arm box; returns the nearer sub-hit.
-bool stair_box_hit(
-    vec3 ray_start, vec3 inv_dir,
-    vec3 box_a_min, vec3 box_a_max,
-    vec3 box_b_min, vec3 box_b_max,
-    float seg_start, float seg_end,
-    vec3 voxel_entry_normal,
-    out float hit_t, out vec3 hit_normal
+bool voxel_stair_hit(
+    VoxelRay ray, vec3 cell, uint shape, float start, float end,
+    out float distance, out vec3 normal
 ) {
-    float t1; vec3 n1;
-    bool h1 = intersect_sub_box(ray_start, inv_dir, box_a_min, box_a_max, seg_start, seg_end, voxel_entry_normal, t1, n1);
-    float t2; vec3 n2;
-    bool h2 = intersect_sub_box(ray_start, inv_dir, box_b_min, box_b_max, seg_start, seg_end, voxel_entry_normal, t2, n2);
-    if (h1 && h2) {
-        if (t1 < t2) { hit_t = t1; hit_normal = n1; }
-        else { hit_t = t2; hit_normal = n2; }
-        return true;
-    } else if (h1) {
-        hit_t = t1; hit_normal = n1; return true;
-    } else if (h2) {
-        hit_t = t2; hit_normal = n2; return true;
+    bool top = shape == VOXEL_SHAPE_STAIRS_T_N || shape >= VOXEL_SHAPE_STAIRS_T_E;
+    vec3 slab_lo = vec3(0.0, top ? 0.5 : 0.0, 0.0);
+    vec3 slab_hi = vec3(1.0, top ? 1.0 : 0.5, 1.0);
+    vec3 arm_lo = vec3(0.0, top ? 0.0 : 0.5, 0.0);
+    vec3 arm_hi = vec3(1.0, top ? 0.5 : 1.0, 1.0);
+    if (shape == VOXEL_SHAPE_STAIRS_B_N || shape == VOXEL_SHAPE_STAIRS_T_N) {
+        arm_hi.z = 0.5;
+    } else if (shape == VOXEL_SHAPE_STAIRS_B_E || shape == VOXEL_SHAPE_STAIRS_T_E) {
+        arm_lo.x = 0.5;
+    } else if (shape == VOXEL_SHAPE_STAIRS_B_S || shape == VOXEL_SHAPE_STAIRS_T_S) {
+        arm_lo.z = 0.5;
+    } else {
+        arm_hi.x = 0.5;
     }
-    return false;
+
+    bool slab_hit = voxel_box_hit(ray, cell + slab_lo, cell + slab_hi, start, end, distance, normal);
+    float arm_distance;
+    vec3 arm_normal;
+    bool arm_hit = voxel_box_hit(ray, cell + arm_lo, cell + arm_hi, start, end, arm_distance, arm_normal);
+    if (arm_hit && (!slab_hit || arm_distance < distance)) {
+        distance = arm_distance;
+        normal = arm_normal;
+    }
+    return slab_hit || arm_hit;
 }
 
-bool test_voxel_shape_hit(
-    uint shape_class,
-    ivec3 voxel_coord,
-    vec3 ray_start,
-    vec3 inv_dir,
-    float seg_start,
-    float seg_end,
-    vec3 voxel_entry_normal,
-    out float hit_t,
-    out vec3 hit_normal
+bool voxel_shape_hit(
+    VoxelRay ray, ivec3 cell, uint block_id, uint shape, float start, float end,
+    vec3 entry_normal, out float distance, out vec3 normal
 ) {
-    vec3 v = vec3(voxel_coord);
-    if (shape_class == VOXEL_SHAPE_CUBE) {
-        return intersect_sub_box(ray_start, inv_dir, v, v + vec3(1.0), seg_start, seg_end, voxel_entry_normal, hit_t, hit_normal);
-    } else if (shape_class == VOXEL_SHAPE_SLAB_BOTTOM) {
-        return intersect_sub_box(ray_start, inv_dir, v, v + vec3(1.0, 0.5, 1.0), seg_start, seg_end, voxel_entry_normal, hit_t, hit_normal);
-    } else if (shape_class == VOXEL_SHAPE_SLAB_TOP) {
-        return intersect_sub_box(ray_start, inv_dir, v + vec3(0.0, 0.5, 0.0), v + vec3(1.0, 1.0, 1.0), seg_start, seg_end, voxel_entry_normal, hit_t, hit_normal);
-    } else if (shape_class == VOXEL_SHAPE_PANE_OR_FENCE) {
-        return intersect_sub_box(ray_start, inv_dir, v + vec3(0.375, 0.0, 0.375), v + vec3(0.625, 1.0, 0.625), seg_start, seg_end, voxel_entry_normal, hit_t, hit_normal);
-    } else if (shape_class == VOXEL_SHAPE_COVER) {
-        // 1/16-block cover box: carpets, pressure plates, snow layer.
-        return intersect_sub_box(ray_start, inv_dir, v, v + vec3(1.0, 0.0625, 1.0), seg_start, seg_end, voxel_entry_normal, hit_t, hit_normal);
-    } else if (shape_class == VOXEL_SHAPE_STAIRS_B_N) {
-        return stair_box_hit(ray_start, inv_dir,
-            v, v + vec3(1.0, 0.5, 1.0),
-            v + vec3(0.0, 0.5, 0.0), v + vec3(1.0, 1.0, 0.5),
-            seg_start, seg_end, voxel_entry_normal, hit_t, hit_normal);
-    } else if (shape_class == VOXEL_SHAPE_STAIRS_B_E) {
-        return stair_box_hit(ray_start, inv_dir,
-            v, v + vec3(1.0, 0.5, 1.0),
-            v + vec3(0.5, 0.5, 0.0), v + vec3(1.0, 1.0, 1.0),
-            seg_start, seg_end, voxel_entry_normal, hit_t, hit_normal);
-    } else if (shape_class == VOXEL_SHAPE_STAIRS_B_S) {
-        return stair_box_hit(ray_start, inv_dir,
-            v, v + vec3(1.0, 0.5, 1.0),
-            v + vec3(0.0, 0.5, 0.5), v + vec3(1.0, 1.0, 1.0),
-            seg_start, seg_end, voxel_entry_normal, hit_t, hit_normal);
-    } else if (shape_class == VOXEL_SHAPE_STAIRS_B_W) {
-        return stair_box_hit(ray_start, inv_dir,
-            v, v + vec3(1.0, 0.5, 1.0),
-            v + vec3(0.0, 0.5, 0.0), v + vec3(0.5, 1.0, 1.0),
-            seg_start, seg_end, voxel_entry_normal, hit_t, hit_normal);
-    } else if (shape_class == VOXEL_SHAPE_STAIRS_T_N) {
-        return stair_box_hit(ray_start, inv_dir,
-            v + vec3(0.0, 0.5, 0.0), v + vec3(1.0, 1.0, 1.0),
-            v + vec3(0.0, 0.0, 0.0), v + vec3(1.0, 0.5, 0.5),
-            seg_start, seg_end, voxel_entry_normal, hit_t, hit_normal);
-    } else if (shape_class == VOXEL_SHAPE_STAIRS_T_E) {
-        return stair_box_hit(ray_start, inv_dir,
-            v + vec3(0.0, 0.5, 0.0), v + vec3(1.0, 1.0, 1.0),
-            v + vec3(0.5, 0.0, 0.0), v + vec3(1.0, 0.5, 1.0),
-            seg_start, seg_end, voxel_entry_normal, hit_t, hit_normal);
-    } else if (shape_class == VOXEL_SHAPE_STAIRS_T_S) {
-        return stair_box_hit(ray_start, inv_dir,
-            v + vec3(0.0, 0.5, 0.0), v + vec3(1.0, 1.0, 1.0),
-            v + vec3(0.0, 0.0, 0.5), v + vec3(1.0, 0.5, 1.0),
-            seg_start, seg_end, voxel_entry_normal, hit_t, hit_normal);
-    } else if (shape_class == VOXEL_SHAPE_STAIRS_T_W) {
-        return stair_box_hit(ray_start, inv_dir,
-            v + vec3(0.0, 0.5, 0.0), v + vec3(1.0, 1.0, 1.0),
-            v + vec3(0.0, 0.0, 0.0), v + vec3(0.5, 0.5, 1.0),
-            seg_start, seg_end, voxel_entry_normal, hit_t, hit_normal);
-    }
-    return intersect_sub_box(ray_start, inv_dir, v, v + vec3(1.0), seg_start, seg_end, voxel_entry_normal, hit_t, hit_normal);
-}
-
-struct VoxelHit {
-    bool hit;
-    vec3 hit_pos;
-    vec3 hit_normal;
-    vec3 radiance;
-    float distance;
-    vec3 transmittance;
-    // Emission accumulated from non-solid emitters along the ray
-    vec3 passed_emission;
-    vec3 albedo;
-    float roughness;
-    bool is_emitter;
-};
-
-// Voxel march for direct sun shadow visibility
-const float voxel_sun_shadow_dist = 32.0;
-const int voxel_sun_shadow_max_steps = 40;
-
-float trace_sun_visibility(
-    usampler3D voxel_grid,
-    vec3 start_scene,
-    vec3 l_dir_in
-) {
-    float max_shadow_dist = voxel_sun_shadow_dist;
-#ifdef VOXEL_DDA_USE_SHADOWMAP
-    vec3 shadow_view_pos = transform(shadowModelView, start_scene + l_dir_in * 0.45);
-    vec3 shadow_clip_pos = project_ortho(shadowProjection, shadow_view_pos);
-    if (all(lessThan(abs(shadow_clip_pos), vec3(0.99)))) {
-        vec3 shadow_screen_pos = distort_shadow_space(shadow_clip_pos) * 0.5 + 0.5;
-        if (texture(shadowtex1, vec3(shadow_screen_pos.xy, shadow_screen_pos.z - 0.0025)) < 0.01) {
-            return 0.0;
+    vec3 base = vec3(cell);
+    EmitterBox box = EmitterBox(vec3(0.0), vec3(1.0));
+    if (voxel_torch_emitter(block_id) || voxel_lantern_emitter(block_id)) {
+        box = voxel_emitter_box(block_id);
+    } else if (voxel_box_emitter(block_id) || shape == VOXEL_SHAPE_CUBE) {
+        // The DDA has already intersected the entire cell.
+        if (entry_normal != vec3(0.0)) {
+            distance = start;
+            normal = entry_normal;
+            return true;
         }
-        // Shadow map already verified long-range sun visibility beyond the 0.45m bias;
-        // only march voxels across the near-field bias gap.
-        max_shadow_dist = 4.5;
+    } else if (shape == VOXEL_SHAPE_SLAB_BOTTOM) {
+        box.hi.y = 0.5;
+    } else if (shape == VOXEL_SHAPE_SLAB_TOP) {
+        box.lo.y = 0.5;
+    } else if (shape == VOXEL_SHAPE_PANE_OR_FENCE) {
+        box = EmitterBox(vec3(0.375, 0.0, 0.375), vec3(0.625, 1.0, 0.625));
+    } else if (shape == VOXEL_SHAPE_COVER) {
+        box.hi.y = 0.0625;
+    } else if (shape == VOXEL_SHAPE_STAIRS_B_N || shape >= VOXEL_SHAPE_STAIRS_B_E) {
+        return voxel_stair_hit(ray, base, shape, start, end, distance, normal);
     }
-#endif
+    return voxel_box_hit(ray, base + box.lo, base + box.hi, start, end, distance, normal);
+}
 
-    // safe_ray_dir keeps axis-aligned light directions from producing
-    // infinite/NaN DDA inv_dir terms when the origin sits on a grid plane.
-    vec3 l_dir = safe_ray_dir(l_dir_in);
-    vec3 origin_scene = rt_voxel_origin_scene();
+vec3 voxel_boundary_times(VoxelRay ray, ivec3 cell) {
+    vec3 plane = vec3(cell) + vec3(greaterThan(ray.direction, vec3(0.0)));
+    return mix((plane - ray.origin) * ray.inverse, vec3(voxel_infinity), ray.parallel);
+}
 
-    vec3 start_voxel = start_scene - origin_scene;
-    vec3 inv_dir = 1.0 / l_dir;
+bool voxel_empty_for_transport(uint block_id) {
+    return block_id <= 4u || block_id == 14u || block_id == 15u
+        || block_id == 58u || block_id == 80u;
+}
 
-    vec3 t0 = (vec3(0.0) - start_voxel) * inv_dir;
-    vec3 t1 = (rt_voxel_size_f - start_voxel) * inv_dir;
-    vec3 tnear = min(t0, t1);
-    vec3 tfar = max(t0, t1);
-    float tenter = max(max(tnear.x, tnear.y), tnear.z);
-    float texit = min(min(tfar.x, tfar.y), tfar.z);
-    float seg_end = min(texit, max_shadow_dist);
-    if (seg_end < max(tenter, 0.0)) {
-        return 1.0;
+VoxelHit trace_voxel_segment(
+    usampler3D voxel_grid, vec3 origin, vec3 direction, float max_distance, int mode
+) {
+    VoxelHit result = VoxelHit(voxel_invalid_ray, 0.0, ivec3(0), 0u, vec3(0.0), vec3(1.0), vec3(0.0));
+    if (any(isnan(origin)) || any(isinf(origin)) || any(isnan(direction)) || any(isinf(direction))
+        || !(max_distance > 0.0) || isinf(max_distance) || dot(direction, direction) == 0.0) {
+        return result;
     }
 
-    float t = max(tenter, 0.0) + 1e-4;
-    ivec3 current_voxel = ivec3(floor(start_voxel + l_dir * t));
+    bvec3 parallel = equal(direction, vec3(0.0));
+    vec3 inverse = clamp(1.0 / mix(direction, vec3(1.0), parallel), -voxel_infinity, voxel_infinity);
+    VoxelRay ray = VoxelRay(origin, direction, inverse, parallel);
+    vec3 volume_entry;
+    float volume_exit;
+    result.status = voxel_volume_exit;
+    if (!voxel_box_interval(ray, vec3(0.0), rt_voxel_size_f, volume_entry, volume_exit)) {
+        return result;
+    }
 
-    vec3 step_dir = sign(l_dir);
-    vec3 delta_t = abs(inv_dir);
-    vec3 t_max =
-        (step_dir * (vec3(current_voxel) - start_voxel) + step_dir * 0.5 + 0.5)
-        * delta_t;
-    vec3 mask;
+    float enter = max_of(volume_entry);
+    float start = max(enter, 0.0);
+    float end = min(volume_exit, max_distance);
+    if (end <= start) {
+        return result;
+    }
 
-    int max_steps = min(voxel_sun_shadow_max_steps, int(ceil((seg_end - t) * 1.75)) + 2);
-    for (int i = 0; i < max_steps; ++i) {
-        if (!is_inside_voxel_grid(current_voxel) || t > seg_end) break;
+    vec3 step_dir = sign(direction);
+    vec3 first = origin + start * direction;
+    vec3 cell_corner = floor(first);
+    ivec3 negative_boundary = ivec3(lessThan(direction, vec3(0.0))) * ivec3(equal(first, cell_corner));
+    ivec3 cell = clamp_to_voxel_grid(ivec3(cell_corner) - negative_boundary);
+    vec3 entry_normal = enter >= 0.0
+        ? voxel_entry_normal(equal(volume_entry, vec3(enter)), step_dir) : vec3(0.0);
+    vec3 boundary = voxel_boundary_times(ray, cell);
+    result.status = volume_exit <= max_distance ? voxel_volume_exit : voxel_distance_limit;
+    result.distance = end;
 
-        // i == 0 is the (biased) origin cell on the hit face — never occlude
-        // against the surface the march started from.
-        if (i > 0) {
-            uint packed_val = texelFetch(voxel_grid, current_voxel, 0).r;
-            if (packed_val != 0u) {
-                VoxelSample sample_data = unpack_voxel_data(packed_val);
-                // Clear & stained glass (80..96) transmit direct sun; all other voxelized blocks occlude.
-                if (sample_data.block_id < 80u || sample_data.block_id > 96u) {
-                    if (sample_data.shape_class == VOXEL_SHAPE_CUBE) {
-                        return 0.0;
+    // A segment crosses at most ceil(length * |direction|_1) + 3 grid
+    // planes, including the initial fractional cell on each axis.
+    int budget = min(voxel_dda_max_steps,
+                     int(ceil((end - start) * dot(abs(direction), vec3(1.0)))) + 4);
+    float t = start;
+    for (int step = 0; step < budget; ++step) {
+        float crossing = min_of(boundary);
+        float cell_end = min(crossing, end);
+        if (cell_end > t) {
+            uint payload = texelFetch(voxel_grid, cell, 0).r;
+            uint block_id = voxel_block_id(payload);
+            bool glass = 81u <= block_id && block_id <= 96u;
+            if (glass) {
+                if (mode != voxel_ray_ao) {
+                    result.transmittance *= max0(voxel_tint_color_table[block_id - 81u] * rec709_to_rec2020);
+                }
+            } else if (!voxel_empty_for_transport(block_id)
+                       && (mode != voxel_ray_ao || (payload & (1u << 23u)) == 0u)) {
+                uint shape = (payload >> 19u) & 15u;
+                bool thin = voxel_emitter_id(block_id) && !voxel_box_emitter(block_id)
+                    && shape != VOXEL_SHAPE_CUBE;
+                if (thin && mode != voxel_ray_ao) {
+                    if (mode == voxel_ray_path) {
+                        result.passed_emission += result.transmittance * get_voxel_emission(block_id);
                     }
-                    float shape_t;
-                    vec3 shape_n;
-                    if (test_voxel_shape_hit(
-                        sample_data.shape_class, current_voxel, start_voxel, inv_dir,
-                        t, seg_end, -sign(l_dir), shape_t, shape_n
-                    )) {
-                        return 0.0;
+                } else {
+                    float hit_distance;
+                    vec3 normal;
+                    if (voxel_shape_hit(ray, cell, block_id, shape, t, cell_end, entry_normal,
+                                        hit_distance, normal)) {
+                        result.status = normal != vec3(0.0) ? voxel_hit_surface : voxel_inside_solid;
+                        result.distance = hit_distance;
+                        result.cell = cell;
+                        result.payload = payload;
+                        result.normal = normal;
+                        return result;
                     }
                 }
             }
         }
-
-        float next_t = min(min(t_max.x, t_max.y), t_max.z);
-        if (next_t > seg_end) break;
-        if (t_max.x < t_max.y) {
-            mask = (t_max.x < t_max.z) ? vec3(1.0, 0.0, 0.0) : vec3(0.0, 0.0, 1.0);
-        } else {
-            mask = (t_max.y < t_max.z) ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0);
+        if (crossing >= end) {
+            return result;
         }
-        t = next_t;
-        t_max += mask * delta_t;
-        current_voxel += ivec3(mask * step_dir);
+
+        // Step all tied axes at once. Zero-length corner contacts never
+        // sample a cell. Recompute crossing times to avoid accumulated drift.
+        bvec3 axes = equal(boundary, vec3(crossing));
+        cell += ivec3(axes) * ivec3(step_dir);
+        if (!is_inside_voxel_grid(cell)) {
+            result.status = voxel_volume_exit;
+            result.distance = max(t, crossing);
+            return result;
+        }
+        entry_normal = voxel_entry_normal(axes, step_dir);
+        boundary = voxel_boundary_times(ray, cell);
+        t = max(t, crossing);
     }
 
-    return 1.0;
-}
-
-VoxelHit make_miss_voxel_hit(vec3 ray_origin_scene, vec3 ray_dir, float max_dist) {
-    VoxelHit result;
-    result.hit = false;
-    result.hit_pos = ray_origin_scene + ray_dir * max_dist;
-    result.hit_normal = -ray_dir;
-    result.radiance = vec3(0.0);
-    result.distance = max_dist;
-    result.transmittance = vec3(1.0);
-    result.passed_emission = vec3(0.0);
-    result.albedo = vec3(0.0);
-    result.roughness = 1.0;
-    result.is_emitter = false;
+    result.status = voxel_step_limit;
+    result.distance = t;
     return result;
 }
 
-void shade_voxel_hit(
-    inout VoxelHit result,
-    VoxelSample sample_data,
-    VoxelMaterial mat,
-    vec3 hit_face_scene,
-    vec3 hit_norm,
-    vec3 ray_transmittance,
-    usampler3D voxel_grid,
-    vec3 direct_sun_color,
-    vec3 l_dir
-) {
-    result.hit = true;
-    result.hit_normal = hit_norm;
-    result.hit_pos = hit_face_scene;
-    result.transmittance = ray_transmittance;
-    result.roughness = mat.roughness;
-    result.is_emitter = sample_data.is_emitter;
-
-    float NoL = max(0.0, dot(hit_norm, l_dir));
-    float sun_vis = 0.0;
-    // Skip the march when the light carries no color (Nether light_color is zero)
-    if (NoL > 0.0 && (direct_sun_color.r + direct_sun_color.g + direct_sun_color.b) > 0.0) {
-        vec3 shadow_start = hit_face_scene + hit_norm * 0.05 + l_dir * 0.02;
-        sun_vis = trace_sun_visibility(voxel_grid, shadow_start, l_dir);
-    }
-    vec3 sun_irradiance = direct_sun_color * (sun_vis * NoL);
-
-    vec3 bounce_albedo = mat.albedo;
-    result.albedo = bounce_albedo;
-
-    vec3 emission_radiance = mat.emission;
-
-#ifndef SUN_INDIRECT_BOOST
-#define SUN_INDIRECT_BOOST 2.5
-#endif
-    vec3 bounce_radiance = bounce_albedo * (sun_irradiance * SUN_INDIRECT_BOOST) * voxel_bounce_rcp_pi;
-
-    // Outgoing radiance at the hit is unattenuated; callers multiply by the accumulated transmittance.
-    result.radiance = emission_radiance + bounce_radiance;
-}
-
-// Traces a ray through the single fine voxel volume
-VoxelHit trace_voxel_dda(
-    usampler3D voxel_grid,
-    vec3 ray_origin_scene,
-    vec3 surface_normal,
-    vec3 ray_dir,
-    float dither,
-    vec3 direct_sun_color,
-    vec3 l_dir,
-    float max_dist
-) {
-    vec3 dda_dir = normalize(safe_ray_dir(ray_dir));
-    vec3 inv_dir = 1.0 / dda_dir;
-    vec3 origin_scene = rt_voxel_origin_scene();
-
-    // Offset ray start to avoid self-intersection.
-    vec3 start_scene = ray_origin_scene
-        + dda_dir * (0.015 + 0.0001 * max_dist + 0.008 * dither)
-        + surface_normal * 0.03;
-
-    // Bounded escape for POM displacement: small steps avoiding corridor penetration
-    for (int esc = 0; esc < 2; ++esc) {
-        ivec3 s_cell = ivec3(floor(start_scene - origin_scene));
-        if (!is_inside_voxel_grid(s_cell)) break;
-        uint s_packed = texelFetch(voxel_grid, s_cell, 0).r;
-        if (unpack_voxel_data(s_packed).block_id == 0u) break;
-        start_scene += surface_normal * 0.02;
-    }
-
-    vec3 start_voxel = start_scene - origin_scene;
-
-    VoxelHit result = make_miss_voxel_hit(ray_origin_scene, dda_dir, max_dist);
-
-    // Clip the biased ray to the voxel volume.
-    vec3 t0 = (vec3(0.0) - start_voxel) * inv_dir;
-    vec3 t1 = (rt_voxel_size_f - start_voxel) * inv_dir;
-    vec3 tnear = min(t0, t1);
-    vec3 tfar = max(t0, t1);
-    float tenter = max(max(tnear.x, tnear.y), tnear.z);
-    float texit = min(min(tfar.x, tfar.y), tfar.z);
-    if (texit < max(tenter, 0.0) || texit < 0.0) {
-        return result;
-    }
-
-    float seg_start = max(tenter, 0.0) + 1e-4;
-    float seg_end = min(texit, max_dist);
-    if (seg_start > seg_end) {
-        return result;
-    }
-
-    ivec3 current_voxel = ivec3(floor(start_voxel + dda_dir * seg_start));
-
-    ivec3 origin_voxel = ivec3(floor(ray_origin_scene - surface_normal * 0.05 - origin_scene));
-    ivec3 origin_voxel_ray = ivec3(floor(ray_origin_scene - dda_dir * 0.05 - origin_scene));
-
-    vec3 step_dir = sign(dda_dir);
-    vec3 delta_t = abs(inv_dir);
-    vec3 t_max = (step_dir * (vec3(current_voxel) - start_voxel) + step_dir * 0.5 + 0.5) * delta_t;
-
-    vec3 mask;
-    if (tenter == tnear.x) mask = vec3(1.0, 0.0, 0.0);
-    else if (tenter == tnear.y) mask = vec3(0.0, 1.0, 0.0);
-    else mask = vec3(0.0, 0.0, 1.0);
-    float t = seg_start;
-    vec3 ray_transmittance = vec3(1.0);
-
-    int max_steps = min(voxel_dda_max_steps, int(ceil((seg_end - seg_start) * 1.75)) + 3);
-    for (int i = 0; i < max_steps; ++i) {
-        if (!is_inside_voxel_grid(current_voxel) || t > seg_end) break;
-
-        float next_t = min(min(t_max.x, t_max.y), t_max.z);
-        float clamped_next_t = min(next_t, seg_end);
-
-        if (current_voxel != origin_voxel && current_voxel != origin_voxel_ray) {
-            uint packed_val = texelFetch(voxel_grid, current_voxel, 0).r;
-            if (packed_val != 0u) {
-                VoxelSample sample_data = unpack_voxel_data(packed_val);
-                uint bid = sample_data.block_id;
-                if (bid >= 81u && bid <= 96u) {
-                    ray_transmittance *= max0(voxel_tint_color_table[bid - 81u] * rec709_to_rec2020);
-                } else if (bid != 80u) {
-                    vec3 entry_norm = (dot(mask, mask) > 0.5) ? (-mask * step_dir) : -sign(dda_dir);
-                    uint shape = sample_data.shape_class;
-                    bool thin_emitter = (sample_data.is_emitter && shape != VOXEL_SHAPE_CUBE);
-                    float hit_t = t;
-                    vec3 hit_norm = entry_norm;
-                    bool did_hit = true;
-                    if (!thin_emitter && shape != VOXEL_SHAPE_CUBE) {
-                        did_hit = test_voxel_shape_hit(
-                            shape, current_voxel, start_voxel, inv_dir,
-                            t, clamped_next_t, entry_norm, hit_t, hit_norm
-                        );
-                    }
-                    if (did_hit) {
-                        VoxelMaterial mat = get_voxel_material(bid, sample_data.color);
-                        if (thin_emitter) {
-                            result.passed_emission += mat.emission * ray_transmittance;
-                        } else if (mat.is_solid || sample_data.is_emitter) {
-                            vec3 hit_face_scene = start_scene + dda_dir * hit_t;
-                            shade_voxel_hit(
-                                result, sample_data, mat, hit_face_scene,
-                                hit_norm, ray_transmittance, voxel_grid,
-                                direct_sun_color, l_dir
-                            );
-                            result.distance = distance(hit_face_scene, ray_origin_scene);
-                            return result;
-                        }
-                    }
-                }
-            }
-        }
-
-        if (t_max.x < t_max.y) {
-            if (t_max.x < t_max.z) mask = vec3(1.0, 0.0, 0.0);
-            else mask = vec3(0.0, 0.0, 1.0);
-        } else {
-            if (t_max.y < t_max.z) mask = vec3(0.0, 1.0, 0.0);
-            else mask = vec3(0.0, 0.0, 1.0);
-        }
-        t = next_t;
-        t_max += mask * delta_t;
-        current_voxel += ivec3(mask * step_dir);
-    }
-
-    result.hit_pos = start_scene + dda_dir * seg_end;
-    result.distance = distance(result.hit_pos, ray_origin_scene);
-    result.transmittance = ray_transmittance;
-    return result;
-}
-
-// Fast shadow / occlusion test (terminates on first opaque sub-box hit)
 bool trace_any_hit(
-    usampler3D voxel_grid,
-    vec3 ray_origin_scene,
-    vec3 surface_normal,
-    vec3 ray_dir,
-    float max_dist
+    usampler3D voxel_grid, vec3 scene_pos, vec3 normal, vec3 direction, float max_distance
 ) {
-    vec3 dda_dir = normalize(safe_ray_dir(ray_dir));
-    vec3 inv_dir = 1.0 / dda_dir;
-    vec3 start_scene = ray_origin_scene + surface_normal * 0.03 + dda_dir * 0.02;
-    vec3 start_voxel = scene_to_voxel_space(start_scene);
-    ivec3 current_voxel = ivec3(floor(start_voxel));
-
-    ivec3 origin_voxel = ivec3(floor(scene_to_voxel_space(ray_origin_scene - surface_normal * 0.05)));
-    ivec3 origin_voxel_ray = ivec3(floor(scene_to_voxel_space(ray_origin_scene - dda_dir * 0.05)));
-
-    vec3 step_dir = sign(dda_dir);
-    vec3 delta_t = abs(inv_dir);
-    vec3 t_max = (step_dir * (vec3(current_voxel) - start_voxel) + step_dir * 0.5 + 0.5) * delta_t;
-
-    vec3 mask = vec3(0.0);
-    float t = 0.0;
-
-    int MAX_STEPS = min(voxel_dda_max_steps, int(ceil(max_dist * 1.8)) + 2);
-    for (int i = 0; i < MAX_STEPS; ++i) {
-        if (!is_inside_voxel_grid(current_voxel) || t > max_dist) {
-            break;
-        }
-
-        float next_t = min(min(t_max.x, t_max.y), t_max.z);
-        float clamped_next_t = min(next_t, max_dist);
-
-        if (current_voxel != origin_voxel && current_voxel != origin_voxel_ray) {
-            uint packed_val = texelFetch(voxel_grid, current_voxel, 0).r;
-            if (packed_val != 0u) {
-                VoxelSample sample_data = unpack_voxel_data(packed_val);
-
-                if (sample_data.is_solid && !sample_data.is_translucent) {
-                    if (sample_data.shape_class == VOXEL_SHAPE_CUBE) {
-                        return true;
-                    }
-                    float hit_t;
-                    vec3 hit_norm;
-                    vec3 entry_norm = (dot(mask, mask) > 0.5) ? (-mask * step_dir) : -sign(dda_dir);
-                    if (test_voxel_shape_hit(
-                        sample_data.shape_class,
-                        current_voxel,
-                        start_voxel,
-                        inv_dir,
-                        t,
-                        clamped_next_t,
-                        entry_norm,
-                        hit_t,
-                        hit_norm
-                    )) {
-                        return true;
-                    }
-                }
-            }
-        }
-
-        if (t_max.x < t_max.y) {
-            if (t_max.x < t_max.z) {
-                mask = vec3(1.0, 0.0, 0.0);
-            } else {
-                mask = vec3(0.0, 0.0, 1.0);
-            }
-        } else {
-            if (t_max.y < t_max.z) {
-                mask = vec3(0.0, 1.0, 0.0);
-            } else {
-                mask = vec3(0.0, 0.0, 1.0);
-            }
-        }
-        t = next_t;
-        t_max += mask * delta_t;
-        current_voxel += ivec3(mask * step_dir);
-    }
-
-    return false;
+    vec3 origin = scene_to_voxel_space(scene_pos) + normal * voxel_receiver_bias;
+    VoxelHit hit = trace_voxel_segment(voxel_grid, origin, direction, max_distance, voxel_ray_ao);
+    return hit.status == voxel_hit_surface;
 }
 
-#endif // INCLUDE_LIGHTING_RT_VOXEL_DDA
+#endif

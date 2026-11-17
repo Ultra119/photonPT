@@ -87,18 +87,20 @@ uint pack_voxel_data(
 }
 
 // Unpack voxel cell data from one R32UI texel value.
+uint voxel_block_id(uint packed_val) {
+    return (packed_val >> 24u) & 0x7Fu;
+}
+
 VoxelSample unpack_voxel_data(uint packed_val) {
     VoxelSample sample_data;
-    sample_data.block_id = (packed_val >> 24u) & 0x7Fu;
+    sample_data.block_id = voxel_block_id(packed_val);
     sample_data.is_solid = sample_data.block_id != 0u;
     sample_data.block_light = float((packed_val >> 15u) & 0x3u) * (1.0 / 3.0);
     sample_data.sky_light = 0.0;
     sample_data.shape_class = (packed_val >> 19u) & 0xFu;
 
     sample_data.is_translucent = ((packed_val >> 23u) & 1u) != 0u;
-    sample_data.is_emitter = ((packed_val >> 31u) != 0u)
-        || (sample_data.block_id >= 32u && sample_data.block_id < 80u
-            && sample_data.block_id != 58u && sample_data.block_id != 63u);
+    sample_data.is_emitter = ((packed_val >> 31u) != 0u) || voxel_emitter_id(sample_data.block_id);
 
     sample_data.color = unpack_unorm_rgb555(packed_val & 0x7FFFu);
 

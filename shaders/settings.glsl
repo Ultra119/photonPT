@@ -61,13 +61,14 @@ const float wetnessHalflife         = 70.0;
 // ------------------------------------
 
   #define PT_BOUNCES 2 // [1 2 3]
+  #define RTGI_EMITTER_SAMPLING
 
   #define RTGI_FILTER_PHI 10.0 // [4.0 6.0 8.0 10.0 12.0 16.0 24.0 32.0]
   #define RTGI_SPP_CAP 128 // [32 64 96 128 192 255]
   #define RTGI_SPATIAL_FALLBACK 1 // [0 1]
   #define RTGI_MIN_ACCUM 1.0 // [0.0 0.5 1.0 2.0]
   #define RTGI_ADAPT_STRENGTH 0.5 // [0.0 0.25 0.5 0.75 1.0]
-  #define RTGI_MAX_RADIANCE 24.0 // [4.0 6.0 8.0 12.0 16.0 20.0 24.0 32.0 48.0 64.0]
+  #define RTGI_MAX_RADIANCE 24.0 // [0.0 4.0 6.0 8.0 12.0 16.0 20.0 24.0 32.0 48.0 64.0]
   #define EMISSION_ANCHOR 16.0 // [4.0 6.0 8.0 10.0 12.0 16.0 20.0 24.0 32.0]
   #define SUN_INDIRECT_BOOST 2.50 // [1.00 1.25 1.50 1.75 2.00 2.50 3.00 3.50 4.00 5.00]
 
@@ -543,8 +544,9 @@ const float wetnessHalflife         = 70.0;
   #define GI_DEBUG_SPP       12 // accumulated samples per pixel
   #define GI_DEBUG_RESET     13 // temporal pass reset reason
   #define GI_DEBUG_BYPASS    14 // filter convergence bypass
+  #define GI_DEBUG_EMITTER   15 // primary direct-emitter proposal
 
-  #define GI_DEBUG GI_DEBUG_OFF // [GI_DEBUG_OFF GI_DEBUG_RAW GI_DEBUG_HISTORY GI_DEBUG_FILTERED GI_DEBUG_HIT GI_DEBUG_REJECT GI_DEBUG_VOXEL_ID GI_DEBUG_VOXEL_LIGHT GI_DEBUG_VOXEL_ALBEDO GI_DEBUG_VARIANCE GI_DEBUG_PROBE GI_DEBUG_COVERAGE GI_DEBUG_SPP GI_DEBUG_RESET GI_DEBUG_BYPASS]
+  #define GI_DEBUG GI_DEBUG_OFF // [GI_DEBUG_OFF GI_DEBUG_RAW GI_DEBUG_HISTORY GI_DEBUG_FILTERED GI_DEBUG_HIT GI_DEBUG_REJECT GI_DEBUG_VOXEL_ID GI_DEBUG_VOXEL_LIGHT GI_DEBUG_VOXEL_ALBEDO GI_DEBUG_VARIANCE GI_DEBUG_PROBE GI_DEBUG_COVERAGE GI_DEBUG_SPP GI_DEBUG_RESET GI_DEBUG_BYPASS GI_DEBUG_EMITTER]
 
   #define DEBUG_SAMPLER colortex1 // [colortex1 colortex2 colortex3 colortex4 colortex5 colortex6 colortex7 colortex8 colortex9 colortex10 colortex11 colortex12 colortex13 colortex14 colortex15 depthtex0 depthtex1 depthtex2 shadowtex0 shadowtex1 shadowcolor0 shadowcolor1]
 //#define WHITE_WORLD

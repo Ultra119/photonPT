@@ -84,6 +84,8 @@ uniform sampler2D rtgi_accum_sampler;
 uniform sampler2D rtgi_filtered_sampler;
 #if GI_DEBUG == GI_DEBUG_HIT
 uniform sampler2D rtgi_hit_sampler;
+#elif GI_DEBUG == GI_DEBUG_EMITTER
+uniform sampler2D rtgi_emitter_debug_sampler;
 #endif
 #if GI_DEBUG == GI_DEBUG_REJECT
 uniform sampler2D rtgi_reject_sampler;

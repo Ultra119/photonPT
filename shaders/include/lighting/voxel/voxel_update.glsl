@@ -5,6 +5,11 @@
 #include "voxel_storage.glsl"
 #include "/include/utility/color.glsl"
 
+#ifdef RTGI_EMITTER_SAMPLING
+#include "emitter_index_layout.glsl"
+layout(r32ui) uniform uimage2D rtgi_emitter_marks_img;
+#endif
+
 // Voxel volume. Iris clears the image at frame start; terrain writes repopulate it.
 layout(r32ui) uniform uimage3D voxel_img;
 
@@ -37,6 +42,10 @@ bool is_voxel_terrain_stage() {
 }
 
 uint get_voxel_shape_class(uint block_id, vec3 mid_block_attr, vec3 normal) {
+    // Compact emitter bounds are determined by emitter_shape.glsl.
+    if (voxel_box_emitter(block_id)) {
+        return VOXEL_SHAPE_CUBE;
+    }
     if (block_id == 98u) {
         return VOXEL_SHAPE_STAIRS_B_N;
     }
@@ -118,7 +127,7 @@ uint get_voxel_shape_class(uint block_id, vec3 mid_block_attr, vec3 normal) {
 
 bool should_voxelize(uint block_id) {
     bool is_transparent_block = (block_id == 1u || block_id == 18u || block_id == 28u || block_id == 30u || block_id == 80u);
-    bool is_emitter = (32u <= block_id && block_id < 80u && block_id != 58u && block_id != 63u);
+    bool is_emitter = voxel_emitter_id(block_id);
     bool is_non_solid = (block_id == 2u || block_id == 3u || block_id == 4u || block_id == 14u || block_id == 15u || block_id == 58u);
     bool is_stained_glass = (block_id >= 81u && block_id <= 96u);
 
@@ -179,7 +188,7 @@ void update_rt_voxel_grid(
 #endif
 
     bool is_translucent = (block_id == 5u || block_id == 14u || block_id == 15u || (80u <= block_id && block_id <= 96u));
-    bool is_emitter = (32u <= block_id && block_id < 80u && block_id != 58u && block_id != 63u);
+    bool is_emitter = voxel_emitter_id(block_id);
 
     vec2 sample_uv = (mid_tex_coord != vec2(0.0)) ? mid_tex_coord : tex_coord;
     vec4 tex_sample = textureLod(tex, sample_uv, 0.0);
@@ -189,7 +198,6 @@ void update_rt_voxel_grid(
     vec3 albedo_srgb = (tex_sample.a > 0.05) ? (tex_sample.rgb * vertex_tint) : vertex_tint;
     vec3 linear_albedo = srgb_eotf_inv(clamp01(albedo_srgb));
 
-    vec3 voxel_albedo = is_emitter ? get_voxel_light_color(block_id) : linear_albedo;
     // Only actual light-emitting blocks (torches, lanterns, glowstone, lava)
     float voxel_block_light = is_emitter ? 1.0 : 0.0;
     uint shape_class = get_voxel_shape_class(block_id, mid_block_attr, world_normal);
@@ -201,13 +209,19 @@ void update_rt_voxel_grid(
         block_id,
         voxel_block_light,
         shape_class,
-        voxel_albedo,
+        linear_albedo,
         is_translucent,
         is_emitter,
         face_priority
     );
 
-    imageAtomicMax(voxel_img, ivec3(local), packed_data);
+    ivec3 cell = ivec3(local);
+    uint previous = imageAtomicMax(voxel_img, cell, packed_data);
+#ifdef RTGI_EMITTER_SAMPLING
+    if (emitter_index_member(packed_data) && !emitter_index_member(previous)) {
+        imageAtomicOr(rtgi_emitter_marks_img, emitter_mark_texel(cell / 8), 1u);
+    }
+#endif
 }
 
 #endif // PROGRAM_SHADOW || PROGRAM_GBUFFERS_TERRAIN || PROGRAM_GBUFFERS_WATER

@@ -2,6 +2,7 @@
 #define INCLUDE_MISC_MATERIAL
 
 #include "/include/post_processing/aces/matrices.glsl"
+#include "/include/lighting/voxel/emitter_ids.glsl"
 #include "/include/utility/color.glsl"
 
 // Reflection eligibility cutoff (Kneemund's method). Formerly the user-facing
@@ -142,6 +143,7 @@ Material material_from(
     vec3 normal,
     inout vec2 light_levels
 ) {
+    material_mask = emitter_palette_id(material_mask);
     vec3 block_pos = fract(world_pos);
 
     // Create material with default values

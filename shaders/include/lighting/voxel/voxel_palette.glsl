@@ -3,6 +3,7 @@
 
 // global.glsl included by parent program
 #include "/include/lighting/voxel/light_colors.glsl"
+#include "emitter_shape.glsl"
 #include "/include/utility/color.glsl"
 
 struct VoxelMaterial {
@@ -22,6 +23,20 @@ vec3 get_voxel_light_color(uint block_id) {
     return peak > 0.0 ? color / peak : vec3(1.0);
 }
 
+vec3 get_voxel_emission(uint block_id) {
+    if (!voxel_emitter_id(block_id)) {
+        return vec3(0.0);
+    }
+    uint palette_id = emitter_palette_id(block_id);
+    float level = voxel_light_level_table[palette_id - 32u];
+    vec3 color = max0(get_voxel_light_color(palette_id) * rec709_to_rec2020);
+    vec3 areas = emitter_face_areas(voxel_emitter_box(block_id));
+    // Preserve the approximate total flux of the original whole-cell light
+    // when replacing it with a compact Lambertian surface.
+    float area_scale = 3.0 / dot(areas, vec3(1.0));
+    return color * (EMISSION_ANCHOR * EMISSION_STRENGTH * voxel_light_response(level) * area_scale);
+}
+
 // Physically calibrated block albedos & materials
 VoxelMaterial get_voxel_material(uint block_id, vec3 fallback_color) {
     VoxelMaterial mat;
@@ -38,21 +53,9 @@ VoxelMaterial get_voxel_material(uint block_id, vec3 fallback_color) {
         return mat;
     }
 
-    // Check emissive blocks
-    if (block_id >= 32u && block_id < 80u) {
-        if (block_id == 58u || block_id == 63u) {
-            mat.emission = vec3(0.0);
-            mat.roughness = 0.85;
-            mat.is_solid = (block_id != 58u);
-        } else {
-            uint light_idx = clamp(block_id - 32u, 0u, 47u);
-            vec3 emit_rec2020 = max0(get_voxel_light_color(block_id) * rec709_to_rec2020);
-            mat.emission = emit_rec2020
-                * (EMISSION_ANCHOR * EMISSION_STRENGTH
-                   * voxel_light_response(voxel_light_level_table[light_idx]));
-            mat.roughness = 0.5;
-            mat.is_solid = true;
-        }
+    if (voxel_emitter_id(block_id)) {
+        mat.emission = get_voxel_emission(block_id);
+        mat.roughness = 0.5;
     }
 
     // Base block types according to block.properties
