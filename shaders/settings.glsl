@@ -74,7 +74,6 @@ const float wetnessHalflife         = 70.0;
 
   #define RTGI_RESOLUTION 1 // [0 1 2]
   #define RTGI_RAY_COUNT 1 // [1 2 3 4 6 8]
-  #define RTGI_BRIGHTNESS 1.00 // [0.25 0.50 0.75 1.00 1.25 1.50 1.75 2.00 2.50 3.00]
   #define RTGI_INTENSITY 1.00 // [0.25 0.50 0.75 1.00 1.25 1.50 1.75 2.00 2.50 3.00]
   #define RTGI_VOXELIZE_ENTITIES 0 // [0 1]
   #define PHYSICAL_BSDF_ENERGY_COMP
@@ -517,7 +516,7 @@ const float wetnessHalflife         = 70.0;
 //   Miscellaneous
 // -----------------
 
-  #define INFO 2 // [0 1 2 3]
+  #define INFO 2 // [0 1 2 3 4]
 
   #define DEBUG_VIEW_NONE      0
   #define DEBUG_VIEW_SAMPLER   1
@@ -538,15 +537,14 @@ const float wetnessHalflife         = 70.0;
   #define GI_DEBUG_VOXEL_ID  6
   #define GI_DEBUG_VOXEL_LIGHT 7  // R = block light, G = sky light
   #define GI_DEBUG_VOXEL_ALBEDO 8
-  #define GI_DEBUG_VARIANCE  9  // SVGF measured local relative variance / standard deviation
-  #define GI_DEBUG_PROBE     10 // Voxel Irradiance Volume cache visualization
-  #define GI_DEBUG_COVERAGE  11 // finest clipmap level containing each surface / outside coverage
+  #define GI_DEBUG_VARIANCE  9  // relative standard error of the temporal mean
+  #define GI_DEBUG_COVERAGE  11 // voxel volume bounds and populated cells
   #define GI_DEBUG_SPP       12 // accumulated samples per pixel
   #define GI_DEBUG_RESET     13 // temporal pass reset reason
-  #define GI_DEBUG_BYPASS    14 // filter convergence bypass
+  #define GI_DEBUG_BYPASS    14 // filter convergence and standard-error state
   #define GI_DEBUG_EMITTER   15 // primary direct-emitter proposal
 
-  #define GI_DEBUG GI_DEBUG_OFF // [GI_DEBUG_OFF GI_DEBUG_RAW GI_DEBUG_HISTORY GI_DEBUG_FILTERED GI_DEBUG_HIT GI_DEBUG_REJECT GI_DEBUG_VOXEL_ID GI_DEBUG_VOXEL_LIGHT GI_DEBUG_VOXEL_ALBEDO GI_DEBUG_VARIANCE GI_DEBUG_PROBE GI_DEBUG_COVERAGE GI_DEBUG_SPP GI_DEBUG_RESET GI_DEBUG_BYPASS GI_DEBUG_EMITTER]
+  #define GI_DEBUG GI_DEBUG_OFF // [GI_DEBUG_OFF GI_DEBUG_RAW GI_DEBUG_HISTORY GI_DEBUG_FILTERED GI_DEBUG_HIT GI_DEBUG_REJECT GI_DEBUG_VOXEL_ID GI_DEBUG_VOXEL_LIGHT GI_DEBUG_VOXEL_ALBEDO GI_DEBUG_VARIANCE GI_DEBUG_COVERAGE GI_DEBUG_SPP GI_DEBUG_RESET GI_DEBUG_BYPASS GI_DEBUG_EMITTER]
 
   #define DEBUG_SAMPLER colortex1 // [colortex1 colortex2 colortex3 colortex4 colortex5 colortex6 colortex7 colortex8 colortex9 colortex10 colortex11 colortex12 colortex13 colortex14 colortex15 depthtex0 depthtex1 depthtex2 shadowtex0 shadowtex1 shadowcolor0 shadowcolor1]
 //#define WHITE_WORLD
@@ -630,6 +628,9 @@ const float wetnessHalflife         = 70.0;
 #endif
 
 #ifdef VL  
+#endif
+
+#ifdef AIR_FOG_COLORED_LIGHT_SHAFTS
 #endif
 
 #ifdef CREPUSCULAR_RAYS 

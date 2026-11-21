@@ -140,8 +140,6 @@ vec3 gi_debug_view_swatch() {
     return vec3(0.60, 0.60, 0.60);
 #elif GI_DEBUG == GI_DEBUG_VARIANCE
     return vec3(1.0, 0.35, 0.0);
-#elif GI_DEBUG == GI_DEBUG_PROBE
-    return vec3(0.85, 0.20, 0.95);
 #elif GI_DEBUG == GI_DEBUG_COVERAGE
     return vec3(0.50, 1.00, 0.50);
 #elif GI_DEBUG == GI_DEBUG_SPP

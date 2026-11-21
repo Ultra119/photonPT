@@ -4,6 +4,7 @@ profile.low                            = §eLow
 profile.medium                         = §aMedium
 profile.high                           = §bHigh
 profile.ultra                          = §dUltra
+profile.extreme                        = §cExtreme
 
 # Screens
 
@@ -72,6 +73,7 @@ value.INFO.0                           = §eby SixthSurge
 value.INFO.1                           = §aby SixthSurge
 value.INFO.2                           = §bby SixthSurge
 value.INFO.3                           = §dby SixthSurge
+value.INFO.4                           = §cby SixthSurge
 
 # World settings
 
@@ -162,7 +164,7 @@ option.SKYLIGHT_I                      = Skylight Intensity
 option.CAVE_LIGHTING_I                 = Cave Lighting Intensity
 option.CAVE_LIGHTING_I.comment         = Minimum ambient light floor in caves and enclosed areas.
 option.SUN_INDIRECT_BOOST              = Sunlight Indirect Energy
-option.SUN_INDIRECT_BOOST.comment      = Multiplier for sunlight indirect diffuse bounce energy into cave openings and covered areas.
+option.SUN_INDIRECT_BOOST.comment      = Multiplier for sunlight indirect diffuse bounce energy into cave openings and covered areas. Capped per surface to avoid excess reflectance on bright white blocks.
 option.LIGHTNING_FLASH                 = Lightning Flash
 option.NETHER_USE_BIOME_COLOR          = Use Biome Color
 option.NETHER_I                        = Ambient Intensity
@@ -524,7 +526,7 @@ option.SSR_ROUGHNESS_THRESHOLD.comment = Adjusts how smooth a surface must be fo
 option.WATER_CAUSTICS                  = Water Caustics
 option.WATER_CAUSTICS.comment          = Dancing light patterns beneath water
 option.WATER_CAUSTICS_INTENSITY        = Water Caustics Intensity
-option.WATER_CAUSTICS.comment          = Adjust the brightness of water caustics
+option.WATER_CAUSTICS_INTENSITY.comment = Adjust the brightness of water caustics
 option.WATER_EDGE_HIGHLIGHT            = Water Edge Highlight
 option.WATER_EDGE_HIGHLIGHT.comment    = White highlights where water meets terrain. Helps to make water more easily visible in some cases
 option.WATER_EDGE_HIGHLIGHT_INTENSITY  = Water Edge Highlight Intensity
@@ -679,10 +681,10 @@ value.DEBUG_VIEW.DEBUG_VIEW_NONE       = OFF
 value.DEBUG_VIEW.DEBUG_VIEW_SAMPLER    = Sampler
 value.DEBUG_VIEW.DEBUG_VIEW_HISTOGRAM  = Histogram
 value.DEBUG_VIEW.DEBUG_VIEW_WEATHER    = Weather
-value.DEBUG_VIEW.DEBUG_VIEW_GI         = GI Buffers\n\nRequires Ray Traced GI to be enabled, otherwise the screen turns magenta.
+value.DEBUG_VIEW.DEBUG_VIEW_GI         = GI Buffers
 
 option.GI_DEBUG                        = GI Buffer
-option.GI_DEBUG.comment                = Selects a GI buffer.\n\nRaw - This frame's diffuse estimate before temporal accumulation.\nHistory - Temporal mean.\nFiltered - Spatially reconstructed diffuse lighting.\nHit Source - Green for an opaque hit, blue for volume exit, amber for a distance cap, red for an invalid observation.\nDirect Emitter Sample - Weighted direct light sample. Dark red marks a rejected or blocked candidate. Black marks no candidate.\nHistory Rejected - Red shows discarded history weight. Green shows accepted weight.\nVoxel ID / Light / Albedo - Voxel data at the visible surface. Magenta marks pixels outside the volume.
+option.GI_DEBUG.comment                = Selects a GI buffer.\n\nRaw - This frame's diffuse estimate before temporal accumulation.\nHistory - FP32 temporal mean.\nFiltered - Spatially reconstructed diffuse lighting.\nHit Source - Green for an opaque hit, blue for volume exit, amber for a distance cap, red for an invalid observation.\nDirect Emitter Sample - Weighted direct light sample. Dark red marks a rejected or blocked candidate. Black marks no candidate.\nHistory Rejected - Red shows discarded history weight. Green shows accepted weight.\nVariance / Accumulated Samples / Filter Convergence / Reset Reason - Temporal estimator statistics and rejection diagnostics.\nVoxel ID / Light / Albedo / Coverage - Voxel volume data at the visible surface. Magenta marks pixels outside the volume.
 value.GI_DEBUG.GI_DEBUG_OFF            = OFF
 value.GI_DEBUG.GI_DEBUG_RAW            = Raw
 value.GI_DEBUG.GI_DEBUG_HISTORY        = History
@@ -693,11 +695,11 @@ value.GI_DEBUG.GI_DEBUG_VOXEL_ID       = Voxel ID
 value.GI_DEBUG.GI_DEBUG_VOXEL_LIGHT    = Voxel Light
 value.GI_DEBUG.GI_DEBUG_VOXEL_ALBEDO   = Voxel Albedo
 value.GI_DEBUG.GI_DEBUG_VARIANCE       = Variance
-value.GI_DEBUG.GI_DEBUG_PROBE          = Voxel Irradiance Volume
-value.GI_DEBUG.GI_DEBUG_COVERAGE = Voxel Coverage
-value.GI_DEBUG.GI_DEBUG_SPP          = Accumulated Samples
-value.GI_DEBUG.GI_DEBUG_RESET        = Reset Reason
-value.GI_DEBUG.GI_DEBUG_EMITTER      = Direct Emitter Sample
+value.GI_DEBUG.GI_DEBUG_COVERAGE       = Voxel Coverage
+value.GI_DEBUG.GI_DEBUG_SPP            = Accumulated Samples
+value.GI_DEBUG.GI_DEBUG_RESET          = Reset Reason
+value.GI_DEBUG.GI_DEBUG_BYPASS         = Filter Convergence
+value.GI_DEBUG.GI_DEBUG_EMITTER        = Direct Emitter Sample
 
 value.tonemap_left.tonemap_aces_fit       = ACES Fit
 value.tonemap_left.tonemap_aces_full      = ACES Full
@@ -758,20 +760,13 @@ option.NOISE_ON_DH_TERRAIN      = Noise on DH Terrain
 # Ray Tracing & GI
 screen.raytracing                                                    = Ray Tracing & GI Settings
 screen.ao                                                           = RT Contact Occlusion
-profile.extreme                                                      = Extreme
-
 
 # PT-only fork: there is no lighting-mode switch and no GI-off mode. The five
 # profiles (low / medium / high / ultra / extreme) are PT quality tiers.
-option.VOXEL_CACHE_MULTIBOUNCE                                       = Voxel Cache Multi-Bounce
-option.VOXEL_CACHE_MULTIBOUNCE.comment                                = Enables recursive secondary bounce evaluation inside the Voxel Irradiance Volume.
-
-option.RTGI_INTENSITY                                               = RTGI Physical Intensity
-option.RTGI_INTENSITY.comment                                       = Calibrated single-bounce physical indirect lighting multiplier (default 1.00). In a diffuse enclosure, energy conservation guarantees indirect illuminance matches the incoming radiance.
-option.RTGI_BRIGHTNESS                                              = RTGI Indirect Brightness
-option.RTGI_BRIGHTNESS.comment                                      = Controls the strength and radiance of the indirect bounced lighting field. Higher values make GI bounces more prominent and vibrant.
+option.RTGI_INTENSITY                                               = RTGI Indirect Intensity
+option.RTGI_INTENSITY.comment                                       = Calibrated multiplier for traced indirect diffuse lighting (default 1.00). Keeps energy-conserving diffuse balance at 1.00.
 option.RT_CLIPMAP_SIZE = PT Light Distance
-option.RT_CLIPMAP_SIZE.comment = Maximum distance from the camera where voxel path-traced indirect lighting and shadows are evaluated. 4 chunks = 64 blocks, 8 chunks = 128 blocks, 16 chunks = 256 blocks. Higher distances require more VRAM and DDA steps.
+option.RT_CLIPMAP_SIZE.comment = Maximum horizontal distance from the camera where voxel path-traced indirect lighting and shadows are evaluated. 4 chunks = 64 blocks, 8 chunks = 128 blocks, 16 chunks = 256 blocks. Vertical range is capped at 128 blocks. Higher distances require more VRAM and DDA steps.
 value.RT_CLIPMAP_SIZE.64 = 2 Chunks (32m)
 value.RT_CLIPMAP_SIZE.96 = 3 Chunks (48m)
 value.RT_CLIPMAP_SIZE.128 = 4 Chunks (64m)
@@ -782,7 +777,7 @@ value.RT_CLIPMAP_SIZE.512 = 16 Chunks (256m)
 option.RT_AO_STRENGTH = RT Contact AO Strength
 option.RT_AO_STRENGTH.comment = Strength of short voxel-ray contact occlusion on direct light and highlights. Traced indirect lighting is not multiplied again. 0 disables contact rays.
 option.RT_AO_RADIUS = RT Contact AO Radius
-option.RT_AO_RADIUS.comment = Maximum contact-occlusion distance in blocks. Keep this small; large-scale occlusion comes from RTGI and probes.
+option.RT_AO_RADIUS.comment = Maximum contact-occlusion distance in blocks. Keep this small; large-scale occlusion comes from RTGI.
 option.RT_AO_RAYS = RT Contact AO Rays
 option.RT_AO_RAYS.comment = Visibility rays per half-resolution contact-AO pixel. More rays reduce noise at a performance cost.
 option.RT_AO_IN_DIRECT = Contact AO in Direct Light
@@ -799,7 +794,6 @@ value.PT_BOUNCES.2                                                   = 2 Bounces
 value.PT_BOUNCES.3                                                   = 3 Bounces
 
 option.RTGI_RAY_COUNT                                                = RTGI Ray Count
-
 option.RTGI_RAY_COUNT.comment                                        = Number of indirect diffuse rays traced per pixel. Higher values reduce noise at the cost of framerate.
 
 option.RTGI_RESOLUTION                                               = RTGI Resolution
@@ -808,8 +802,8 @@ value.RTGI_RESOLUTION.0                                              = Quarter (
 value.RTGI_RESOLUTION.1                                              = Half (0.5x)
 value.RTGI_RESOLUTION.2                                              = Full (1.0x)
 
-option.RTGI_FILTER_PHI                                               = Atrous Colour Sigma
-option.RTGI_FILTER_PHI.comment                                       = Luminance edge-stopping scale (phi = value * sqrt(variance)) of the temporal filter. Higher softens detail and widens light bleed; lower keeps detail noisier.
+option.RTGI_FILTER_PHI                                               = Spatial Filter Sigma
+option.RTGI_FILTER_PHI.comment                                       = Luminance edge-stopping scale for the display-only spatial filter (scaled by estimated standard error of the temporal mean). Higher values smooth more noise; lower values preserve sharper contrast.
 option.RTGI_SPP_CAP                                                  = Temporal Sample Cap
 option.RTGI_SPP_CAP.comment                                          = Maximum number of traced samples the temporal accumulation may average per pixel, not frames: a tier that traces 8 rays per pixel per frame reaches the cap in an eighth of the time. Lower adapts faster to change, higher converges to a cleaner but staler image.
 option.RTGI_MIN_ACCUM                                                = Minimum Accumulation
