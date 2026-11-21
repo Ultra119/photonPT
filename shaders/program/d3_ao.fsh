@@ -103,9 +103,6 @@ vec2 gather_ao_history(RtgiGrid grid, vec3 scene_pos, vec3 world_normal) {
 void main() {
     ambient = vec4(1.0, 0.0, 0.0, 0.0);
     ambient_history_data = vec2(0.0);
-    if (RT_AO_STRENGTH <= 0.0) {
-        return;
-    }
 
     ivec2 texel = ivec2(gl_FragCoord.xy);
     RtgiGrid grid = rt_ao_grid(textureSize(depthtex1, 0), textureSize(colortex6, 0));
@@ -115,10 +112,11 @@ void main() {
 
     ivec2 pixel = rtgi_anchor(texel, grid);
     RtgiOpaqueDepth surface = rtgi_opaque_depth(pixel);
-    // D2 still reads reversed window depth in R as a cloud occluder hint.
+    // D2 always reads reversed window depth in R as a cloud occluder hint,
+    // even when contact AO itself is disabled.
     ambient_history_data.x = surface.kind == rtgi_hand ? 1.0
         : 1.0 - texelFetch(combined_depth_tex, pixel, 0).x;
-    if (surface.kind != rtgi_world) {
+    if (RT_AO_STRENGTH <= 0.0 || surface.kind != rtgi_world) {
         return;
     }
 

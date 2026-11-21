@@ -14,11 +14,11 @@
 layout(location = 0) out vec3 bloom_input;
 layout(location = 1) out vec4 result;
 
+/* RENDERTARGETS: 0,5 */
+
 #ifdef TAA
 layout(location = 2) out float history_guide;
 /* RENDERTARGETS: 0,5,19 */
-#else
-/* RENDERTARGETS: 0,5 */
 #endif
 
 in vec2 uv;
@@ -157,7 +157,11 @@ vec3 neighborhood_clipping(
     ivec2 last_texel,
     vec3 current_color,
     vec3 history_color,
-    float distance_factor
+    float distance_factor,
+    float motion_pixels,
+    out bool history_clipped,
+    out vec3 out_min_color,
+    out vec3 out_max_color
 ) {
     vec3 min_color, max_color;
 
@@ -184,7 +188,8 @@ vec3 neighborhood_clipping(
     b = rgb_to_ycocg(reinhard(b));
     c = rgb_to_ycocg(reinhard(c));
     d = rgb_to_ycocg(reinhard(d));
-    e = rgb_to_ycocg(reinhard(e));
+    // current_color is already in Reinhard space from main().
+    e = rgb_to_ycocg(e);
     f = rgb_to_ycocg(reinhard(f));
     g = rgb_to_ycocg(reinhard(g));
     h = rgb_to_ycocg(reinhard(h));
@@ -211,8 +216,10 @@ vec3 neighborhood_clipping(
            + i * i);
 
     // Strictness parameter, higher gamma => more temporally stable but more
-    // ghosting
-    float gamma = mix(0.75, 1.25, linear_step(0.25, 1.0, distance_factor));
+    // ghosting. Relax slightly when stationary to avoid clipping jittered edges.
+    float static_gamma = mix(1.35, 1.50, linear_step(0.25, 1.0, distance_factor));
+    float moving_gamma = mix(0.85, 1.25, linear_step(0.25, 1.0, distance_factor));
+    float gamma = mix(static_gamma, moving_gamma, smoothstep(0.0, 0.75, motion_pixels));
 
     vec3 mu = moments[0];
     vec3 sigma = sqrt(max0(moments[1] - moments[0] * moments[0]));
@@ -225,8 +232,9 @@ vec3 neighborhood_clipping(
     // because luminance (Y) is separated from chrominance (CoCg) as its own
     // axis
     history_color = rgb_to_ycocg(history_color);
-    history_color = clip_aabb(history_color, min_color, max_color);
-    history_color = ycocg_to_rgb(history_color);
+    history_color = clip_aabb(history_color, min_color, max_color, history_clipped);
+    out_min_color = min_color;
+    out_max_color = max_color;
 
     return history_color;
 }
@@ -290,13 +298,31 @@ void main() {
     if (history.support > 0.0) {
         float distance_to_camera = receiver.kind == taa_sky ? far : length(receiver.view_pos);
         float distance_factor = 1.0 - exp2(-0.025 * distance_to_camera);
-        float alpha = max(1.0 / (history.age + 1.0), mix(0.35, 0.10, distance_factor));
+        float motion_pixels = length((uv - previous_uv) * vec2(size));
+#ifndef TAAU
+        // Keep stationary native-res TAA stable against sub-pixel jitter while
+        // preserving fast response under camera or object motion.
+        float motion_t = smoothstep(0.0, 0.75, motion_pixels);
+        float min_alpha = mix(0.04, mix(0.35, 0.10, distance_factor), motion_t);
+#else
+        float min_alpha = mix(0.35, 0.10, distance_factor);
+#endif
+        float alpha = max(1.0 / (history.age + 1.0), min_alpha);
         current_color = reinhard(current_color);
         vec3 history_color = reinhard(history.color);
 
 #ifndef TAAU
+        bool history_clipped;
+        vec3 min_color, max_color;
         history_color = neighborhood_clipping(texel, last_texel, current_color,
-                                              history_color, distance_factor);
+                                              history_color, distance_factor,
+                                              motion_pixels, history_clipped,
+                                              min_color, max_color);
+        float flicker_reduction = history_clipped ? 0.0
+            : get_flicker_reduction(history_color, min_color, max_color);
+        history_color = ycocg_to_rgb(history_color);
+        alpha *= mix(1.0 - 0.65 * flicker_reduction, 1.0, motion_t);
+        alpha = max(alpha, mix(0.025, 0.05, motion_t));
 #else
         vec3 min_color = texture(colortex1, pos).rgb * 2.0 - 1.0;
         vec3 max_color = texture(colortex2, pos).rgb * 2.0 - 1.0;

@@ -139,8 +139,8 @@ vec3 sample_rtgi_diffuse(
     vec2 jitter = rtgi_raster_jitter(taa_offset, full_size);
     vec3 normal = mat3(gbufferModelView) * flat_normal;
     float footprint = rtgi_view_footprint(-view_pos.z, grid.gi_active, gbufferProjection);
-    float grazing = max(abs(dot(normal, normalize(view_pos))), 0.15);
-    float max_chord = min(1.5, 0.05 + 2.0 * footprint / grazing);
+    float grazing = max(abs(dot(normal, normalize(view_pos))), 0.02);
+    float max_chord = min(6.0, 0.05 + 2.5 * footprint / grazing);
     bool even = (frameCounter & 1) == 0;
 
 #if RTGI_RESOLUTION == 2

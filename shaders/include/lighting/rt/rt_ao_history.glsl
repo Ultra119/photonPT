@@ -30,8 +30,8 @@ bool rt_ao_view_pos(
 }
 
 float rt_ao_chord(vec3 view_pos, vec3 view_normal, float footprint) {
-    float grazing = max(abs(dot(view_normal, normalize(view_pos))), 0.15);
-    return min(0.75, 0.05 + 2.0 * footprint / grazing);
+    float grazing = max(abs(dot(view_normal, normalize(view_pos))), 0.05);
+    return min(2.0, 0.05 + 2.0 * footprint / grazing);
 }
 
 #endif

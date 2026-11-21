@@ -154,9 +154,9 @@ float rtgi_geometry_weight(
         return 0.0;
     }
     float plane = max(abs(dot(normal, delta)), abs(dot(tap_normal, delta)));
-    // Allow some guide quantization error while keeping a sub-block thickness
-    // limit independent of viewing distance and grazing angle.
-    float tolerance = clamp(0.02 + 0.05 * footprint, 0.02, 0.0625);
+    // Allow 8-bit oct-normal quantization error across foreshortened grazing
+    // chords while keeping a strict sub-half-block thickness limit.
+    float tolerance = clamp(0.02 + 0.05 * footprint + 0.012 * length(delta), 0.02, 0.10);
     return (1.0 - smoothstep(tolerance, 2.0 * tolerance, plane))
         * smoothstep(0.9, 0.98, normal_dot);
 }

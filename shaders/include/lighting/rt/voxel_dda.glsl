@@ -215,12 +215,19 @@ VoxelHit trace_voxel_segment(
                     vec3 normal;
                     if (voxel_shape_hit(ray, cell, block_id, shape, t, cell_end, entry_normal,
                                         hit_distance, normal)) {
-                        result.status = normal != vec3(0.0) ? voxel_hit_surface : voxel_inside_solid;
-                        result.distance = hit_distance;
-                        result.cell = cell;
-                        result.payload = payload;
-                        result.normal = normal;
-                        return result;
+                        if (normal == vec3(0.0) && step == 0 && mode == voxel_ray_path
+                            && block_id == 5u) {
+                            // Waving leaves displace inside their static voxel cube;
+                            // step out of the starting leaf cell instead of dropping
+                            // the primary ray as inside-solid.
+                        } else {
+                            result.status = normal != vec3(0.0) ? voxel_hit_surface : voxel_inside_solid;
+                            result.distance = hit_distance;
+                            result.cell = cell;
+                            result.payload = payload;
+                            result.normal = normal;
+                            return result;
+                        }
                     }
                 }
             }

@@ -98,16 +98,21 @@ void main() {
 
     float age;
     vec4 center = read_filter_input(texel, even, age);
-    float center_y = dot(center.rgb, luminance_weights);
+    bool missing_center = center.a < 0.0;
+    float center_y = missing_center ? 0.0 : dot(center.rgb, luminance_weights);
 #if RTGI_FILTER_PASS == 1
-    bool copy_through = RTGI_SPATIAL_FALLBACK == 0 || age >= 3.0;
-#else
-    bool copy_through = center.a <= 0.001 + 0.02 * center_y;
-#endif
-    if (center.a < 0.0 || copy_through) {
+    bool copy_through = RTGI_SPATIAL_FALLBACK == 0 || (!missing_center && age >= 3.0);
+    if (copy_through) {
         imageStore(filter_output, texel, center);
         return;
     }
+#else
+    bool copy_through = center.a <= 0.001 + 0.02 * center_y;
+    if (missing_center || copy_through) {
+        imageStore(filter_output, texel, center);
+        return;
+    }
+#endif
 
     uvec4 guide = even ? texelFetch(rtgi_guide_even_sampler, texel, 0)
                        : texelFetch(rtgi_guide_odd_sampler, texel, 0);
@@ -143,15 +148,15 @@ void main() {
     ivec2 visited[8];
     int visited_count = 0;
 #else
-    float grazing = max(abs(dot(normal, normalize(center_view))), 0.15);
-    float max_chord = min(1.0, 0.1 + 3.0 * footprint / grazing);
+    float grazing = max(abs(dot(normal, normalize(center_view))), 0.02);
+    float max_chord = min(4.0, 0.1 + 3.0 * footprint / grazing);
 #endif
 
-    vec4 sum = 0.25 * center;
-    float sum_weight = 0.25;
+    vec4 sum = missing_center ? vec4(0.0) : 0.25 * center;
+    float sum_weight = missing_center ? 0.0 : 0.25;
 #if RTGI_FILTER_PASS == 1
     float local_error = 0.0;
-    float local_weight = 0.25;
+    float local_weight = missing_center ? 0.0 : 0.25;
 #endif
 
     for (int k = 0; k < 8; ++k) {
@@ -207,6 +212,11 @@ void main() {
         float delta = dot(sample_value.rgb, luminance_weights) - center_y;
         float luminance_scale = RTGI_FILTER_PHI * (center.a + sample_value.a + luma_floor);
 #if RTGI_FILTER_PASS == 1
+        if (missing_center) {
+            sum += weight * sample_value;
+            sum_weight += weight;
+            continue;
+        }
         local_error += weight * sqr(delta);
         local_weight += weight;
         luminance_scale += sqrt(sqr(delta) / age) * 0.5;
@@ -216,11 +226,24 @@ void main() {
         sum_weight += weight;
     }
 
+    if (sum_weight <= 0.0) {
+        imageStore(filter_output, texel, no_filter_sample);
+        return;
+    }
     vec4 result = sum / sum_weight;
 #if RTGI_FILTER_PASS == 1
     // Bootstrap display uncertainty from distinct same-surface neighbors.
     // Subsequent passes propagate SE conservatively for shared support.
-    result.a = max(result.a, sqrt(local_error / (local_weight * age)));
+    if (missing_center) {
+        result.a = max(result.a, 0.25 * dot(result.rgb, luminance_weights) + 0.05);
+    } else {
+        result.a = max(result.a, sqrt(local_error / (local_weight * age)));
+    }
 #endif
+    if (!rtgi_finite(result)) {
+        result = no_filter_sample;
+    } else if (result.a >= 0.0) {
+        result = vec4(min(max0(result.rgb), vec3(65504.0)), min(result.a, 65504.0));
+    }
     imageStore(filter_output, texel, result);
 }

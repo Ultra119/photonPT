@@ -84,8 +84,8 @@ RtgiHistory gather_history(
     vec3 normal = mat3(gbufferPreviousModelView) * world_normal;
     float footprint = rtgi_view_footprint(-predicted_view.z, grid.gi_active,
                                           gbufferPreviousProjection);
-    float grazing = max(abs(dot(normal, normalize(predicted_view))), 0.15);
-    float max_chord = 0.1 + 2.0 * footprint / grazing;
+    float grazing = max(abs(dot(normal, normalize(predicted_view))), 0.02);
+    float max_chord = min(6.0, 0.1 + 2.5 * footprint / grazing);
 
     for (int y = 0; y <= 1; ++y) {
         for (int x = 0; x <= 1; ++x) {

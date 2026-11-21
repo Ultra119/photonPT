@@ -24,6 +24,10 @@ layout(rgba16f) writeonly uniform image2D rtgi_emitter_debug_img;
 #include "/include/lighting/rt/voxel_samplers.glsl"
 #if defined SHADOW && !defined WORLD_NETHER
 uniform sampler2DShadow shadowtex1;
+#ifdef SHADOW_COLOR
+uniform sampler2D shadowtex0;
+uniform sampler2D shadowcolor0;
+#endif
 #define VOXEL_DDA_USE_SHADOWMAP
 #endif
 uniform sampler2D depthtex1;
@@ -126,9 +130,28 @@ void main() {
 
     // Direct sun/moon color encoded in colortex4 column 191
     vec3 direct_light_col = texelFetch(colortex4, ivec2(191, 0), 0).rgb;
+    direct_light_col = rtgi_finite(vec4(direct_light_col, 0.0)) ? max0(direct_light_col) : vec3(0.0);
 
     // Both techniques evaluate their PDFs at this exact biased point.
     vec3 origin = voxel_pos + voxel_receiver_bias * world_normal;
+    {
+        // Depth quantization at extreme grazing angles or wind animation on
+        // grass/foliage can place origin slightly inside a static solid voxel.
+        // Step out along the geometric normal if a bounded nudge reaches air.
+        ivec3 start_cell = clamp_to_voxel_grid(ivec3(floor(origin)));
+        uint start_id = voxel_block_id(texelFetch(voxel_sampler, start_cell, 0).r);
+        if (!voxel_empty_for_transport(start_id) && !voxel_emitter_id(start_id)) {
+            float nudge_dist = (material >= 2u && material <= 5u) ? 0.22 : 0.06;
+            vec3 nudged = voxel_pos + nudge_dist * world_normal;
+            if (all(greaterThanEqual(nudged, vec3(0.0)))
+                && all(lessThan(nudged, rt_voxel_size_f))) {
+                uint nudged_id = voxel_block_id(texelFetch(voxel_sampler, ivec3(floor(nudged)), 0).r);
+                if (voxel_empty_for_transport(nudged_id)) {
+                    origin = nudged;
+                }
+            }
+        }
+    }
     vec4 direct_emitter = vec4(0.0);
 #ifdef RTGI_EMITTER_SAMPLING
     bool has_emitters = has_voxel_emitters();

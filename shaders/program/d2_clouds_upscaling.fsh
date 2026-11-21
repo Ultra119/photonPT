@@ -193,8 +193,9 @@ void main() {
         = CLOUDS_TEMPORAL_UPSCALING * CLOUDS_TEMPORAL_UPSCALING;
 
     ivec2 dst_texel = ivec2(gl_FragCoord.xy);
+    vec2 src_size = vec2(textureSize(colortex9, 0));
     ivec2 src_max_texel = max(
-        ivec2(vec2(textureSize(colortex9, 0).xy) * taau_render_scale - 1.0),
+        ivec2(src_size * taau_render_scale - 1.0),
         ivec2(0)
     );
     ivec2 src_texel = clamp(
@@ -204,6 +205,12 @@ void main() {
     );
 
     vec4 current = texelFetch(colortex9, src_texel, 0);
+    vec2 current_smooth_uv = clamp(
+        uv * taau_render_scale,
+        vec2(0.5) / src_size,
+        (vec2(src_max_texel) + 0.5) / src_size
+    );
+    vec4 current_smooth = max0(smooth_filter(colortex9, current_smooth_uv));
     vec2 current_data = texelFetch(colortex10, src_texel, 0).xy;
     RtgiOpaqueDepth surface = rtgi_opaque_depth(dst_texel);
     bool is_hand = surface.kind == rtgi_hand;
@@ -257,7 +264,7 @@ void main() {
     if (!is_sky) {
         float view_distance_squared = length_squared(view_pos);
         if (view_distance_squared < sqr(closest_distance) || is_hand) {
-            clouds_history = current;
+            clouds_history = current_smooth;
             clouds_data.x = 60000.0; // apparent distance (FP16-finite sentinel)
             clouds_data.y = 0.0; // pixel age
             clouds_data.z = 0.0; // ambient scattering
@@ -311,10 +318,12 @@ void main() {
         || any(isnan(history_data)) || any(isinf(history_data));
     disocclusion = disocclusion || world_age_changed;
 
-    // Replace history if a disocclusion was detected
+    // Replace history if a disocclusion was detected. Use smoothly filtered
+    // low-res clouds instead of nearest-neighbor tiles so moving foreground
+    // occluders never expose blocky 4x4 clouds while the checkerboard refills.
     if (disocclusion) {
-        history = current;
-        history.z = ambient_scattering;
+        history = current_smooth;
+        history_data.z = ambient_scattering;
     }
 
     // Perform neighbourhood clamping when moving quickly relative to the clouds
@@ -362,10 +371,14 @@ void main() {
     ivec2 offset_0 = dst_texel % CLOUDS_TEMPORAL_UPSCALING;
     ivec2 offset_1
         = clouds_checkerboard_offsets[frameCounter % checkerboard_area];
-    if (offset_0 != offset_1 && !disocclusion) {
-        current = history;
-        apparent_distance = min(apparent_distance, apparent_distance_history);
-        ambient_scattering = history_data.z;
+    if (offset_0 != offset_1) {
+        if (disocclusion) {
+            current = current_smooth;
+        } else {
+            current = history;
+            apparent_distance = min(apparent_distance, apparent_distance_history);
+            ambient_scattering = history_data.z;
+        }
     }
 
     float pixel_age = max0(history_data.y) * float(!disocclusion);

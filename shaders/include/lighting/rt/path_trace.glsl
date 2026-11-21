@@ -26,9 +26,10 @@ vec3 sample_cosine_hemisphere(vec3 normal, vec2 u) {
     return normalize(build_orthonormal_basis(normal) * local_dir);
 }
 
-float voxel_sun_visibility(usampler3D grid, vec3 origin, vec3 direction) {
+vec3 voxel_sun_visibility(usampler3D grid, vec3 origin, vec3 direction) {
     float reach = 32.0;
     float macro_visibility = 1.0;
+    vec3 shadow_tint = vec3(1.0);
 #ifdef VOXEL_DDA_USE_SHADOWMAP
     vec3 near_scene = voxel_to_scene_space(origin) + direction * 0.45;
     vec3 shadow_clip = project_ortho(shadowProjection, transform(shadowModelView, near_scene));
@@ -36,14 +37,32 @@ float voxel_sun_visibility(usampler3D grid, vec3 origin, vec3 direction) {
         vec3 screen = distort_shadow_space(shadow_clip) * 0.5 + 0.5;
         macro_visibility = texture(shadowtex1, vec3(screen.xy, screen.z - 0.0025));
         if (macro_visibility < 0.01) {
-            return 0.0;
+            return vec3(0.0);
         }
+#ifdef SHADOW_COLOR
+        ivec2 shadow_size = textureSize(shadowtex0, 0);
+        ivec2 shadow_texel = clamp(ivec2(screen.xy * vec2(shadow_size)), ivec2(0), shadow_size - 1);
+        if (texelFetch(shadowtex0, shadow_texel, 0).x < screen.z - 0.0025) {
+            vec3 sc = texelFetch(shadowcolor0, shadow_texel, 0).rgb * 4.0;
+            if (max_of(sc) > eps) {
+                shadow_tint = clamp(sc, vec3(0.0), vec3(1.0));
+            }
+        }
+#endif
         reach = 4.5;
     }
 #endif
     VoxelHit blocker = trace_voxel_segment(grid, origin, direction, reach, voxel_ray_visibility);
-    return blocker.status == voxel_volume_exit || blocker.status == voxel_distance_limit
-        ? macro_visibility : 0.0;
+    if (blocker.status != voxel_volume_exit && blocker.status != voxel_distance_limit) {
+        return vec3(0.0);
+    }
+    // Prefer exact near-field voxel glass transmittance when traversed so glass
+    // within `reach` is never double-tinted by shadowcolor0; fall back to
+    // shadowcolor0 for distant stained glass casters beyond `reach`.
+    vec3 transmittance = any(lessThan(blocker.transmittance, vec3(0.999)))
+        ? blocker.transmittance
+        : shadow_tint;
+    return macro_visibility * transmittance;
 }
 
 vec3 voxel_environment(
@@ -58,7 +77,8 @@ vec3 voxel_environment(
         return vec3(0.0);
     }
 #endif
-    return texture(sky_map, project_sky(direction)).rgb;
+    vec3 sky = texture(sky_map, project_sky(direction)).rgb;
+    return (!any(isnan(sky)) && !any(isinf(sky))) ? max0(sky) : vec3(0.0);
 }
 
 // RGB is demodulated diffuse radiance. A is the distance from the receiver
@@ -118,10 +138,18 @@ vec4 evaluate_path_trace(
         vec3 next_origin = endpoint + voxel_bounce_bias * hit.normal;
         vec3 sun = vec3(0.0);
         float sun_cosine = dot(hit.normal, light_direction);
-        if (sun_cosine > 0.0 && max_of(direct_sun_color) > 0.0) {
-            float visibility = voxel_sun_visibility(grid, next_origin, light_direction);
-            sun = material.albedo * direct_sun_color
-                * (SUN_INDIRECT_BOOST * rcp_pi * visibility * sun_cosine);
+        vec3 safe_sun_color = max0(direct_sun_color);
+        if (sun_cosine > 0.0 && max_of(safe_sun_color) > 0.0) {
+            vec3 visibility = voxel_sun_visibility(grid, next_origin, light_direction);
+            // Cap artistic sunlight bounce boost per hit so high-albedo surfaces
+            // never exceed unit reflectance and create energy in 90-degree corners,
+            // while darker stone/foliage retains full cave-bounce reach and hue.
+            float albedo_peak = max_of(material.albedo);
+            float sun_boost = albedo_peak > 0.0
+                ? min(SUN_INDIRECT_BOOST, max(1.0, 0.92 / albedo_peak))
+                : 1.0;
+            sun = material.albedo * safe_sun_color * visibility
+                * (sun_boost * rcp_pi * sun_cosine);
         }
 
         throughput *= hit.transmittance;
@@ -131,11 +159,13 @@ vec4 evaluate_path_trace(
         }
 
         throughput *= material.albedo;
-        float survival = clamp(1.6 * max_of(throughput), 0.15, 1.0);
-        if (random_dimension(seed, 3 * b + 2) >= survival) {
-            break;
+        if (b >= 1) {
+            float survival = clamp(1.6 * max_of(throughput), 0.35, 1.0);
+            if (random_dimension(seed, 3 * b + 2) >= survival) {
+                break;
+            }
+            throughput /= survival;
         }
-        throughput /= survival;
         origin = next_origin;
         normal = hit.normal;
     }

@@ -115,7 +115,7 @@ vec3 atmosphere_post_processing(vec3 atmosphere) {
             * (1 - rainStrength * ATMOSPHERE_RAIN_DESATURATION_INTENSITY)
     );
 
-    return atmosphere;
+    return max0(atmosphere);
 }
 
 /*
