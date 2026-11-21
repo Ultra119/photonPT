@@ -98,12 +98,13 @@ void build_histogram(out float[HISTOGRAM_BINS] pdf) {
 
             vec3 rgb
                 = textureLod(colortex0, coord * taau_render_scale, lod).rgb;
-            float luminance = dot(rgb, luminance_weights_ap1);
+            rgb = (any(isnan(rgb)) || any(isinf(rgb))) ? vec3(0.0) : max0(rgb);
+            float luminance = dot(rgb, luminance_weights);
 
             float bin = get_bin_from_luminance(luminance);
 
-            uint bin0 = uint(bin);
-            uint bin1 = bin0 + 1;
+            uint bin0 = min(uint(bin), uint(HISTOGRAM_BINS - 1));
+            uint bin1 = min(bin0 + 1u, uint(HISTOGRAM_BINS - 1));
 
             float weight1 = fract(bin);
             float weight0 = 1.0 - weight1;
@@ -130,7 +131,7 @@ float get_median_luminance(float[HISTOGRAM_BINS] pdf) {
         }
     }
 
-    return 0.0; // ??
+    return get_luminance_from_bin(HISTOGRAM_BINS - 1);
 }
 
 void main() {
@@ -147,18 +148,24 @@ void main() {
     float lod = ceil(log2(max_of(view_res)));
     vec3 rgb
         = textureLod(colortex0, vec2(0.5 * taau_render_scale), int(lod)).rgb;
+    rgb = (any(isnan(rgb)) || any(isinf(rgb))) ? vec3(0.0) : max0(rgb);
     float luminance
         = clamp(dot(rgb, luminance_weights), min_luminance, max_luminance);
 #elif AUTO_EXPOSURE == AUTO_EXPOSURE_HISTOGRAM
     float[HISTOGRAM_BINS] pdf;
     build_histogram(pdf);
 
-    float luminance = get_median_luminance(pdf);
+    float luminance = clamp(
+        get_median_luminance(pdf),
+        min_luminance,
+        max_luminance
+    );
 #endif
 
     float target_exposure = get_exposure_from_luminance(luminance);
 
-    if (isnan(previous_exposure) || isinf(previous_exposure)) {
+    if (isnan(previous_exposure) || isinf(previous_exposure)
+        || previous_exposure <= 0.0) {
         previous_exposure = target_exposure;
     }
 

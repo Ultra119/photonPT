@@ -35,10 +35,6 @@ in vec3 scene_pos;
 uniform sampler2D tex;
 uniform sampler2D noisetex;
 
-#ifdef SHADOW_COLOR
-uniform sampler2D shadowtex1;
-#endif
-
 uniform mat4 gbufferModelView;
 uniform mat4 gbufferModelViewInverse;
 uniform mat4 gbufferProjection;

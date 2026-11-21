@@ -33,9 +33,7 @@ bool raymarch_depth_buffer(
         - screen_pos
     );
 
-    float ray_length = min_of(
-        abs(sign(screen_dir) - screen_pos) / max(abs(screen_dir), eps)
-    );
+    float ray_length = ray_box_exit_unit(screen_pos, screen_dir);
 
     float step_length = ray_length * rcp(float(intersection_step_count));
 
@@ -45,10 +43,19 @@ bool raymarch_depth_buffer(
 
     float depth_tolerance = max(
         abs(ray_step.z) * 3.0,
-        0.02 / sqr(view_pos.z)
+        0.02 / max(sqr(view_pos.z), 1e-4)
     ); // from DrDesten <3
 
+    ivec2 depth_size = textureSize(SSRT_DEPTH_SAMPLER, 0);
+    ivec2 max_texel = clamp(
+        ivec2(ceil(vec2(depth_size) * taau_render_scale - 0.5)),
+        ivec2(1),
+        depth_size
+    ) - 1;
+    vec2 active_extent = vec2(depth_size) * taau_render_scale;
+
     bool hit = false;
+    float final_depth = 1.0;
 
     // Intersection loop
 
@@ -62,16 +69,17 @@ bool raymarch_depth_buffer(
             return false;
         }
 
-        float depth = texelFetch(
-                          SSRT_DEPTH_SAMPLER,
-                          ivec2(ray_pos.xy * view_res * taau_render_scale),
-                          0
-        )
-                          .x;
+        ivec2 sample_texel = clamp(
+            ivec2(ray_pos.xy * active_extent),
+            ivec2(0),
+            max_texel
+        );
+        float depth = texelFetch(SSRT_DEPTH_SAMPLER, sample_texel, 0).x;
 
         if (depth < ray_pos.z
             && abs(depth_tolerance - (ray_pos.z - depth)) < depth_tolerance) {
             hit = true;
+            final_depth = depth;
             break;
         }
     }
@@ -82,31 +90,32 @@ bool raymarch_depth_buffer(
 
     // Refinement loop
 
-    float final_depth;
-
     for (int i = 0; i < refinement_step_count; ++i) {
         ray_step *= 0.5;
+        if (clamp01(ray_pos) != ray_pos) {
+            break;
+        }
 
-        float depth = texelFetch(
-                          SSRT_DEPTH_SAMPLER,
-                          ivec2(ray_pos.xy * view_res * taau_render_scale),
-                          0
-        )
-                          .x;
+        ivec2 sample_texel = clamp(
+            ivec2(ray_pos.xy * active_extent),
+            ivec2(0),
+            max_texel
+        );
+        float depth = texelFetch(SSRT_DEPTH_SAMPLER, sample_texel, 0).x;
 
         if (depth < ray_pos.z
             && abs(depth_tolerance - (ray_pos.z - depth)) < depth_tolerance) {
             ray_pos -= ray_step;
+            final_depth = depth;
         } else {
             ray_pos += ray_step;
         }
-
-        final_depth = depth;
     }
 
     // No intersection if the binary search landed on a sky pixel or a hand
     // pixel
-    return hand_depth < final_depth && final_depth < 1.0;
+    return clamp01(ray_pos) == ray_pos && hand_depth < final_depth
+        && final_depth < 1.0;
 }
 
 #endif // INCLUDE_MISC_RAYTRACER

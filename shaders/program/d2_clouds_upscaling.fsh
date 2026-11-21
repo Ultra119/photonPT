@@ -193,10 +193,14 @@ void main() {
         = CLOUDS_TEMPORAL_UPSCALING * CLOUDS_TEMPORAL_UPSCALING;
 
     ivec2 dst_texel = ivec2(gl_FragCoord.xy);
+    ivec2 src_max_texel = max(
+        ivec2(vec2(textureSize(colortex9, 0).xy) * taau_render_scale - 1.0),
+        ivec2(0)
+    );
     ivec2 src_texel = clamp(
         dst_texel / CLOUDS_TEMPORAL_UPSCALING,
         ivec2(0),
-        ivec2(vec2(textureSize(colortex9, 0).xy) * taau_render_scale - 1.0)
+        src_max_texel
     );
 
     vec4 current = texelFetch(colortex9, src_texel, 0);
@@ -254,7 +258,7 @@ void main() {
         float view_distance_squared = length_squared(view_pos);
         if (view_distance_squared < sqr(closest_distance) || is_hand) {
             clouds_history = current;
-            clouds_data.x = 1e6; // apparent distance
+            clouds_data.x = 60000.0; // apparent distance (FP16-finite sentinel)
             clouds_data.y = 0.0; // pixel age
             clouds_data.z = 0.0; // ambient scattering
             return;
@@ -282,9 +286,13 @@ void main() {
     vec3 history_data
         = texture(colortex12, previous_uv_clamped * taau_render_scale).xyz;
 
-    // Depth at the previous position
-    float history_depth
-        = 1.0 - max_of(textureGather(colortex14, previous_uv_clamped, 0));
+    // Depth at the previous position (colortex14 shares the TAAU-scaled AO lattice)
+    float history_depth = 1.0
+        - max_of(textureGather(
+            colortex14,
+            previous_uv_clamped * taau_render_scale,
+            0
+        ));
 
     // Get distance to terrain in the previous frame
     float distance_to_terrain_squared = length_squared(screen_to_view_space(
@@ -299,7 +307,8 @@ void main() {
         || (history_depth < 1.0
             && distance_to_terrain_squared < sqr(closest_distance));
     disocclusion = disocclusion || history_depth == 0.0; // Signals hand
-    disocclusion = disocclusion || any(isnan(history));
+    disocclusion = disocclusion || any(isnan(history)) || any(isinf(history))
+        || any(isnan(history_data)) || any(isinf(history_data));
     disocclusion = disocclusion || world_age_changed;
 
     // Replace history if a disocclusion was detected
@@ -316,14 +325,14 @@ void main() {
 
     if (velocity_factor > 0.1) {
         // Fetch 3x3 neighborhood
-        vec4 a = texelFetch(colortex9, src_texel + ivec2(-1, -1), 0);
-        vec4 b = texelFetch(colortex9, src_texel + ivec2(0, -1), 0);
-        vec4 c = texelFetch(colortex9, src_texel + ivec2(1, -1), 0);
-        vec4 d = texelFetch(colortex9, src_texel + ivec2(-1, 0), 0);
-        vec4 f = texelFetch(colortex9, src_texel + ivec2(1, 0), 0);
-        vec4 g = texelFetch(colortex9, src_texel + ivec2(-1, 1), 0);
-        vec4 h = texelFetch(colortex9, src_texel + ivec2(0, 1), 0);
-        vec4 i = texelFetch(colortex9, src_texel + ivec2(1, 1), 0);
+        vec4 a = texelFetch(colortex9, clamp(src_texel + ivec2(-1, -1), ivec2(0), src_max_texel), 0);
+        vec4 b = texelFetch(colortex9, clamp(src_texel + ivec2(0, -1), ivec2(0), src_max_texel), 0);
+        vec4 c = texelFetch(colortex9, clamp(src_texel + ivec2(1, -1), ivec2(0), src_max_texel), 0);
+        vec4 d = texelFetch(colortex9, clamp(src_texel + ivec2(-1, 0), ivec2(0), src_max_texel), 0);
+        vec4 f = texelFetch(colortex9, clamp(src_texel + ivec2(1, 0), ivec2(0), src_max_texel), 0);
+        vec4 g = texelFetch(colortex9, clamp(src_texel + ivec2(-1, 1), ivec2(0), src_max_texel), 0);
+        vec4 h = texelFetch(colortex9, clamp(src_texel + ivec2(0, 1), ivec2(0), src_max_texel), 0);
+        vec4 i = texelFetch(colortex9, clamp(src_texel + ivec2(1, 1), ivec2(0), src_max_texel), 0);
         vec4 e = current;
 
         // Soft minimum and maximum ("Hybrid Reconstruction Antialiasing")
@@ -374,8 +383,10 @@ void main() {
 #endif
 
     clouds_history = max0(mix(current, history, history_weight));
-    clouds_data.x
-        = mix(apparent_distance, apparent_distance_history, history_weight);
+    clouds_data.x = min(
+        mix(apparent_distance, apparent_distance_history, history_weight),
+        60000.0
+    );
     clouds_data.y = min(++pixel_age, CLOUDS_ACCUMULATION_LIMIT);
     clouds_data.z = mix(ambient_scattering, history_data.z, history_weight);
 }

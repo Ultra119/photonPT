@@ -45,8 +45,16 @@ vec2 blocker_search(vec3 scene_pos, float dither, bool has_sss) {
         vec2 uv = shadow_clip_pos.xy + offset;
         uv /= get_distortion_factor(uv);
         uv = uv * 0.5 + 0.5;
+        if (clamp01(uv) != uv) {
+            continue;
+        }
 
-        float depth = texelFetch(shadowtex0, ivec2(uv * shadow_map_res), 0).x;
+        ivec2 texel = clamp(
+            ivec2(uv * shadow_map_res),
+            ivec2(0),
+            ivec2(shadow_map_res - 1)
+        );
+        float depth = texelFetch(shadowtex0, texel, 0).x;
         float weight = step(depth, ref_z);
 
         depth_sum += weight * depth;
@@ -62,10 +70,19 @@ vec2 blocker_search(vec3 scene_pos, float dither, bool has_sss) {
 }
 
 vec3 shadow_basic(vec3 shadow_screen_pos) {
+    if (clamp01(shadow_screen_pos.xy) != shadow_screen_pos.xy) {
+        return vec3(1.0);
+    }
+
     float shadow = texture(shadowtex1, shadow_screen_pos);
 
 #ifdef SHADOW_COLOR
-    ivec2 texel = ivec2(shadow_screen_pos.xy * shadow_map_res);
+    ivec2 max_texel = ivec2(shadow_map_res - 1);
+    ivec2 texel = clamp(
+        ivec2(shadow_screen_pos.xy * shadow_map_res),
+        ivec2(0),
+        max_texel
+    );
 
     float depth = texelFetch(shadowtex0, texel, 0).x;
     vec3 color = texelFetch(shadowcolor0, texel, 0).rgb * 4.0;
@@ -73,9 +90,12 @@ vec3 shadow_basic(vec3 shadow_screen_pos) {
 
     vec3 averageColor = vec3(0.0);
     for (int i = 0; i < 9; ++i) {
-        averageColor
-            += texelFetch(shadowcolor0, texel + blur_kernel_offsets_3x3[i], 0)
-                   .rgb;
+        ivec2 neighbor = clamp(
+            texel + blur_kernel_offsets_3x3[i],
+            ivec2(0),
+            max_texel
+        );
+        averageColor += texelFetch(shadowcolor0, neighbor, 0).rgb;
     }
     // hide sunlight seams between colored shadow and opaque shadows
     weight *= step(eps, max_of(averageColor));
@@ -110,13 +130,12 @@ vec3 shadow_pcf(
         = int(SHADOW_PCF_STEPS_MIN + SHADOW_PCF_STEPS_SCALE * filter_scale);
     step_count = min(step_count, SHADOW_PCF_STEPS_MAX);
 
-    float shadow = 0.0;
+    float opaque_sum = 0.0;
+    vec3 shadow_sum = vec3(0.0);
 
-    vec3 color_sum = vec3(0.0);
-    float weight_sum = 0.0;
-
-    // perform first 4 iterations and filter shadow color
-    for (int i = 0; i < 4; ++i) {
+    // Combine opaque visibility and translucent transmittance per tap so
+    // colored penumbra edges evaluate avg(V * T) across the full kernel.
+    for (int i = 0; i < step_count; ++i) {
         vec2 offset
             = vogel_disc_sample(i, step_count, dither * tau) * filter_radius;
 
@@ -124,65 +143,58 @@ vec3 shadow_pcf(
         uv /= get_distortion_factor(uv);
         uv = uv * 0.5 + 0.5;
 
-        shadow += texture(shadowtex1, vec3(uv, shadow_screen_pos.z));
+        float vis = (clamp01(uv) == uv)
+            ? texture(shadowtex1, vec3(uv, shadow_screen_pos.z))
+            : 1.0;
+        opaque_sum += vis;
 
 #ifdef SHADOW_COLOR
-        // sample shadow color
-        uv = shadow_clip_pos_translucent.xy + offset;
-        uv /= get_distortion_factor(uv);
-        uv = uv * 0.5 + 0.5;
+        vec3 color = vec3(1.0);
+        if (vis > eps) {
+            vec2 uv_t = shadow_clip_pos_translucent.xy + offset;
+            uv_t /= get_distortion_factor(uv_t);
+            uv_t = uv_t * 0.5 + 0.5;
 
-        ivec2 texel = ivec2(uv * shadow_map_res);
+            if (clamp01(uv_t) == uv_t) {
+                ivec2 texel = clamp(
+                    ivec2(uv_t * shadow_map_res),
+                    ivec2(0),
+                    ivec2(shadow_map_res - 1)
+                );
 
-        float depth = texelFetch(shadowtex0, texel, 0).x;
-
-        vec3 color = texelFetch(shadowcolor0, texel, 0).rgb;
-        color = mix(
-            vec3(1.0),
-            4.0 * color,
-            step(depth, shadow_screen_pos_translucent.z)
-        );
-
-        float weight = 1.0;
-
-        color_sum += color * weight;
-        weight_sum += weight;
+                float depth = texelFetch(shadowtex0, texel, 0).x;
+                vec3 sample_color = texelFetch(shadowcolor0, texel, 0).rgb;
+                color = mix(
+                    vec3(1.0),
+                    4.0 * sample_color,
+                    step(depth, shadow_screen_pos_translucent.z)
+                );
+            }
+        }
+        shadow_sum += vis * color;
+#else
+        shadow_sum += vec3(vis);
 #endif
     }
 
-    vec3 color = weight_sum > 0.0 ? color_sum * rcp(weight_sum) : vec3(1.0);
-
-    // exit early if outside shadow
-    if (shadow > 4.0 - eps) {
-        return color;
-    } else if (shadow < eps) {
+    float rcp_steps = rcp(float(step_count));
+    float avg_opaque = opaque_sum * rcp_steps;
+    if (avg_opaque <= eps) {
         return vec3(0.0);
     }
 
-    // perform remaining iterations
-    for (int i = 4; i < step_count; ++i) {
-        vec2 offset
-            = vogel_disc_sample(i, step_count, dither * tau) * filter_radius;
-
-        vec2 uv = shadow_clip_pos.xy + offset;
-        uv /= get_distortion_factor(uv);
-        uv = uv * 0.5 + 0.5;
-
-        shadow += texture(shadowtex1, vec3(uv, shadow_screen_pos.z));
-    }
-
-    float rcp_steps = rcp(float(step_count));
+    vec3 avg_shadow = shadow_sum * rcp_steps;
 
     // sharpening for small penumbra sizes
     float sharpening_threshold
         = 0.4 * max0((min_filter_radius - penumbra_size) / min_filter_radius);
-    shadow = linear_step(
+    float sharpened = linear_step(
         sharpening_threshold,
         1.0 - sharpening_threshold,
-        shadow * rcp_steps
+        avg_opaque
     );
 
-    return shadow * color;
+    return avg_shadow * (sharpened / avg_opaque);
 }
 
 vec3 get_filtered_shadows(

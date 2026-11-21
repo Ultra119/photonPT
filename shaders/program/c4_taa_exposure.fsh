@@ -245,7 +245,7 @@ void draw_histogram(ivec2 texel) {
     vec2 coord = texel / vec2(width, height);
 
     if (all(lessThan(texel, ivec2(width, height)))) {
-        int index = int(HISTOGRAM_BINS * coord.x);
+        int index = clamp(int(HISTOGRAM_BINS * coord.x), 0, HISTOGRAM_BINS - 1);
         float threshold = coord.y;
 
         result.rgb

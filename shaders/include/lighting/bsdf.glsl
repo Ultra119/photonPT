@@ -10,19 +10,28 @@ float f0_to_ior(float f0) {
 
 // https://www.gdcvault.com/play/1024478/PBR-Diffuse-Lighting-for-GGX
 float distribution_ggx(float NoH_sq, float alpha_sq) {
-    return alpha_sq / (pi * sqr(1.0 - NoH_sq + NoH_sq * alpha_sq));
+    alpha_sq = max(alpha_sq, 1e-6);
+    float denom = max(1.0 - NoH_sq + NoH_sq * alpha_sq, 1e-4);
+    return alpha_sq / (pi * denom * denom);
 }
 
 float v1_smith_ggx(float cos_theta, float alpha_sq) {
+    alpha_sq = max(alpha_sq, 1e-6);
     return 1.0
-        / (cos_theta
-           + sqrt((-cos_theta * alpha_sq + cos_theta) * cos_theta + alpha_sq));
+        / max(
+            cos_theta
+                + sqrt(
+                    max0((-cos_theta * alpha_sq + cos_theta) * cos_theta + alpha_sq)
+                ),
+            1e-6
+        );
 }
 
 float v2_smith_ggx(float NoL, float NoV, float alpha_sq) {
-    float ggx_l = NoV * sqrt((-NoL * alpha_sq + NoL) * NoL + alpha_sq);
-    float ggx_v = NoL * sqrt((-NoV * alpha_sq + NoV) * NoV + alpha_sq);
-    return 0.5 / (ggx_l + ggx_v);
+    alpha_sq = max(alpha_sq, 1e-6);
+    float ggx_l = NoV * sqrt(max0((-NoL * alpha_sq + NoL) * NoL + alpha_sq));
+    float ggx_v = NoL * sqrt(max0((-NoV * alpha_sq + NoV) * NoV + alpha_sq));
+    return 0.5 / max(ggx_l + ggx_v, 1e-6);
 }
 
 vec3 fresnel_schlick(float cos_theta, vec3 f0) {
@@ -39,11 +48,11 @@ vec3 fresnel_dielectric_n(float cos_theta, float n) {
 
     float g = sqrt(g_sq);
     float a = g - cos_theta;
-    float b = g + cos_theta;
+    float b = max(g + cos_theta, eps);
 
     return vec3(
         0.5 * sqr(a / b)
-        * (1.0 + sqr((b * cos_theta - 1.0) / (a * cos_theta + 1.0)))
+        * (1.0 + sqr((b * cos_theta - 1.0) / max(abs(a * cos_theta + 1.0), eps)))
     );
 }
 

@@ -116,41 +116,31 @@ mat2x3 raymarch_air_fog(
         vec3 shadow_screen_pos = distort_shadow_space(shadow_pos) * 0.5 + 0.5;
 
 #if defined SHADOW && !defined PROGRAM_DEFERRED0
-        ivec2 shadow_texel = ivec2(
-            shadow_screen_pos.xy * shadowMapResolution * MC_SHADOW_QUALITY
-        );
+        bool in_shadow_map = clamp01(shadow_screen_pos) == shadow_screen_pos;
+        float opaque_shadow
+            = in_shadow_map ? texture(shadowtex1, shadow_screen_pos) : 1.0;
 
 // Colored light shafts need the shadow color buffer
-#ifdef AIR_FOG_COLORED_LIGHT_SHAFTS
-#ifdef SHADOW_COLOR
-        float depth0 = texelFetch(shadowtex0, shadow_texel, 0).x;
-        float depth1 = texelFetch(shadowtex1, shadow_texel, 0).x;
-        vec3 color
-            = clamp01(texelFetch(shadowcolor0, shadow_texel, 0).rgb * 4.0);
-        float color_weight
-            = step(depth0, shadow_screen_pos.z) * step(eps, max_of(color));
+#if defined AIR_FOG_COLORED_LIGHT_SHAFTS && defined SHADOW_COLOR
+        vec3 shadow = vec3(opaque_shadow);
+        if (in_shadow_map && opaque_shadow > eps) {
+            int shadow_res = int(float(shadowMapResolution) * MC_SHADOW_QUALITY);
+            ivec2 shadow_texel = clamp(
+                ivec2(shadow_screen_pos.xy * float(shadow_res)),
+                ivec2(0),
+                ivec2(shadow_res - 1)
+            );
+            float depth0 = texelFetch(shadowtex0, shadow_texel, 0).x;
+            vec3 color
+                = clamp01(texelFetch(shadowcolor0, shadow_texel, 0).rgb * 4.0);
+            float color_weight
+                = step(depth0, shadow_screen_pos.z) * step(eps, max_of(color));
 
-        color = color * color_weight + (1.0 - color_weight);
-
-        vec3 shadow = step(shadow_screen_pos.z, depth1) * color;
-        shadow = (clamp01(shadow_screen_pos) == shadow_screen_pos)
-            ? shadow
-            : vec3(1.0);
+            color = color * color_weight + (1.0 - color_weight);
+            shadow *= color;
+        }
 #else
-        float depth1 = texelFetch(shadowtex1, shadow_texel, 0).x;
-        float shadow = step(
-            float(clamp01(shadow_screen_pos) == shadow_screen_pos)
-                * shadow_screen_pos.z,
-            depth1
-        );
-#endif
-#else
-        float depth1 = texelFetch(shadowtex1, shadow_texel, 0).x;
-        float shadow = step(
-            float(clamp01(shadow_screen_pos) == shadow_screen_pos)
-                * shadow_screen_pos.z,
-            depth1
-        );
+        float shadow = opaque_shadow;
 #endif
 #else
 #define shadow 1.0

@@ -30,10 +30,7 @@ bool raymarch_shadow(
         - ray_origin_screen
     );
 
-    float ray_length = min_of(
-        abs(sign(ray_dir_screen) - ray_origin_screen)
-        / max(abs(ray_dir_screen), eps)
-    );
+    float ray_length = ray_box_exit_unit(ray_origin_screen, ray_dir_screen);
     ray_length = min(
         ray_length,
         max(0.1, exp(-max0(length(ray_origin_view) * 0.025 - 1.0)))
@@ -46,16 +43,25 @@ bool raymarch_shadow(
 
     vec3 ray_pos = ray_origin_screen + length(view_pixel_size) * ray_dir_screen;
 
+    ivec2 depth_size = textureSize(depth_sampler, 0);
+    ivec2 max_texel = clamp(
+        ivec2(ceil(vec2(depth_size) * taau_render_scale - 0.5)),
+        ivec2(1),
+        depth_size
+    ) - 1;
+    vec2 active_extent = vec2(depth_size) * taau_render_scale;
+
     bool hit = false;
     bool hit_after_sss = false;
     bool sss_raymarch = has_sss;
-    vec3 exit_pos = ray_origin_view;
+    bool found_exit = false;
+    vec3 exit_pos_screen = ray_origin_screen;
 
     for (int i = 0; i < step_count; ++i) {
-        step_length *= step_ratio;
         vec3 ray_step = ray_dir_screen * step_length;
         vec3 dithered_pos = ray_pos + dither * ray_step;
         ray_pos += ray_step;
+        step_length *= step_ratio;
 
 #ifdef LOD_MOD_ACTIVE
         if (dithered_pos.z < 0.0) {
@@ -66,12 +72,12 @@ bool raymarch_shadow(
             break;
         }
 
-        float depth = texelFetch(
-                          depth_sampler,
-                          ivec2(dithered_pos.xy * view_res * taau_render_scale),
-                          0
-        )
-                          .x;
+        ivec2 sample_texel = clamp(
+            ivec2(dithered_pos.xy * active_extent),
+            ivec2(0),
+            max_texel
+        );
+        float depth = texelFetch(depth_sampler, sample_texel, 0).x;
 
         float z_ray = screen_to_view_space_depth(
             projection_matrix_inverse,
@@ -80,18 +86,18 @@ bool raymarch_shadow(
         float z_sample
             = screen_to_view_space_depth(projection_matrix_inverse, depth);
 
+        float dz = z_ray - z_sample;
         bool inside = depth != 0.0 && depth < dithered_pos.z
-            && abs(z_tolerance - (z_ray - z_sample)) < z_tolerance;
+            && dz > 0.0 && dz < z_tolerance;
         hit = inside || hit;
 
         if (sss_raymarch) {
             if (!inside) {
-                exit_pos = dithered_pos;
+                exit_pos_screen = dithered_pos;
+                found_exit = true;
                 sss_raymarch = false;
             }
-        }
-
-        else if (!sss_raymarch) {
+        } else {
             hit_after_sss = inside || hit_after_sss;
             if (hit) {
                 break;
@@ -99,9 +105,12 @@ bool raymarch_shadow(
         }
     }
 
-    exit_pos = screen_to_view_space(projection_matrix_inverse, exit_pos, true);
-    sss_depth = hit_after_sss ? -1.0
-                              : max0(distance(ray_origin_view, exit_pos) * 0.2);
+    vec3 exit_pos_view = found_exit
+        ? screen_to_view_space(projection_matrix_inverse, exit_pos_screen, true)
+        : ray_origin_view;
+    sss_depth = hit_after_sss
+        ? -1.0
+        : max0(distance(ray_origin_view, exit_pos_view) * 0.2);
 
     return hit;
 }

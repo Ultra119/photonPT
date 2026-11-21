@@ -220,11 +220,11 @@ void main() {
 
     clouds.xyz = result.scattering.xyz;
     clouds.w = result.transmittance;
-    clouds_data.x = result.apparent_distance * rcp(CLOUDS_SCALE);
+    clouds_data.x = min(result.apparent_distance * rcp(CLOUDS_SCALE), 60000.0);
     clouds_data.y = result.scattering.w;
 #else
     clouds = vec4(0.0, 0.0, 0.0, 1.0);
-    clouds_data.x = 1e6;
+    clouds_data.x = 60000.0;
     clouds_data.y = 0.0;
 #endif
 

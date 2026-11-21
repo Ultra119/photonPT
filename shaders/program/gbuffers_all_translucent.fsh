@@ -589,7 +589,7 @@ void main() {
 #endif
     float NoV = clamp01(dot(normal, -direction_world));
     float LoV = dot(light_dir, -direction_world);
-    float halfway_norm = inversesqrt(2.0 * LoV + 2.0);
+    float halfway_norm = inversesqrt(max(2.0 * LoV + 2.0, 1e-6));
     float NoH = (NoL + NoV) * halfway_norm;
     float LoH = LoV * halfway_norm + halfway_norm;
 
@@ -701,10 +701,11 @@ void main() {
     }
 #endif
 
-    // Fog
+    // Fog (premultiplied by translucent coverage alpha)
 
     vec4 fog = common_fog(length(position_scene), false);
-    fragment_color.rgb = fragment_color.rgb * fog.a + fog.rgb;
+    fragment_color.rgb
+        = fragment_color.rgb * fog.a + fog.rgb * fragment_color.a;
 
     // Purkinje shift
 

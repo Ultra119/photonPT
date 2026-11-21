@@ -81,20 +81,23 @@ mat2x3 raymarch_water_fog(
         vec3 shadow_screen_pos = distort_shadow_space(shadow_pos) * 0.5 + 0.5;
 
 #if defined SHADOW && (defined WORLD_OVERWORLD || defined WORLD_END)
-        ivec2 shadow_texel = ivec2(
-            shadow_screen_pos.xy * shadowMapResolution * MC_SHADOW_QUALITY
-        );
-        float depth0 = texelFetch(shadowtex0, shadow_texel, 0).x;
-        float depth1 = texelFetch(shadowtex1, shadow_texel, 0).x;
-        float shadow = step(
-            float(clamp01(shadow_screen_pos) == shadow_screen_pos)
-                * shadow_screen_pos.z,
-            depth1
-        );
+        bool in_shadow_map = clamp01(shadow_screen_pos) == shadow_screen_pos;
+        float shadow
+            = in_shadow_map ? texture(shadowtex1, shadow_screen_pos) : 1.0;
 
         // Calculate sunlight transmittance through the volume
-        float distance_traveled = abs(depth0 - shadow_screen_pos.z)
-            * -shadowProjectionInverse[2].z * rcp(SHADOW_DEPTH_SCALE);
+        float distance_traveled = 0.0;
+        if (in_shadow_map) {
+            int shadow_res = int(float(shadowMapResolution) * MC_SHADOW_QUALITY);
+            ivec2 shadow_texel = clamp(
+                ivec2(shadow_screen_pos.xy * float(shadow_res)),
+                ivec2(0),
+                ivec2(shadow_res - 1)
+            );
+            float depth0 = texelFetch(shadowtex0, shadow_texel, 0).x;
+            distance_traveled = abs(depth0 - shadow_screen_pos.z)
+                * -shadowProjectionInverse[2].z * rcp(SHADOW_DEPTH_SCALE);
+        }
 
         // Guess the transmittance to sky using trigonometry
         float distance_traveled_sky = distance_traveled * light_dir.y;

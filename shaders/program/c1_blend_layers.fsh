@@ -54,10 +54,6 @@ uniform sampler2D colortex12; // clouds data
 uniform sampler2D colortex13; // rendered translucent layer
 uniform sampler2D colortex17; // stained glass optical filter data
 
-uniform sampler2D shadowcolor0;
-uniform sampler2D shadowtex0;
-uniform sampler2D shadowtex1;
-
 #ifdef DISTANT_HORIZONS
 uniform sampler2D colortex1; // distant water gbuffer
 #endif
@@ -299,6 +295,15 @@ void main() {
 
     // Refraction
 
+    ivec2 full_size = textureSize(depthtex1, 0);
+    ivec2 full_active = clamp(
+        ivec2(ceil(vec2(full_size) * taau_render_scale - 0.5)),
+        ivec2(1),
+        full_size
+    );
+    vec2 fb_min = vec2(0.5) / vec2(full_size);
+    vec2 fb_max = (vec2(full_active) - 0.5) / vec2(full_size);
+
     vec2 refracted_uv = uv;
     float layer_dist = abs(view_distance - length(back_position_view));
 
@@ -310,18 +315,54 @@ void main() {
             unsplit_2x8(refraction_data.zw) * 2.0 - 1.0
         );
 
-        refracted_uv = uv
+        vec2 candidate_uv = uv
             + normal_tangent.xy * rcp(max(view_distance, 1.0))
                 * min(layer_dist, 8.0) * (0.1 * REFRACTION_INTENSITY);
 
-        // Make sure the refracted fragment is behind the fragment position
-        float depth_refracted = texture(depthtex1, refracted_uv).x;
-        refracted_uv
-            = mix(refracted_uv, uv, float(depth_refracted < front_depth));
+        // Validate the refracted sample in the scaled framebuffer domain and
+        // compare positive linear view depth across vanilla and LoD providers.
+        if (clamp01(candidate_uv) == candidate_uv) {
+            vec2 candidate_fb
+                = clamp(candidate_uv * taau_render_scale, fb_min, fb_max);
+            ivec2 refracted_texel = clamp(
+                ivec2(candidate_fb * vec2(full_size)),
+                ivec2(0),
+                full_active - 1
+            );
+            float depth_refracted = texelFetch(depthtex1, refracted_texel, 0).x;
+            float z_refracted;
+#ifdef LOD_MOD_ACTIVE
+            if (depth_refracted >= 1.0) {
+                float depth_lod_ref
+                    = texelFetch(lod_depth_tex_solid, refracted_texel, 0).x;
+                z_refracted = depth_lod_ref < 1.0
+                    ? screen_to_view_space_depth(
+                          lod_projection_matrix_inverse,
+                          depth_lod_ref
+                      )
+                    : 1e6;
+            } else
+#endif
+            {
+                fix_hand_depth(depth_refracted);
+                z_refracted = depth_refracted < 1.0
+                    ? screen_to_view_space_depth(
+                          gbufferProjectionInverse,
+                          depth_refracted
+                      )
+                    : 1e6;
+            }
+
+            if (z_refracted >= -front_position_view.z) {
+                refracted_uv = candidate_uv;
+            }
+        }
     }
 #endif
 
-    fragment_color = texture(colortex0, refracted_uv * taau_render_scale).rgb;
+    vec2 refracted_fb_uv
+        = clamp(refracted_uv * taau_render_scale, fb_min, fb_max);
+    fragment_color = texture(colortex0, refracted_fb_uv).rgb;
     vec3 original_color = fragment_color;
 
     // Draw LoD water
@@ -363,7 +404,7 @@ void main() {
 
 #ifdef VOXY
             vec4 gbuffer_data = texelFetch(colortex16, texel, 0);
-            bool is_water = min_of(gbuffer_data) > eps;
+            bool is_water = unpack_unorm_2x8(gbuffer_data.y).y > 0.0;
 #else
             vec4 gbuffer_data = texelFetch(colortex1, texel, 0);
 #endif
@@ -514,8 +555,8 @@ void main() {
 
 #ifdef BLOOMY_FOG
         bloomy_fog
-            = clamp01(dot(fog_transmittance, vec3(luminance_weights_rec2020)));
-        bloomy_fog = isEyeInWater == 1.0 ? sqrt(bloomy_fog) : bloomy_fog;
+            = clamp01(dot(analytic_fog[1], vec3(luminance_weights_rec2020)));
+        bloomy_fog = isEyeInWater == 1 ? sqrt(bloomy_fog) : bloomy_fog;
 #endif
 #else
 #ifdef BLOOMY_FOG

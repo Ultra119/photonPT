@@ -48,7 +48,7 @@ uniform vec3 cameraPosition;
 uniform float far;
 
 mat3 get_tbn_matrix(vec3 normal) {
-    vec3 tangent = normal.y == 1.0
+    vec3 tangent = abs(normal.y) > 0.999
         ? vec3(1.0, 0.0, 0.0)
         : normalize(cross(vec3(0.0, 1.0, 0.0), normal));
     vec3 bitangent = normalize(cross(tangent, normal));

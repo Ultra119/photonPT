@@ -145,11 +145,20 @@ vec3 scene_to_view_space(vec3 scene_pos) {
 }
 
 mat3 get_tbn_matrix(vec3 normal) {
-    vec3 tangent = normal.y == 1.0
+    vec3 tangent = abs(normal.y) > 0.999
         ? vec3(1.0, 0.0, 0.0)
         : normalize(cross(vec3(0.0, 1.0, 0.0), normal));
     vec3 bitangent = normalize(cross(tangent, normal));
     return mat3(tangent, bitangent, normal);
+}
+
+// Parametric distance along dir from origin to exit the unit cube [0, 1]^3.
+float ray_box_exit_unit(vec3 origin, vec3 dir) {
+    vec3 target = step(vec3(0.0), dir);
+    bvec3 active_axis = greaterThan(abs(dir), vec3(eps));
+    vec3 safe_dir = mix(vec3(1.0), dir, active_axis);
+    vec3 dist = mix(vec3(1e6), (target - origin) / safe_dir, active_axis);
+    return max0(min_of(dist));
 }
 
 #if defined TEMPORAL_REPROJECTION
@@ -167,9 +176,12 @@ vec3 reproject_scene_space(vec3 scene_pos, bool hand, bool is_lod_terrain) {
 
     vec3 previous_pos
         = transform(gbufferPreviousModelView, scene_pos + camera_offset);
-    previous_pos = project_and_divide(previous_projection_matrix, previous_pos);
+    vec4 clip = previous_projection_matrix * vec4(previous_pos, 1.0);
+    if (clip.w <= 0.0) {
+        return vec3(-1.0);
+    }
 
-    return previous_pos * 0.5 + 0.5;
+    return (clip.xyz / clip.w) * 0.5 + 0.5;
 }
 
 vec3 reproject(vec3 screen_pos, bool is_lod_terrain) {

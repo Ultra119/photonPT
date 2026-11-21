@@ -91,7 +91,7 @@ vec4 draw_distant_water(
     float NoL = dot(normal, light_dir);
     float NoV = clamp01(dot(normal, -direction_world));
     float LoV = dot(light_dir, -direction_world);
-    float halfway_norm = inversesqrt(2.0 * LoV + 2.0);
+    float halfway_norm = inversesqrt(max(2.0 * LoV + 2.0, 1e-6));
     float NoH = (NoL + NoV) * halfway_norm;
     float LoH = LoV * halfway_norm + halfway_norm;
 

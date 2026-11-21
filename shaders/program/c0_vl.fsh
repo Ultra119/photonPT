@@ -44,7 +44,7 @@ uniform sampler2D depthtex1;
 #ifndef WORLD_NETHER
 #ifdef SHADOW
 uniform sampler2D shadowtex0;
-uniform sampler2D shadowtex1;
+uniform sampler2DShadow shadowtex1;
 #ifdef SHADOW_COLOR
 uniform sampler2D shadowcolor0;
 #endif
@@ -119,8 +119,17 @@ uniform float time_midnight;
 
 void main() {
     ivec2 fog_texel = ivec2(gl_FragCoord.xy);
-    ivec2 view_texel
-        = ivec2(gl_FragCoord.xy * taau_render_scale * rcp(VL_RENDER_SCALE));
+    ivec2 full_size = textureSize(depthtex0, 0);
+    ivec2 full_active = clamp(
+        ivec2(ceil(vec2(full_size) * taau_render_scale - 0.5)),
+        ivec2(1),
+        full_size
+    );
+    ivec2 view_texel = clamp(
+        ivec2(gl_FragCoord.xy * taau_render_scale * rcp(VL_RENDER_SCALE)),
+        ivec2(0),
+        full_active - 1
+    );
 
     float depth0 = texelFetch(depthtex0, view_texel, 0).x;
     float depth1 = texelFetch(depthtex1, view_texel, 0).x;
@@ -128,13 +137,14 @@ void main() {
 
 #ifdef LOD_MOD_ACTIVE
     mat4 projection_matrix, projection_matrix_inverse;
+    mat4 back_projection_inverse;
     bool is_lod;
     float depth_lod = texelFetch(lod_depth_tex, view_texel, 0).x;
+    float depth_lod_solid = texelFetch(lod_depth_tex_solid, view_texel, 0).x;
 
-    if (depth0 == 1.0) {
+    if (depth0 == 1.0 && depth_lod < 1.0) {
         is_lod = true;
         depth0 = depth_lod;
-        depth1 = depth_lod;
         projection_matrix = lod_projection_matrix;
         projection_matrix_inverse = lod_projection_matrix_inverse;
     } else {
@@ -142,10 +152,18 @@ void main() {
         projection_matrix = gbufferProjection;
         projection_matrix_inverse = gbufferProjectionInverse;
     }
+
+    if (depth1 == 1.0 && depth_lod_solid < 1.0) {
+        depth1 = depth_lod_solid;
+        back_projection_inverse = lod_projection_matrix_inverse;
+    } else {
+        back_projection_inverse = gbufferProjectionInverse;
+    }
 #else
 #define is_lod false
 #define projection_matrix gbufferProjection
 #define projection_matrix_inverse gbufferProjectionInverse
+#define back_projection_inverse gbufferProjectionInverse
 #endif
 
     float skylight = unpack_unorm_2x8(gbuffer_data_0.w).y;
@@ -158,7 +176,11 @@ void main() {
     vec3 scene_pos = view_to_scene_space(view_pos);
     vec3 world_pos = scene_pos + cameraPosition;
 
-    vec3 view_back_pos = screen_to_view_space(vec3(uv, depth1), true);
+    vec3 view_back_pos = screen_to_view_space(
+        back_projection_inverse,
+        vec3(uv, depth1),
+        true
+    );
     vec3 scene_back_pos = view_to_scene_space(view_back_pos);
     vec3 world_back_pos = scene_back_pos + cameraPosition;
 

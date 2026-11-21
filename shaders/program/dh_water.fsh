@@ -251,7 +251,7 @@ void main() {
 #endif
     float NoV = clamp01(dot(normal, -world_dir));
     float LoV = dot(light_dir, -world_dir);
-    float halfway_norm = inversesqrt(2.0 * LoV + 2.0);
+    float halfway_norm = inversesqrt(max(2.0 * LoV + 2.0, 1e-6));
     float NoH = (NoL + NoV) * halfway_norm;
     float LoH = LoV * halfway_norm + halfway_norm;
 
@@ -261,7 +261,6 @@ void main() {
 
 #ifdef CLOUD_SHADOWS
     float cloud_shadows = get_cloud_shadows(colortex8, scene_pos);
-    shadows *= cloud_shadows;
 #endif
 
     fragment_color.rgb = get_diffuse_lighting(
@@ -284,10 +283,10 @@ void main() {
         LoV
     );
 
-    // Apply fog
-
-    vec4 fog = common_fog(length(scene_pos), false);
-    fragment_color.rgb = fragment_color.rgb * fog.a + fog.rgb;
+    // Apply fog and premultiply for ONE / ONE_MINUS_SRC_ALPHA blending
 
     fragment_color.a *= border_fog(scene_pos, world_dir);
+    vec4 fog = common_fog(length(scene_pos), false);
+    fragment_color.rgb
+        = (fragment_color.rgb * fog.a + fog.rgb) * fragment_color.a;
 }

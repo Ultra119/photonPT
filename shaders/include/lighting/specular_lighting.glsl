@@ -168,6 +168,7 @@ vec3 sample_ggx_vndf(vec3 viewer_dir, vec2 alpha, vec2 hash) {
 
     // Section 2: transforming the view direction to the hemisphere
     // configuration
+    viewer_dir.z = max(viewer_dir.z, 1e-4);
     vec3 v = normalize(vec3(alpha * viewer_dir.xy, viewer_dir.z));
 
     // Section 3.2: computing the orthonormal basis
@@ -251,7 +252,7 @@ vec3 trace_specular_ray(
         vec3 hit_pos_view = screen_to_view_space(
             SSRT_PROJECTION_MATRIX_INVERSE,
             hit_pos,
-            false
+            true
         );
         vec3 hit_pos_scene = view_to_scene_space(hit_pos_view);
 
@@ -262,6 +263,10 @@ vec3 trace_specular_ray(
         }
 
         vec3 reflection = textureLod(colortex5, hit_uv_prev, mip_level).rgb;
+        if (any(isnan(reflection)) || any(isinf(reflection))) {
+            return sky_reflection;
+        }
+        reflection = max0(reflection);
 
         vec3 fog_scattering_previous = texture(colortex7, hit_uv_prev).rgb;
 
@@ -345,7 +350,7 @@ vec3 get_specular_reflections(
             vec3 ray_dir = reflect(world_dir, microfacet_normal);
 
             float NoL = dot(normal, ray_dir);
-            if (NoL < eps) {
+            if (NoL < eps || dot(flat_normal, ray_dir) <= 0.0) {
                 continue;
             }
 
@@ -361,16 +366,16 @@ vec3 get_specular_reflections(
                 int(mip_level)
             );
 
-            float NoV = max(1e-2, dot(flat_normal, -world_dir));
+            float NoV = max(1e-2, dot(normal, -world_dir));
             float MoV = max(1e-2, dot(microfacet_normal, -world_dir));
 
             vec3 fresnel;
             if (material.is_hardcoded_metal) {
-                fresnel = fresnel_lazanyi_2019(NoV, material.f0, material.f82);
+                fresnel = fresnel_lazanyi_2019(MoV, material.f0, material.f82);
             } else if (material.is_metal) {
-                fresnel = fresnel_schlick(NoV, material.albedo);
+                fresnel = fresnel_schlick(MoV, material.albedo);
             } else {
-                fresnel = fresnel_dielectric(NoV, material.f0.x);
+                fresnel = fresnel_dielectric(MoV, material.f0.x);
             }
 
             float v1 = v1_smith_ggx(NoV, alpha_squared);
@@ -380,8 +385,8 @@ vec3 get_specular_reflections(
         }
 
         reflection *= albedo_tint * rcp(float(SSR_RAY_COUNT));
-        if (any(isnan(reflection))) {
-            reflection = vec3(0.0); // don't reflect NaNs
+        if (any(isnan(reflection)) || any(isinf(reflection))) {
+            reflection = vec3(0.0); // don't reflect NaNs or Infs
         }
         return reflection * material.ssr_multiplier;
     }
@@ -429,8 +434,8 @@ vec3 get_specular_reflections(
     );
     reflection *= albedo_tint * fresnel;
 
-    if (any(isnan(reflection))) {
-        reflection = vec3(0.0); // don't reflect NaNs
+    if (any(isnan(reflection)) || any(isinf(reflection))) {
+        reflection = vec3(0.0); // don't reflect NaNs or Infs
     }
 
     return reflection * material.ssr_multiplier;

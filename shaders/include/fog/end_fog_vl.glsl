@@ -136,16 +136,9 @@ mat2x3 raymarch_end_fog(
         vec3 shadow_screen_pos = distort_shadow_space(shadow_pos) * 0.5 + 0.5;
 
 #ifdef SHADOW
-        ivec2 shadow_texel = ivec2(
-            shadow_screen_pos.xy * shadowMapResolution * MC_SHADOW_QUALITY
-        );
-        float depth0 = texelFetch(shadowtex0, shadow_texel, 0).x;
-        float depth1 = texelFetch(shadowtex1, shadow_texel, 0).x;
-        float shadow = step(
-            float(clamp01(shadow_screen_pos) == shadow_screen_pos)
-                * shadow_screen_pos.z,
-            depth1
-        );
+        bool in_shadow_map = clamp01(shadow_screen_pos) == shadow_screen_pos;
+        float shadow
+            = in_shadow_map ? texture(shadowtex1, shadow_screen_pos) : 1.0;
 #else
 #define shadow 1.0
 #endif

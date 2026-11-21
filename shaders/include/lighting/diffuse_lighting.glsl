@@ -80,10 +80,10 @@ vec3 sss_approx(
 }
 #endif
 
-#ifdef DIFFUSE_USE_RTGI
 vec3 rtgi_fallback_radiance(vec2 light_levels) {
     // Reuse the underlying lightmap falloff only where traced diffuse has no
-    // compatible support. Keep the fallback deterministic and in E/pi units.
+    // compatible support (or for forward translucent callers). Keep the
+    // fallback deterministic and in E/pi units.
     float blocklight = light_levels.x;
     float falloff = pow8(blocklight) + 0.18 * sqr(blocklight) + 0.16 * dampen(blocklight);
     vec3 block = (rcp_pi * blocklight_scale * falloff) * blocklight_color;
@@ -98,6 +98,7 @@ vec3 rtgi_fallback_radiance(vec2 light_levels) {
     return block + environment;
 }
 
+#ifdef DIFFUSE_USE_RTGI
 float rtgi_upsample_weight(
     ivec2 tap, RtgiGrid grid, vec2 jitter, bool even, vec3 view_pos,
     vec3 normal, uint material, float footprint, float max_chord
@@ -239,9 +240,9 @@ vec3 get_diffuse_lighting(
     vec3 indirect_radiance
 ) {
 #if defined PROGRAM_GBUFFERS_WATER
-    // Small optimization, don't calculate diffuse lighting when albedo is 0 (eg
-    // water)
-    if (max_of(material.albedo) < eps) {
+    // Small optimization, don't calculate diffuse lighting when albedo and
+    // emission are both 0 (eg water)
+    if (max_of(material.albedo) < eps && max_of(material.emission) < eps) {
         return vec3(0.0);
     }
 #endif
@@ -316,8 +317,6 @@ vec3 get_diffuse_lighting(
 #endif
 #endif
 
-    direct_lighting += material.emission * emission_scale;
-
 #if defined WORLD_OVERWORLD
     // Cave/indoor ambient
     direct_lighting += 0.25 * CAVE_LIGHTING_I * directional_lighting * ao
@@ -327,12 +326,16 @@ vec3 get_diffuse_lighting(
 #endif
 
     // The raster term is irradiance, and RTGI already includes the diffuse 1/pi.
+    // Outgoing surface emission Le is already tinted in linear Rec.2020 and
+    // must not be multiplied by diffuse albedo or metallic attenuation again.
+    vec3 outgoing_emission = max0(material.emission) * (emission_scale * rcp_pi);
     vec3 final_diffuse = (max0(direct_lighting) * rcp_pi + indirect_radiance)
         * material.albedo * mix(1.0, metal_diffuse_amount, float(material.is_metal));
-    return conserve_diffuse_energy(final_diffuse, material.f0, NoV);
+    return conserve_diffuse_energy(final_diffuse, material.f0, NoV)
+        + outgoing_emission;
 }
 
-// Forward callers have no opaque RTGI receiver.
+// Forward callers have no opaque RTGI receiver and use the shared coverage fallback.
 vec3 get_diffuse_lighting(
     Material material,
     vec3 scene_pos,
@@ -370,7 +373,7 @@ vec3 get_diffuse_lighting(
         NoV,
         NoH,
         LoV,
-        vec3(0.0)
+        rtgi_fallback_radiance(light_levels)
     );
 }
 

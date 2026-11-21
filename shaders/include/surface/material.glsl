@@ -821,10 +821,10 @@ Material material_from(
                     } else { // 62-64
                         if (material_mask == 62u) { // 62
                             // Nether portal
-                            material.emission = vec3(1.0);
+                            material.emission = material.albedo;
                         } else { // 63
                             // End portal
-                            material.emission = vec3(1.0);
+                            material.emission = material.albedo;
                         }
                     }
                 }

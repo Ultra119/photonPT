@@ -159,7 +159,8 @@ void voxy_emitFragment(VoxyFragmentParameters parameters) {
                   )
         * (float(int(parameters.face) & 1) * 2.0 - 1.0);
 
-    uint material_mask = max(parameters.customId - 10000u, 0u);
+    uint material_mask
+        = parameters.customId >= 10000u ? parameters.customId - 10000u : 0u;
 
     // Get position
 
@@ -206,16 +207,21 @@ void voxy_emitFragment(VoxyFragmentParameters parameters) {
 
     if (material_mask == MATERIAL_WATER) {
         gbuffer_data.x = pack_unorm_2x8(parameters.tinting.rg);
-        gbuffer_data.y = pack_unorm_2x8(parameters.tinting.b, alpha);
+        // Reserve non-zero packed alpha in y as the explicit Voxy water flag.
+        gbuffer_data.y = pack_unorm_2x8(
+            parameters.tinting.b,
+            max(alpha, 1.0 / 255.0)
+        );
         gbuffer_data.z = pack_unorm_2x8(encode_unit_vector(normal));
         gbuffer_data.w = pack_unorm_2x8(parameters.lightMap);
     } else {
         gbuffer_data = vec4(0.0);
     }
 
-    // Early exit if albedo is zero
+    // Early exit if albedo and emission are zero
 
-    if (max_of(material.albedo * alpha) < eps) {
+    if (max_of(material.albedo * alpha) < eps
+        && max_of(material.emission * alpha) < eps) {
         fragment_color = vec4(0.0);
         return;
     }
@@ -225,7 +231,7 @@ void voxy_emitFragment(VoxyFragmentParameters parameters) {
     float NoL = dot(normal, light_dir);
     float NoV = clamp01(dot(normal, -dir_world));
     float LoV = dot(light_dir, -dir_world);
-    float halfway_norm = inversesqrt(2.0 * LoV + 2.0);
+    float halfway_norm = inversesqrt(max(2.0 * LoV + 2.0, 1e-6));
     float NoH = (NoL + NoV) * halfway_norm;
     float LoH = LoV * halfway_norm + halfway_norm;
 
@@ -235,7 +241,6 @@ void voxy_emitFragment(VoxyFragmentParameters parameters) {
 
 #ifdef CLOUD_SHADOWS
     float cloud_shadows = get_cloud_shadows(colortex8, pos_scene);
-    shadows *= cloud_shadows;
 #endif
 
     fragment_color.rgb = get_diffuse_lighting(
@@ -259,8 +264,8 @@ void voxy_emitFragment(VoxyFragmentParameters parameters) {
     );
     fragment_color.a = alpha;
 
-    // Apply fog
+    // Apply fog and premultiply for ONE / ONE_MINUS_SRC_ALPHA blending
 
     vec4 fog = common_fog(length(pos_scene), false);
-    fragment_color.rgb = fragment_color.rgb * fog.a + fog.rgb;
+    fragment_color.rgb = (fragment_color.rgb * fog.a + fog.rgb) * alpha;
 }
