@@ -92,6 +92,21 @@ struct PathTraceSample {
     ivec3 bounce_emitter_cell;
 };
 
+vec3 clamp_bounce_radiance(vec3 rad, int bounce) {
+    if (RTGI_MAX_RADIANCE <= 0.0) {
+        return rad;
+    }
+    // Progressive per-bounce indirect luminance ceiling (Cycles/Lumen-style
+    // path regularization) so rare stray bounce-2/3 rays cannot hijack ReSTIR GI
+    // spatial reuse into large dynamic smoothed blobs, while keeping direct
+    // lighting and primary bounces unconstrained.
+    float cap = bounce == 0 ? 0.25 * RTGI_MAX_RADIANCE
+              : bounce == 1 ? 0.14 * RTGI_MAX_RADIANCE
+                            : 0.07 * RTGI_MAX_RADIANCE;
+    float lum = dot(rad, luminance_weights);
+    return lum > cap ? rad * (cap / lum) : rad;
+}
+
 // Evaluates one primary cosine-hemisphere path and splits primary direct-emitter
 // MIS remainder (`direct_rgb`) from first-bounce indirect outgoing radiance
 // (`indirect_radiance`, un-tinted by primary glass so ReSTIR GI can reconnect
@@ -117,7 +132,7 @@ PathTraceSample evaluate_path_trace(
         if (b == 0) {
             result.direct_rgb += hit.passed_emission;
         } else {
-            result.indirect_radiance += hit.passed_emission * throughput;
+            result.indirect_radiance += clamp_bounce_radiance(hit.passed_emission * throughput, b);
         }
         vec3 endpoint = origin + hit.distance * direction;
 
@@ -134,7 +149,9 @@ PathTraceSample evaluate_path_trace(
                     result.hit_source = hit.status == voxel_volume_exit
                         ? rtgi_hit_volume_exit : rtgi_hit_distance_limit;
                 } else {
-                    result.indirect_radiance += environment * hit.transmittance * throughput;
+                    result.indirect_radiance += clamp_bounce_radiance(
+                        environment * hit.transmittance * throughput, b
+                    );
                 }
             }
             break;
@@ -152,7 +169,7 @@ PathTraceSample evaluate_path_trace(
         VoxelMaterial material = get_voxel_material(sample_data.block_id, sample_data.color);
         vec3 emission = material.emission;
 #ifdef RTGI_EMITTER_SAMPLING
-        if (b <= 1 && sample_emitters && max_of(emission) > 0.0
+        if (sample_emitters && max_of(emission) > 0.0
             && (b == 0 || hit.distance < rt_bounce_max_distance)) {
             float light_pdf = primary_emitter_pdf(grid, hit, origin, normal, direction);
             if (light_pdf > 0.0) {
@@ -199,18 +216,21 @@ PathTraceSample evaluate_path_trace(
                 * (sun_boost * rcp_pi * sun_cosine);
         }
 
-        // Bounce-1 direct block-light NEE paired with b == 1 BSDF MIS above.
+        // Direct block-light NEE paired with BSDF MIS on the subsequent bounce
+        // for every non-terminal bounce (eliminates un-MIS'd emitter fireflies
+        // at PT_BOUNCES == 3 as well as PT_BOUNCES == 2).
         vec3 bounce_emitter = vec3(0.0);
 #ifdef RTGI_EMITTER_SAMPLING
-        if (b == 0 && b < PT_BOUNCES - 1 && sample_emitters && max_of(material.albedo) > 0.0) {
+        if (b < PT_BOUNCES - 1 && sample_emitters && max_of(material.albedo) > 0.0) {
             ivec3 b_cell;
+            uint nee_seed = lowbias32(seed ^ (0x9e3779b9u + uint(b) * 0x85ebca6bu));
             vec4 b_sample = sample_direct_emitter_ex(
                 grid, next_origin, hit.normal,
-                lowbias32(seed ^ 0x9e3779b9u),
+                nee_seed,
                 1.0, rt_bounce_max_distance, b_cell
             );
             if (b_sample.a > 1.5) {
-                bounce_emitter = material.albedo * b_sample.rgb;
+                bounce_emitter = clamp_bounce_radiance(material.albedo * b_sample.rgb, b);
                 if (result.bounce_emitter_cell.x < 0) {
                     result.bounce_emitter_cell = b_cell;
                 }
@@ -229,7 +249,9 @@ PathTraceSample evaluate_path_trace(
             }
         } else {
             throughput *= hit.transmittance;
-            result.indirect_radiance += (emission + sun + bounce_emitter) * throughput;
+            result.indirect_radiance += clamp_bounce_radiance(
+                (emission + sun + bounce_emitter) * throughput, b
+            );
         }
         if (b == PT_BOUNCES - 1) {
 #ifdef RTGI_WORLD_CACHE
@@ -246,12 +268,8 @@ PathTraceSample evaluate_path_trace(
         }
 
         throughput *= material.albedo;
-        if (b >= 1) {
-            float survival = clamp(1.6 * max_of(throughput), 0.35, 1.0);
-            if (random_dimension(seed, 3 * b + 2) >= survival) {
-                break;
-            }
-            throughput /= survival;
+        if (max_of(throughput) < 0.01) {
+            break;
         }
         origin = next_origin;
         normal = hit.normal;
