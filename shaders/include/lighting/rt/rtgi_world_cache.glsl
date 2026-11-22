@@ -114,6 +114,68 @@ bool world_cache_query(ivec3 world_cell, vec3 normal, out vec3 radiance) {
     return world_cache_query_with_age(world_cell, normal, radiance, dummy_age);
 }
 
+#ifdef INCLUDE_UTILITY_CAMERA_MOTION
+// Coplanar 2x2 bilinear WorldCache lookup along the two tangent axes of the
+// surface face. Eliminates 1-block grid steps on disocclusion warm-starts
+// while keeping opposite faces of thin walls strictly isolated.
+bool world_cache_query_bilinear(
+    vec3 voxel_pos, vec3 normal, out vec3 radiance, out float cache_age
+) {
+    radiance = vec3(0.0);
+    cache_age = 0.0;
+    ivec3 center_cell = ivec3(floor(voxel_pos - 0.02 * normal));
+    if (!is_inside_voxel_grid(center_cell)) {
+        return false;
+    }
+
+    uint axis = world_cache_face(normal) >> 1u;
+    ivec3 t0 = axis == 0u ? ivec3(0, 1, 0) : ivec3(1, 0, 0);
+    ivec3 t1 = axis == 2u ? ivec3(0, 1, 0) : ivec3(0, 0, 1);
+
+    float u = dot(voxel_pos, vec3(t0)) - 0.5;
+    float v = dot(voxel_pos, vec3(t1)) - 0.5;
+    int i0 = int(floor(u));
+    int i1 = int(floor(v));
+    float fu = u - float(i0);
+    float fv = v - float(i1);
+
+    ivec3 base_cell = center_cell
+        + t0 * (i0 - int(dot(vec3(center_cell), vec3(t0))))
+        + t1 * (i1 - int(dot(vec3(center_cell), vec3(t1))));
+
+    vec3 rad_sum = vec3(0.0);
+    float age_sum = 0.0;
+    float w_sum = 0.0;
+    for (int dy = 0; dy <= 1; ++dy) {
+        float wy = dy == 0 ? (1.0 - fv) : fv;
+        for (int dx = 0; dx <= 1; ++dx) {
+            float w = (dx == 0 ? (1.0 - fu) : fu) * wy;
+            if (w <= 1e-4) {
+                continue;
+            }
+            ivec3 cell = base_cell + t0 * dx + t1 * dy;
+            if (!is_inside_voxel_grid(cell)) {
+                continue;
+            }
+            vec3 tap_rad;
+            float tap_age;
+            if (world_cache_query_with_age(
+                    world_cache_cell_from_voxel(cell), normal, tap_rad, tap_age)) {
+                rad_sum += w * tap_rad;
+                age_sum += w * tap_age;
+                w_sum += w;
+            }
+        }
+    }
+    if (w_sum <= 1e-4) {
+        return false;
+    }
+    radiance = rad_sum / w_sum;
+    cache_age = age_sum / w_sum;
+    return true;
+}
+#endif
+
 #ifndef RTGI_WORLD_CACHE_READONLY
 void world_cache_deposit(ivec3 world_cell, vec3 normal, vec3 radiance, bool force_reset) {
     if (world_cache_slots.length() < world_cache_size) {

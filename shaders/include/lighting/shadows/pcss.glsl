@@ -26,7 +26,12 @@ const ivec2[9] blur_kernel_offsets_3x3 = ivec2[9](
 const int shadow_map_res = int(float(shadowMapResolution) * MC_SHADOW_QUALITY);
 const float shadow_map_pixel_size = rcp(float(shadow_map_res));
 
-vec2 blocker_search(vec3 scene_pos, float dither, bool has_sss) {
+vec2 blocker_search(
+    vec3 scene_pos,
+    vec2 receiver_plane_slope,
+    float dither,
+    bool has_sss
+) {
     int step_count = has_sss ? SSS_STEPS : 8;
 
     vec3 shadow_view_pos = transform(shadowModelView, scene_pos);
@@ -55,7 +60,8 @@ vec2 blocker_search(vec3 scene_pos, float dither, bool has_sss) {
             ivec2(shadow_map_res - 1)
         );
         float depth = texelFetch(shadowtex0, texel, 0).x;
-        float weight = step(depth, ref_z);
+        float ref_z_tap = ref_z + clamp(dot(receiver_plane_slope, offset), -0.015, 0.0);
+        float weight = step(depth, ref_z_tap);
 
         depth_sum += weight * depth;
         weight_sum += weight;
@@ -115,6 +121,7 @@ vec3 shadow_pcf(
     vec3 shadow_screen_pos_translucent,
     vec3 shadow_clip_pos_translucent,
 #endif
+    vec2 receiver_plane_slope,
     float penumbra_size,
     float dither
 ) {
@@ -135,6 +142,9 @@ vec3 shadow_pcf(
 
     // Combine opaque visibility and translucent transmittance per tap so
     // colored penumbra edges evaluate avg(V * T) across the full kernel.
+    // Apply uphill receiver-plane depth bias (clamped <= 0) so wide PCF discs
+    // on grazing vertical walls follow the wall plane uphill instead of
+    // self-shadowing into horizontal shadow-map texel stripes.
     for (int i = 0; i < step_count; ++i) {
         vec2 offset
             = vogel_disc_sample(i, step_count, dither * tau) * filter_radius;
@@ -143,8 +153,9 @@ vec3 shadow_pcf(
         uv /= get_distortion_factor(uv);
         uv = uv * 0.5 + 0.5;
 
+        float dz_tap = clamp(dot(receiver_plane_slope, offset), -0.015, 0.0);
         float vis = (clamp01(uv) == uv)
-            ? texture(shadowtex1, vec3(uv, shadow_screen_pos.z))
+            ? texture(shadowtex1, vec3(uv, shadow_screen_pos.z + dz_tap))
             : 1.0;
         opaque_sum += vis;
 
@@ -167,7 +178,7 @@ vec3 shadow_pcf(
                 color = mix(
                     vec3(1.0),
                     4.0 * sample_color,
-                    step(depth, shadow_screen_pos_translucent.z)
+                    step(depth, shadow_screen_pos_translucent.z + dz_tap)
                 );
             }
         }
@@ -212,12 +223,6 @@ vec3 get_filtered_shadows(
 
     vec3 bias = get_shadow_bias(scene_pos, flat_normal, NoL, skylight);
 
-    // Gentle inward light-leak guard (kept small so grazing wall shadows
-    // remain aligned with floor shadows at 90-degree corners).
-    vec3 edge_factor
-        = 0.02 - 0.04 * fract(scene_pos + cameraPosition + flat_normal * 0.01);
-    edge_factor -= edge_factor * skylight;
-
 #ifdef PIXELATED_SHADOWS
     // Snap position to the nearest block texel
     const float pixel_scale = float(PIXELATED_SHADOWS_RESOLUTION);
@@ -228,7 +233,7 @@ vec3 get_filtered_shadows(
 #endif
 
     vec3 shadow_view_pos
-        = transform(shadowModelView, scene_pos + bias + edge_factor);
+        = transform(shadowModelView, scene_pos + bias);
     vec3 shadow_clip_pos = project_ortho(shadowProjection, shadow_view_pos);
     vec3 shadow_screen_pos = distort_shadow_space(shadow_clip_pos) * 0.5 + 0.5;
 
@@ -241,11 +246,23 @@ vec3 get_filtered_shadows(
     float dither = texelFetch(noisetex, ivec2(gl_FragCoord.xy) & 511, 0).b;
     dither = r1(frameCounter, dither);
 
+    // Exact shadow-screen depth slope dz/d(shadow_clip_xy) along the receiver
+    // plane so uphill PCF / blocker taps never self-shadow grazing walls.
+    vec3 shadow_normal = mat3(shadowModelView) * flat_normal;
+    float nz_safe = shadow_normal.z >= 0.0
+        ? max(shadow_normal.z, 0.05)
+        : min(shadow_normal.z, -0.05);
+    vec2 receiver_plane_slope
+        = -(shadowProjection[2].z * (SHADOW_DEPTH_SCALE * 0.5) / nz_safe)
+        * vec2(shadow_normal.x / shadowProjection[0].x,
+               shadow_normal.y / shadowProjection[1].y);
+
 #ifdef SHADOW_VPS
     // Bias blocker search so grazing walls do not self-occlude into penumbra
     // strings along narrow skylight beams.
-    vec2 blocker_search_result
-        = blocker_search(scene_pos + bias, dither, sss_amount > eps);
+    vec2 blocker_search_result = blocker_search(
+        scene_pos + bias, receiver_plane_slope, dither, sss_amount > eps
+    );
 
     sss_depth = blocker_search_result.y;
 
@@ -292,6 +309,7 @@ vec3 get_filtered_shadows(
         shadow_screen_pos_translucent,
         shadow_clip_pos_translucent,
 #endif
+        receiver_plane_slope,
         penumbra_size,
         dither
     );

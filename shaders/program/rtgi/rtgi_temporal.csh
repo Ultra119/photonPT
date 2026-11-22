@@ -283,26 +283,21 @@ void main() {
         // to exact per-pixel PT within ~0.2s.
         if ((guide.w & rtgi_guide_emitter_changed) == 0u) {
             vec3 voxel_pos = scene_to_voxel_space(scene_pos);
-            ivec3 surface_voxel = ivec3(floor(voxel_pos - 0.02 * world_normal));
-            if (is_inside_voxel_grid(surface_voxel)) {
-                vec3 cached_rad;
-                float cache_age;
-                if (world_cache_query_with_age(
-                        world_cache_cell_from_voxel(surface_voxel),
-                        world_normal, cached_rad, cache_age)
-                    && rtgi_finite(vec4(cached_rad, cache_age))) {
-                    float prior_age = clamp(cache_age * 0.4, 1.5, 3.0);
-                    float init_age = prior_age + 1.0;
-                    float alpha_init = 1.0 / init_age;
-                    vec3 init_mean = mix(cached_rad, raw.rgb, alpha_init);
-                    float init_delta = dot(raw.rgb - cached_rad, luminance_weights);
-                    float init_var = (1.0 - alpha_init) * alpha_init * sqr(init_delta);
-                    float init_q = sqr(1.0 - alpha_init) / prior_age + sqr(alpha_init);
-                    store_history(texel, even, vec4(init_mean, raw.a),
-                                  vec4(init_var, init_q, init_age, 0.0),
-                                  reason, support, true, alpha_init);
-                    return;
-                }
+            vec3 cached_rad;
+            float cache_age;
+            if (world_cache_query_bilinear(voxel_pos, world_normal, cached_rad, cache_age)
+                && rtgi_finite(vec4(cached_rad, cache_age))) {
+                float prior_age = clamp(cache_age * 0.4, 1.5, 3.0);
+                float init_age = prior_age + 1.0;
+                float alpha_init = 1.0 / init_age;
+                vec3 init_mean = mix(cached_rad, raw.rgb, alpha_init);
+                float init_delta = dot(raw.rgb - cached_rad, luminance_weights);
+                float init_var = (1.0 - alpha_init) * alpha_init * sqr(init_delta);
+                float init_q = sqr(1.0 - alpha_init) / prior_age + sqr(alpha_init);
+                store_history(texel, even, vec4(init_mean, raw.a),
+                              vec4(init_var, init_q, init_age, 0.0),
+                              reason, support, true, alpha_init);
+                return;
             }
         }
 #endif
