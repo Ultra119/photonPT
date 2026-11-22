@@ -142,7 +142,7 @@ RtgiHistory gather_history(
 void rtgi_neighborhood_change(
     ivec2 texel, ivec2 prev_shift, RtgiGrid grid, vec2 jitter, bool even, uint material,
     vec3 center_view, vec3 normal, float center_raw, float center_prev,
-    out float mean_raw, out float mean_prev, out int sample_count
+    out float mean_raw, out float mean_prev, out int sample_count, out int changed_count
 ) {
     float footprint = rtgi_view_footprint(-center_view.z, grid.gi_active, gbufferProjection);
     vec3 view_normal = transpose(mat3(gbufferModelViewInverse)) * normal;
@@ -150,6 +150,7 @@ void rtgi_neighborhood_change(
     float sum_raw = center_raw;
     float sum_prev = center_prev;
     sample_count = 1;
+    changed_count = 0;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             ivec2 tap = texel + ivec2(x, y);
@@ -183,6 +184,9 @@ void rtgi_neighborhood_change(
                 sum_raw += dot(raw.rgb, luminance_weights);
                 sum_prev += dot(prev_mean.rgb, luminance_weights);
                 ++sample_count;
+                if ((guide.w & rtgi_guide_emitter_changed) != 0u) {
+                    ++changed_count;
+                }
             }
         }
     }
@@ -279,15 +283,28 @@ void main() {
     float luminance = dot(raw.rgb, luminance_weights);
     float delta = luminance - previous_luminance;
 
+    // Deterministic frame-1 reset when the exact voxel emitter that lit this
+    // pixel last frame was broken/removed inside the active volume.
+    if (RTGI_ADAPT_STRENGTH > 0.0 && (guide.w & rtgi_guide_emitter_changed) != 0u) {
+        store_history(texel, even, raw, vec4(0.0, 1.0, 1.0, 0.0),
+                      rtgi_reset_adaptive, support, true, 1.0);
+        return;
+    }
+
     float evidence = 0.0;
     reason = rtgi_reset_none;
     if (RTGI_ADAPT_STRENGTH > 0.0 && support >= 0.65 && history.stats.z >= 6.0) {
         float nbr_raw, nbr_prev;
-        int nbr_count;
+        int nbr_count, changed_count;
         rtgi_neighborhood_change(
             texel, prev_shift, grid, jitter, even, material, view_pos, world_normal,
-            luminance, previous_luminance, nbr_raw, nbr_prev, nbr_count
+            luminance, previous_luminance, nbr_raw, nbr_prev, nbr_count, changed_count
         );
+        if (changed_count >= 2) {
+            store_history(texel, even, raw, vec4(0.0, 1.0, 1.0, 0.0),
+                          rtgi_reset_adaptive, support, true, 1.0);
+            return;
+        }
         if (nbr_count >= 4) {
             // Compare matched 3x3 same-surface raw vs previous means so steep
             // 1/r^2 peaks have zero curvature bias while independent pixel noise
@@ -300,8 +317,8 @@ void main() {
                 float direction = sign(nbr_delta);
                 evidence = clamp(history.stats.w * direction + 1.0, 1.0, 3.0) * direction;
                 if (abs(evidence) >= 3.0) {
-                    alpha = max(alpha, 0.55 * RTGI_ADAPT_STRENGTH);
-                    age = min(age, max(1.0 / alpha, 4.0));
+                    alpha = max(alpha, 0.6 * RTGI_ADAPT_STRENGTH);
+                    age = min(age, max(1.0 / alpha, 6.0));
                     reason = rtgi_reset_adaptive;
                 }
             }
@@ -309,10 +326,11 @@ void main() {
     }
 
     vec3 mean = mix(history.mean.rgb, raw.rgb, alpha);
-    // Do not poison stationary frame variance with a confirmed lighting-step
-    // residual; otherwise frame_sigma explodes on frame 3 and locks adaptation shut.
+    // Decay stale pre-step variance by (1 - alpha)^2 (matching luminance^2
+    // scaling and q decay) so frame_sigma shrinks in step with mean instead of
+    // locking the detector shut halfway through a torch removal.
     float variance = reason == rtgi_reset_adaptive
-        ? (1.0 - alpha) * history.stats.x
+        ? sqr(1.0 - alpha) * history.stats.x
         : (1.0 - alpha) * (history.stats.x + alpha * sqr(delta));
     float q = sqr(1.0 - alpha) * history.stats.y + sqr(alpha);
     store_history(texel, even, vec4(mean, raw.a), vec4(variance, q, age, evidence),

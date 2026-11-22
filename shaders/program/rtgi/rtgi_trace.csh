@@ -105,8 +105,9 @@ void store_trace(ivec2 texel, vec4 raw, uvec4 guide, vec4 hits, vec4 emitter, uv
 RestirReservoir restir_temporal_reuse(
     ivec2 texel, RtgiGrid grid, int bank, vec3 view_pos, vec3 scene_pos,
     vec3 origin, vec3 world_normal, uint material,
-    RestirReservoir initial, uint seed
+    RestirReservoir initial, uint seed, out bool emitter_removed
 ) {
+    emitter_removed = false;
     int prev_bank = 1 - bank;
     uvec4 previous = imageLoad(rtgi_frame_state_img, ivec2(0, prev_bank));
     vec3 displacement = camera_delta();
@@ -190,6 +191,12 @@ RestirReservoir restir_temporal_reuse(
     bool prev_valid = false;
     if (prev.sample_data.valid && prev.weight > 0.0 && prev.target_pdf > 0.0) {
         prev.sample_data.cell -= camera_grid_shift();
+        if (is_inside_voxel_grid(prev.sample_data.cell)
+            && !emitter_index_member(texelFetch(voxel_sampler, prev.sample_data.cell, 0).r)) {
+            // The emitter that lit this receiver last frame was broken/removed
+            // inside the active volume; notify temporal accumulation directly.
+            emitter_removed = true;
+        }
         uint b_id;
         vec3 em, lnorm, delta;
         float dist_sq, cx, cy;
@@ -324,22 +331,34 @@ void main() {
 
     vec4 direct_emitter = vec4(0.0);
     uvec4 packed_reservoir = uvec4(0u);
+    bool emitter_removed = false;
 #ifdef RTGI_EMITTER_SAMPLING
     bool has_emitters = has_voxel_emitters();
-    if (has_emitters) {
 #ifdef RTGI_USE_RESTIR_DI
+    if (has_emitters) {
         RestirReservoir initial_res = restir_sample_initial(
             voxel_sampler, origin, world_normal, lowbias32(seed ^ 0x85ebca77u)
         );
         RestirReservoir temporal_res = restir_temporal_reuse(
             texel, grid, bank, view_pos, scene_pos, origin, world_normal, material,
-            initial_res, lowbias32(seed ^ 0xc2b2ae3du)
+            initial_res, lowbias32(seed ^ 0xc2b2ae3du), emitter_removed
         );
         packed_reservoir = restir_pack(temporal_res);
-#else
-        direct_emitter = sample_direct_emitter(voxel_sampler, origin, world_normal, lowbias32(seed ^ 0x85ebca77u));
-#endif
+    } else {
+        // Even if the last emitter in the entire volume was just broken
+        // (so has_emitters flipped false), still inspect the previous
+        // reservoir so temporal history flushes immediately on frame 1.
+        RestirReservoir temporal_res = restir_temporal_reuse(
+            texel, grid, bank, view_pos, scene_pos, origin, world_normal, material,
+            restir_empty_reservoir(), lowbias32(seed ^ 0xc2b2ae3du), emitter_removed
+        );
+        packed_reservoir = uvec4(0u);
     }
+#else
+    if (has_emitters) {
+        direct_emitter = sample_direct_emitter(voxel_sampler, origin, world_normal, lowbias32(seed ^ 0x85ebca77u));
+    }
+#endif
 #else
     const bool has_emitters = false;
 #endif
@@ -391,7 +410,9 @@ void main() {
 #endif
         accum_radiance *= scale;
     }
-    uint flags = rtgi_guide_covered | (valid_batch ? rtgi_guide_raw_valid : 0u);
+    uint flags = rtgi_guide_covered
+        | (valid_batch ? rtgi_guide_raw_valid : 0u)
+        | (emitter_removed ? rtgi_guide_emitter_changed : 0u);
     uvec4 guide = rtgi_pack_guide(full_texel, -view_pos.z, normal_oct, material,
                                  rtgi_world, flags);
     vec4 raw = valid_batch ? vec4(accum_radiance, hit_distance)

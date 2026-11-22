@@ -225,7 +225,7 @@ RestirReservoir restir_sample_initial(usampler3D grid, vec3 origin, vec3 normal,
         }
         uint block_id = voxel_block_id(payload);
         EmitterBox box = voxel_emitter_box(block_id);
-        vec3 sides = emitter_facing_sides(box, origin - vec3(selected.cell));
+        vec3 sides = emitter_exposed_sides(grid, selected.cell, block_id, box, origin);
         vec3 areas = emitter_face_areas(box) * abs(sides);
         float area = dot(areas, vec3(1.0));
         if (area <= 0.0) {
@@ -304,7 +304,7 @@ vec4 restir_shade_sample(
     }
     EmitterSelection selected = select_voxel_emitter(origin, normal, 0u, r.sample_data.cell);
     EmitterBox box = voxel_emitter_box(block_id);
-    vec3 sides = emitter_facing_sides(box, origin - vec3(r.sample_data.cell));
+    vec3 sides = emitter_exposed_sides(grid, r.sample_data.cell, block_id, box, origin);
     float area = dot(emitter_face_areas(box), abs(sides));
     float light_pdf = emitter_solid_angle_pdf(selected.pmf, area, distance_sq, cos_y);
     float bsdf_pdf = cos_x * rcp_pi;

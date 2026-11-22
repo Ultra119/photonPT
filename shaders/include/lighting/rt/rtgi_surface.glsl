@@ -116,6 +116,7 @@ bool rtgi_view_from_guide(
 // holds two UNORM16 oct components. A holds material, class and trace flags.
 const uint rtgi_guide_covered = 1u << 13u;
 const uint rtgi_guide_raw_valid = 1u << 14u;
+const uint rtgi_guide_emitter_changed = 1u << 15u;
 
 uvec4 rtgi_pack_guide(
     ivec2 pixel, float view_depth, vec2 normal_oct, uint material, uint kind,

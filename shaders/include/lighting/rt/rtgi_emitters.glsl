@@ -125,6 +125,44 @@ vec3 emitter_facing_sides(EmitterBox box, vec3 origin) {
     return vec3(greaterThan(origin, box.hi)) - vec3(lessThan(origin, box.lo));
 }
 
+// True when a neighbor cell contains a full 1x1x1 opaque cube that completely
+// buries the shared face of an adjacent full-cube emitter (so neither NEE nor
+// BSDF rays can ever reach that face).
+bool voxel_occludes_full_face(usampler3D grid, ivec3 neighbor) {
+    if (!is_inside_voxel_grid(neighbor)) {
+        return false;
+    }
+    uint payload = texelFetch(grid, neighbor, 0).r;
+    uint block_id = voxel_block_id(payload);
+    if (voxel_empty_for_transport(block_id) || (81u <= block_id && block_id <= 96u)) {
+        return false;
+    }
+    if (voxel_torch_emitter(block_id) || voxel_lantern_emitter(block_id)) {
+        return false;
+    }
+    uint shape = (payload >> 19u) & 15u;
+    return voxel_box_emitter(block_id) || shape == VOXEL_SHAPE_CUBE;
+}
+
+vec3 emitter_exposed_sides(
+    usampler3D grid, ivec3 cell, uint block_id, EmitterBox box, vec3 origin
+) {
+    vec3 sides = emitter_facing_sides(box, origin - vec3(cell));
+    if (voxel_torch_emitter(block_id) || voxel_lantern_emitter(block_id)) {
+        return sides;
+    }
+    if (sides.x != 0.0 && voxel_occludes_full_face(grid, cell + ivec3(int(sides.x), 0, 0))) {
+        sides.x = 0.0;
+    }
+    if (sides.y != 0.0 && voxel_occludes_full_face(grid, cell + ivec3(0, int(sides.y), 0))) {
+        sides.y = 0.0;
+    }
+    if (sides.z != 0.0 && voxel_occludes_full_face(grid, cell + ivec3(0, 0, int(sides.z)))) {
+        sides.z = 0.0;
+    }
+    return sides;
+}
+
 float emitter_solid_angle_pdf(float pmf, float area, float distance_sq, float cosine) {
     return cosine > 0.0 && area > 0.0 ? pmf * distance_sq / (area * cosine) : 0.0;
 }
@@ -135,13 +173,14 @@ float power_mis(float a, float b) {
     return sqr(p.x) / dot(p, p);
 }
 
-float primary_emitter_pdf(VoxelHit hit, vec3 origin, vec3 normal, vec3 direction) {
+float primary_emitter_pdf(usampler3D grid, VoxelHit hit, vec3 origin, vec3 normal, vec3 direction) {
     if (!emitter_index_member(hit.payload)) {
         return 0.0;
     }
     EmitterSelection selected = select_voxel_emitter(origin, normal, 0u, hit.cell);
-    EmitterBox box = voxel_emitter_box(voxel_block_id(hit.payload));
-    vec3 sides = emitter_facing_sides(box, origin - vec3(hit.cell));
+    uint block_id = voxel_block_id(hit.payload);
+    EmitterBox box = voxel_emitter_box(block_id);
+    vec3 sides = emitter_exposed_sides(grid, hit.cell, block_id, box, origin);
     float area = dot(emitter_face_areas(box), abs(sides));
     return emitter_solid_angle_pdf(selected.pmf, area, sqr(hit.distance), dot(hit.normal, -direction));
 }
@@ -156,7 +195,7 @@ vec4 sample_direct_emitter(usampler3D grid, vec3 origin, vec3 normal, uint seed)
     const vec4 rejected = vec4(0.0, 0.0, 0.0, 1.0);
     uint block_id = voxel_block_id(texelFetch(grid, selected.cell, 0).r);
     EmitterBox box = voxel_emitter_box(block_id);
-    vec3 sides = emitter_facing_sides(box, origin - vec3(selected.cell));
+    vec3 sides = emitter_exposed_sides(grid, selected.cell, block_id, box, origin);
     vec3 areas = emitter_face_areas(box) * abs(sides);
     float area = dot(areas, vec3(1.0));
     if (area <= 0.0) {

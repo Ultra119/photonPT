@@ -127,7 +127,7 @@ vec4 evaluate_path_trace(
         vec3 emission = material.emission;
 #ifdef RTGI_EMITTER_SAMPLING
         if (b == 0 && sample_emitters && max_of(emission) > 0.0) {
-            float light_pdf = primary_emitter_pdf(hit, origin, normal, direction);
+            float light_pdf = primary_emitter_pdf(grid, hit, origin, normal, direction);
             if (light_pdf > 0.0) {
                 float bsdf_pdf = max0(dot(normal, direction)) * rcp_pi;
                 emission *= power_mis(float(RTGI_RAY_COUNT) * bsdf_pdf, light_pdf);
