@@ -21,6 +21,7 @@ uniform sampler2D rtgi_sky_history_sampler;
 #include "/include/utility/encoding.glsl"
 #include "/include/utility/space_conversion.glsl"
 #include "/include/lighting/voxel/voxel_constants.glsl"
+#include "/include/lighting/rt/pt_state.glsl"
 #endif
 
 const float sss_density = 14.0;
@@ -87,16 +88,19 @@ vec4 sample_rtgi_smooth(
     sampler2D rtgi_sampler,
     vec2 coord,
     float center_linear_depth,
-    vec3 center_world_normal
+    vec3 center_world_normal,
+    float cos_slope
 ) {
     ivec2 gi_res = textureSize(rtgi_sampler, 0);
+    ivec2 active_gi_res = max(ivec2(1), ivec2(vec2(gi_res) * taau_render_scale));
     ivec2 depth_res = textureSize(depthtex1, 0);
+    ivec2 active_depth_res = max(ivec2(1), ivec2(vec2(depth_res) * taau_render_scale));
 
 #if RTGI_RESOLUTION == 2
     // 1:1 -- there is nothing to upsample.
     return texelFetch(
         rtgi_sampler,
-        clamp(ivec2(coord * vec2(gi_res)), ivec2(0), gi_res - 1),
+        clamp(ivec2(coord * vec2(gi_res)), ivec2(0), active_gi_res - 1),
         0
     );
 #else
@@ -109,21 +113,21 @@ vec4 sample_rtgi_smooth(
     ivec2 base = ivec2(floor(pos));
     vec2 f = pos - floor(pos);
 
-    float sigma_z = max(0.05 * center_linear_depth, 1e-3);
+    float sigma_z = max(0.03 * center_linear_depth, 0.04) / max(cos_slope, 0.15);
 
     vec4 sum = vec4(0.0);
     float sum_weight = 0.0;
 
     for (int j = 0; j <= 1; ++j) {
         for (int i = 0; i <= 1; ++i) {
-            ivec2 t = clamp(base + ivec2(i, j), ivec2(0), gi_res - 1);
+            ivec2 t = clamp(base + ivec2(i, j), ivec2(0), active_gi_res - 1);
 
             float bilinear = (i == 0 ? 1.0 - f.x : f.x)
                            * (j == 0 ? 1.0 - f.y : f.y);
 
             vec2 t_uv = (vec2(t) + 0.5) * texel_size;
             ivec2 t_px = ivec2(clamp(t_uv * view_res, vec2(0.0),
-                                     vec2(depth_res) - 1.0));
+                                     vec2(active_depth_res) - 1.0));
             float t_depth = linearize_depth(texelFetch(depthtex1, t_px, 0).x);
             float weight_depth
                 = exp(-abs(t_depth - center_linear_depth) / sigma_z);
@@ -131,7 +135,7 @@ vec4 sample_rtgi_smooth(
             vec4 t_aux = ping ? texelFetch(rtgi_sky_accum_sampler, t, 0)
                               : texelFetch(rtgi_sky_history_sampler, t, 0);
             float weight_normal = pow(
-                max(0.0, dot(decode_unit_vector(t_aux.ba),
+                max(0.0, dot(unpack_oct_normal_f16(t_aux.b),
                              center_world_normal)),
                 32.0
             );
@@ -151,14 +155,14 @@ vec4 sample_rtgi_smooth(
         ivec2(-1, -1), ivec2(2, -1), ivec2(-1, 2), ivec2(2, 2)
     );
     for (int k = 0; k < 8; ++k) {
-        ivec2 t = clamp(base + fallback_offsets[k], ivec2(0), gi_res - 1);
+        ivec2 t = clamp(base + fallback_offsets[k], ivec2(0), active_gi_res - 1);
         vec2 t_uv = (vec2(t) + 0.5) * texel_size;
-        ivec2 t_px = ivec2(clamp(t_uv * view_res, vec2(0.0), vec2(depth_res) - 1.0));
+        ivec2 t_px = ivec2(clamp(t_uv * view_res, vec2(0.0), vec2(active_depth_res) - 1.0));
         float t_depth = linearize_depth(texelFetch(depthtex1, t_px, 0).x);
         vec4 t_aux = ping ? texelFetch(rtgi_sky_accum_sampler, t, 0)
                           : texelFetch(rtgi_sky_history_sampler, t, 0);
         float weight_normal = pow(
-            max(0.0, dot(decode_unit_vector(t_aux.ba), center_world_normal)),
+            max(0.0, dot(unpack_oct_normal_f16(t_aux.b), center_world_normal)),
             32.0
         );
         if (abs(t_depth - center_linear_depth) < 2.0 * sigma_z && weight_normal > 0.1) {
@@ -272,20 +276,23 @@ vec3 get_diffuse_lighting(
 #endif
 #endif
 
-    // Indirect lighting: RTGI
+    // Indirect lighting (RTGI)
 #if defined DIFFUSE_USE_RTGI
     vec2 rtgi_coord = taau_framebuffer_uv(uv);
     ivec2 depth_px = ivec2(clamp(rtgi_coord * view_res, vec2(0.0),
                                  vec2(textureSize(depthtex1, 0)) - 1.0));
+    float geom_cos_slope = abs(dot(flat_normal, normalize(-scene_pos + vec3(1e-6))));
     vec4 rtgi_sample = sample_rtgi_smooth(
         rtgi_filtered_sampler,
         rtgi_coord,
         linearize_depth(texelFetch(depthtex1, depth_px, 0).x),
-        flat_normal
+        flat_normal,
+        geom_cos_slope
     );
     // RTGI stores mean incoming radiance; convert to irradiance for the
     // shared (albedo / pi) diffuse composition below.
     indirect_lighting = rtgi_sample.rgb * (pi * (RTGI_INTENSITY * RTGI_BRIGHTNESS));
+
 #else
     indirect_lighting = vec3(0.0);
 #endif

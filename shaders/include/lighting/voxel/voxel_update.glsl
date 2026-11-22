@@ -5,19 +5,10 @@
 #include "voxel_storage.glsl"
 #include "/include/utility/color.glsl"
 
-// R7 clipmap stack. Iris clears all three images at frame start; terrain writes
-// repopulate the active levels. Inactive levels stay cleared and are not traced.
+// Voxel volume. Iris clears the image at frame start; terrain writes repopulate it.
 layout(r32ui) uniform uimage3D voxel_img;
-layout(r32ui) uniform uimage3D voxel_mid_img;
-layout(r32ui) uniform uimage3D voxel_coarse_img;
 
 #if defined PROGRAM_SHADOW || defined PROGRAM_GBUFFERS_TERRAIN || defined PROGRAM_GBUFFERS_WATER
-
-bool is_voxel_corner(vec3 pos, float tolerance) {
-    bvec3 lower = lessThan(pos, vec3(tolerance));
-    bvec3 upper = greaterThan(pos, vec3(1.0 - tolerance));
-    return all(bvec3(lower.x || upper.x, lower.y || upper.y, lower.z || upper.z));
-}
 
 // Only terrain draw calls contribute to the world voxel grid.
 // In PROGRAM_GBUFFERS_TERRAIN and PROGRAM_GBUFFERS_WATER this is naturally terrain only.
@@ -69,10 +60,6 @@ uint get_voxel_shape_class(uint block_id, vec3 mid_block_attr, vec3 normal) {
     }
     if (block_id == 110u) {
         return VOXEL_SHAPE_STAIRS_T_W;
-    }
-    if (block_id == 111u) {
-        // Generic solid for unassigned terrain
-        return VOXEL_SHAPE_CUBE;
     }
     if (block_id == 112u) {
         return VOXEL_SHAPE_SLAB_BOTTOM;
@@ -148,14 +135,12 @@ void update_rt_voxel_grid(
     vec2 mid_tex_coord,
     vec2 tex_coord
 ) {
-    vec3 model_pos = gl_Vertex.xyz + mid_block_attr * (1.0 / 64.0);
-    vec3 view_pos = (gl_ModelViewMatrix * vec4(model_pos, 1.0)).xyz;
-#ifdef PROGRAM_SHADOW
-    vec3 scene_pos = (shadowModelViewInverse * vec4(view_pos, 1.0)).xyz;
-#else
-    vec3 scene_pos = (gbufferModelViewInverse * vec4(view_pos, 1.0)).xyz;
-#endif
-    vec3 world_pos = scene_pos + cameraPosition;
+    // Each quad face emits 4 vertices sharing the exact same block center and
+    // face normal; write once per quad to cut atomic contention and vertex
+    // texture fetches by 4x.
+    if ((gl_VertexID & 3) != 0) {
+        return;
+    }
 
     // Remap 0u (default unassigned terrain like stone, dirt, deepslate) to
     // the generic solid ID 111
@@ -165,62 +150,66 @@ void update_rt_voxel_grid(
     }
 #endif
 
-    // Nether stem emission mapping
-    if (19u <= block_id && block_id < 23u) block_id = 46u;
-    if (23u <= block_id && block_id < 27u) block_id = 58u;
-
     // The packed voxel payload has a 7-bit block ID
     if (block_id > 127u) {
         block_id = 111u;
     }
 
+    if (!should_voxelize(block_id)) {
+        return;
+    }
+
+    vec3 model_pos = gl_Vertex.xyz + mid_block_attr * (1.0 / 64.0);
+    vec3 view_pos = (gl_ModelViewMatrix * vec4(model_pos, 1.0)).xyz;
+#ifdef PROGRAM_SHADOW
+    vec3 scene_pos = (shadowModelViewInverse * vec4(view_pos, 1.0)).xyz;
+#else
+    vec3 scene_pos = (gbufferModelViewInverse * vec4(view_pos, 1.0)).xyz;
+#endif
+    vec3 world_pos = scene_pos + cameraPosition;
+
+    vec3 local = world_pos - rt_voxel_origin_world();
+    if (any(lessThan(local, vec3(0.0))) || any(greaterThanEqual(local, rt_voxel_size_f))) {
+        return;
+    }
+
+    vec3 view_normal = mat3(gl_ModelViewMatrix) * gl_Normal;
+#ifdef PROGRAM_SHADOW
+    vec3 world_normal = normalize(mat3(shadowModelViewInverse) * view_normal);
+#else
+    vec3 world_normal = normalize(mat3(gbufferModelViewInverse) * view_normal);
+#endif
+
     bool is_translucent = (block_id == 5u || block_id == 14u || block_id == 15u || (80u <= block_id && block_id <= 96u));
     bool is_emitter = (32u <= block_id && block_id < 80u && block_id != 58u && block_id != 63u);
 
-    if (should_voxelize(block_id)) {
-        vec2 sample_uv = (mid_tex_coord != vec2(0.0)) ? mid_tex_coord : tex_coord;
-        vec4 tex_sample = textureLod(tex, sample_uv, 0.0);
-        if (tex_sample.a < 0.1 && sample_uv != tex_coord) {
-            tex_sample = textureLod(tex, tex_coord, 0.0);
-        }
-        vec3 albedo_srgb = (tex_sample.a > 0.05) ? (tex_sample.rgb * vertex_tint) : vertex_tint;
-        vec3 linear_albedo = srgb_eotf_inv(clamp01(albedo_srgb));
-
-        vec3 voxel_albedo = is_emitter ? get_voxel_light_color(block_id) : linear_albedo;
-        // Only actual light-emitting blocks (torches, lanterns, glowstone, lava)
-        float voxel_block_light = is_emitter ? 1.0 : 0.0;
-        uint shape_class = get_voxel_shape_class(block_id, mid_block_attr, gl_Normal);
-
-        uint packed_data = pack_voxel_data(
-            block_id,
-            voxel_block_light,
-            shape_class,
-            voxel_albedo,
-            is_translucent,
-            is_emitter
-        );
-
-        for (int level = 0; level < RT_COVERAGE_LEVELS; ++level) {
-            float scale = rt_clip_scale(level);
-            vec3 local = (world_pos - rt_clip_origin_world(level)) / scale;
-            if (any(lessThan(local, vec3(0.0)))
-                || any(greaterThanEqual(local, rt_clipmap_size_f))) {
-                continue;
-            }
-            ivec3 coord = rt_clip_texel(ivec3(floor(local)));
-            uint payload = (level == 0)
-                ? packed_data
-                : (packed_data & ~(0xFu << 19u)); // force VOXEL_SHAPE_CUBE (4-bit shape field)
-
-            if (level == 0) {
-                imageAtomicMax(voxel_img, coord, payload);
-            } else if (level == 1) {
-                imageAtomicMax(voxel_mid_img, coord, payload);
-            } else {
-                imageAtomicMax(voxel_coarse_img, coord, payload);
-            }
-        }
+    vec2 sample_uv = (mid_tex_coord != vec2(0.0)) ? mid_tex_coord : tex_coord;
+    vec4 tex_sample = textureLod(tex, sample_uv, 0.0);
+    if (tex_sample.a < 0.1 && sample_uv != tex_coord) {
+        tex_sample = textureLod(tex, tex_coord, 0.0);
     }
+    vec3 albedo_srgb = (tex_sample.a > 0.05) ? (tex_sample.rgb * vertex_tint) : vertex_tint;
+    vec3 linear_albedo = srgb_eotf_inv(clamp01(albedo_srgb));
+
+    vec3 voxel_albedo = is_emitter ? get_voxel_light_color(block_id) : linear_albedo;
+    // Only actual light-emitting blocks (torches, lanterns, glowstone, lava)
+    float voxel_block_light = is_emitter ? 1.0 : 0.0;
+    uint shape_class = get_voxel_shape_class(block_id, mid_block_attr, world_normal);
+    uint face_priority = (world_normal.y > 0.5)
+        ? 2u
+        : ((world_normal.y < -0.5) ? 0u : 1u);
+
+    uint packed_data = pack_voxel_data(
+        block_id,
+        voxel_block_light,
+        shape_class,
+        voxel_albedo,
+        is_translucent,
+        is_emitter,
+        face_priority
+    );
+
+    imageAtomicMax(voxel_img, ivec3(local), packed_data);
 }
 
 #endif // PROGRAM_SHADOW || PROGRAM_GBUFFERS_TERRAIN || PROGRAM_GBUFFERS_WATER

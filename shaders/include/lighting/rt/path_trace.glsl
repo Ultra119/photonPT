@@ -53,7 +53,7 @@ vec3 sample_specular_direction(vec3 normal, vec3 viewer_dir, float roughness, ve
 }
 
 // Evaluates explicit path tracing for one sample ray.
-// Returns vec4(radiance, sky_weight) and writes hit_source (RTGI_HIT_*).
+// Returns vec4(radiance, norm_hit_dist) and writes hit_source (RTGI_HIT_*).
 vec4 evaluate_path_trace(
     vec3 scene_pos,
     vec3 world_normal,
@@ -61,27 +61,17 @@ vec4 evaluate_path_trace(
     vec2 dither,
     float receiver_skylight,
     usampler3D voxel_grid,
-    usampler3D voxel_mid,
-    usampler3D voxel_coarse,
     sampler2D sky_map,
     vec3 direct_sun_color,
-    vec3 sky_irradiance,
     vec3 l_dir,
     int ray_index,
     out int hit_source
 ) {
     hit_source = RTGI_HIT_NONE;
 
-#if defined WORLD_OVERWORLD
-    // Gated sky access: prevents escaped rays from leaking sky light in caves/interiors
-    float sky_access = smoothstep(0.02, 0.08, receiver_skylight);
-#else
-    float sky_access = 1.0;
-#endif
-
     vec3 L = vec3(0.0);
-    vec3 L_sky = vec3(0.0);
     vec3 throughput = vec3(1.0);
+    float primary_hit_dist = 32.0;
 
     vec2 u0 = r2(ray_index * PT_BOUNCES, dither);
 
@@ -96,61 +86,65 @@ vec4 evaluate_path_trace(
     float current_dither = dither.x;
 
     for (int b = 0; b < PT_BOUNCES; ++b) {
+        float bounce_max_dist = (b == 0) ? rt_primary_max_distance : rt_bounce_max_distance;
         VoxelHit hit = trace_voxel_dda(
             voxel_grid,
-            voxel_mid,
-            voxel_coarse,
             ray_origin,
             surf_normal,
             current_dir,
             current_dither,
-            direct_sun_color * sky_access,
-            sky_irradiance * sky_access,
+            direct_sun_color,
             l_dir,
-            rt_scene_max_distance
+            bounce_max_dist
         );
 
         // Thin-emitter pass-through gathered along this ray segment (torches, lanterns)
         L += hit.passed_emission * throughput;
 
         if (!hit.hit) {
-            // Escaped ray: sample sky dome if receiver has sky access
+#if defined WORLD_OVERWORLD
+            // Only suppress escaped sky dome on subterranean out-of-volume misses
+            float exit_world_y = hit.hit_pos.y + cameraPosition.y;
+            bool subterranean_void_exit = (receiver_skylight < 0.01)
+                && (eye_skylight < 0.01)
+                && (exit_world_y < SEA_LEVEL - 4.0)
+                && (current_dir.y < 0.15);
+            float escaped_sky_gate = subterranean_void_exit ? 0.0 : 1.0;
+#else
+            const float escaped_sky_gate = 1.0;
+#endif
             vec3 sky_radiance = texture(sky_map, project_sky(current_dir)).rgb
-                * (hit.transmittance * sky_access);
+                * (hit.transmittance * escaped_sky_gate);
 
             L += sky_radiance * throughput;
-            L_sky += sky_radiance * throughput;
 
             if (b == 0) {
-                hit_source = (sky_access > 0.0) ? RTGI_HIT_SKY : RTGI_HIT_NONE;
+                hit_source = (escaped_sky_gate > 0.0) ? RTGI_HIT_SKY : RTGI_HIT_NONE;
+                primary_hit_dist = 32.0;
             }
             break;
         }
 
         if (b == 0) {
             hit_source = RTGI_HIT_VOXEL;
+            primary_hit_dist = max(hit.distance, 0.0);
         }
 
-        // Direct hit radiance: direct sun (with voxel shadow visibility) + solid block emission + bounced sky light
-        vec3 hit_rad = hit.radiance;
-        vec3 hit_sky = hit_rad * hit.sky_weight;
-        vec3 direct_radiance = hit_rad * hit.transmittance;
-
+        // Direct hit radiance: direct sun (with voxel shadow visibility) + solid block emission
+        vec3 direct_radiance = hit.radiance * hit.transmittance;
         L += direct_radiance * throughput;
-        L_sky += hit_sky * hit.transmittance * throughput;
 
         // Path termination at maximum bounces
         if (b == PT_BOUNCES - 1) {
             break;
         }
 
-        // Diffuse continuation throughput
-        vec3 continuation_albedo = clamp01(pow(hit.albedo, vec3(0.8)) * 1.35);
-        throughput *= continuation_albedo * hit.transmittance;
+        // Physical Lambertian diffuse continuation throughput
+        throughput *= hit.albedo * hit.transmittance;
 
-        // Russian roulette path termination starting at bounce 2
-        if (b >= 1) {
-            float q = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
+        // Russian roulette path termination for dark/low-throughput bounces
+        float q = clamp(max(throughput.r, max(throughput.g, throughput.b)) * 1.6, 0.15, 1.0);
+        if (q < 0.999) {
             float rr_rand = hash1(vec3(dither, float(ray_index * PT_BOUNCES + b + 17)));
             if (rr_rand > q) {
                 break;
@@ -167,10 +161,11 @@ vec4 evaluate_path_trace(
         vec2 next_u = r2(ray_index * PT_BOUNCES + (b + 1), bounce_seed);
 
 #if defined PT_GLOSSY_TRANSPORT
-        // Optional glossy bounce on smooth materials (e.g. water, polished surfaces)
-        if (hit.albedo.r > 0.0 && next_u.x < 0.2) {
+        // Optional glossy bounce on smooth materials using an independent lobe selector
+        float lobe_rand = hash1(vec3(dither.xy, float(ray_index * PT_BOUNCES + b + 31)));
+        if (hit.roughness < 0.45 && lobe_rand < 0.2) {
             vec3 viewer_dir = -current_dir;
-            current_dir = sample_specular_direction(surf_normal, viewer_dir, 0.2, next_u);
+            current_dir = sample_specular_direction(surf_normal, viewer_dir, hit.roughness, next_u);
         } else {
             current_dir = sample_cosine_hemisphere(surf_normal, next_u);
         }
@@ -189,11 +184,11 @@ vec4 evaluate_path_trace(
         return vec4(0.0);
     }
 
-    float total_lum = dot(L, luminance_weights);
-    float sky_lum = dot(L_sky, luminance_weights);
-    float sky_weight = clamp01(sky_lum / max(total_lum, eps));
+    // Saturating normalized primary hit distance (ReBLUR-style contact guide):
+    // ~0.05 at 0.1m contact corners, 0.50 at 2m, ~0.94 on far/sky rays.
+    float norm_hit_dist = primary_hit_dist / (primary_hit_dist + 2.0);
 
-    return vec4(L, sky_weight);
+    return vec4(L, norm_hit_dist);
 }
 
 #endif // INCLUDE_LIGHTING_RT_PATH_TRACE

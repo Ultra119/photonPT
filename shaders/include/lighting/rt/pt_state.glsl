@@ -2,6 +2,13 @@
 #define INCLUDE_LIGHTING_RT_PT_STATE
 
 // Temporal accumulation state packing and reset definitions.
+// Auxiliary history layout (rtgi_sky_accum / rtgi_sky_history, rgba16f):
+//   .r : M2 (second luminance moment of main history)
+//   .g : pack_hit_count(norm_hit_dist, sample_count) -- exact signed fp16 integer
+//   .b : pack_oct_normal_f16(world_normal)           -- exact signed fp16 63x63 octahedral normal
+//   .a : fast_m1                                     -- fast-history luminance EMA for dynamic lighting
+
+#include "/include/utility/encoding.glsl"
 
 // Reset reasons. Ordered by how expensive the recovery is: NONE keeps a
 // converged field, the disocclusion reasons keep part of it, DETECTOR_* and
@@ -22,28 +29,55 @@
 #define PT_RESET_COUNT      11.0
 
 // Spatial preaccumulation fallback weight cap for disoccluded pixels
-#define PT_SPATIAL_MAX_WEIGHT 12.0
+#define PT_SPATIAL_MAX_WEIGHT 3.0
 
-// Adaptive rejection thresholds for lighting changes
-#define RTGI_ADAPT_LO         2.0
-#define RTGI_ADAPT_HI         8.0
-#define RTGI_ADAPT_SIGMA_EPS  0.05
-#define RTGI_ADAPT_MIN_SAMPLES   16.0
-#define RTGI_ADAPT_MIN_CONFIDENCE 0.9
+// Variance-adapted dual-history reactivity thresholds (active during both motion and rest)
+#define RTGI_ADAPT_REL_BASE   0.65
+#define RTGI_ADAPT_REL_SPAN   0.14
+#define RTGI_ADAPT_SIGMA_EPS  0.008
+#define RTGI_ADAPT_MIN_SAMPLES   6.0
+#define RTGI_ADAPT_MIN_CONFIDENCE 0.65
 
 
-// 8-bit sample count (0..255) + 3-bit sky fraction (0..7), packed into one
-// exactly-representable half: the largest value is 7 + 255*8 = 2047.
-float pack_sky_count(float sky, float count) {
-    float sky_i = round(clamp01(sky) * 7.0);
+// 8-bit sample count (0..255) + 4-bit normalized hit distance (0..15), packed
+// into one signed IEEE fp16 integer in [-2048 .. +2047] with 0.0 -> (0, 0).
+float pack_hit_count(float hit_norm, float count) {
+    float hit_i = round(clamp01(hit_norm) * 15.0);
     float count_i = clamp(round(count), 0.0, 255.0);
-    return sky_i + count_i * 8.0;
+    float code = hit_i + count_i * 16.0;
+    return (code >= 2048.0) ? (code - 4096.0) : code;
 }
 
-vec2 unpack_sky_count(float packed) {
-    float count = floor(packed * (1.0 / 8.0));
-    float sky = (packed - count * 8.0) * (1.0 / 7.0);
-    return vec2(sky, count);
+vec2 unpack_hit_count(float packed_val) {
+    float p = round(packed_val);
+    float code = clamp((p < 0.0) ? (p + 4096.0) : p, 0.0, 4095.0);
+    float count = floor(code * (1.0 / 16.0));
+    float hit_norm = (code - count * 16.0) * (1.0 / 15.0);
+    return vec2(hit_norm, count);
+}
+
+// Compatibility aliases
+float pack_sky_count(float hit_norm, float count) {
+    return pack_hit_count(hit_norm, count);
+}
+vec2 unpack_sky_count(float packed_val) {
+    return unpack_hit_count(packed_val);
+}
+
+// 63x63 octahedral unit-normal grid packed into one signed IEEE fp16 integer in
+// [-1984 .. +1984]. The even 62-step axis grid represents 0.0, 0.5, and 1.0
+// bit-exactly, so all 6 Minecraft cardinal normals round-trip with dot == 1.0.
+float pack_oct_normal_f16(vec3 normal) {
+    vec2 oct = encode_unit_vector(normal);
+    vec2 q = floor(clamp01(oct) * 62.0 + 0.5);
+    return (q.x + q.y * 63.0) - 1984.0;
+}
+
+vec3 unpack_oct_normal_f16(float packed_val) {
+    float code = clamp(round(packed_val) + 1984.0, 0.0, 3968.0);
+    float iy = floor(code * (1.0 / 63.0));
+    float ix = code - iy * 63.0;
+    return decode_unit_vector(vec2(ix, iy) * (1.0 / 62.0));
 }
 
 vec4 pt_state_pack(float reset_reason, float reactive, float valid_fraction, float converged) {

@@ -721,7 +721,7 @@ void main() {
         // Stained glass optical filter: store tint in a dedicated buffer so the
         // water normal encoding in refraction_data stays untouched.
         uint tint_idx = clamp(material_mask - 81u, 0u, 15u);
-        vec3 filter_color = voxel_tint_color_table[tint_idx];
+        vec3 filter_color = max0(voxel_tint_color_table[tint_idx] * rec709_to_rec2020);
         glass_filter_data = vec4(filter_color, 1.0);
     }
 #endif

@@ -105,12 +105,12 @@ vec3 get_specular_multiscatter_compensation(vec3 f0, float roughness, float NoV)
 
 // Coupled Diffuse-Specular Energy Balance (Fresnel conservation)
 vec3 conserve_diffuse_energy(vec3 diffuse_light, vec3 f0, float NoV) {
-#ifdef PHYSICAL_BSDF_ENERGY_COMP
-    vec3 fresnel_nv = fresnel_dielectric(max(NoV, 1e-2), f0.x);
-    return diffuse_light * (vec3(1.0) - fresnel_nv);
-#else
+    // Note: Directional (1 - F(NoV)) extinction on diffuse causes severe black
+    // darkening at grazing angles (NoV -> 0) because matte/rough dielectrics do not
+    // have perfect mirror environment reflections to replace the lost diffuse energy.
+    // Outgoing diffuse scattering from dielectric bulk is isotropic (or retro-reflective),
+    // and metals are already handled via metal_diffuse_amount.
     return diffuse_light;
-#endif
 }
 
 #endif // INCLUDE_LIGHTING_BSDF

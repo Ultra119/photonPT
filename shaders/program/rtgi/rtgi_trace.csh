@@ -11,7 +11,7 @@ const vec2 workGroupsRender = vec2(1.0, 1.0);
 #else
 const vec2 workGroupsRender = vec2(0.5, 0.5);
 #endif
-layout(local_size_x = 16, local_size_y = 16) in;
+layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(rgba16f) writeonly uniform image2D rtgi_raw_img;
 layout(rgba16f) writeonly uniform image2D rtgi_state_img;
@@ -21,7 +21,10 @@ layout(rgba8) writeonly uniform image2D rtgi_hit_img;
 #endif
 
 #include "/include/lighting/rt/voxel_samplers.glsl"
-uniform sampler2D shadowtex0;
+#if defined SHADOW && !defined WORLD_NETHER
+uniform sampler2DShadow shadowtex1;
+#define VOXEL_DDA_USE_SHADOWMAP
+#endif
 uniform sampler2D depthtex0;
 uniform sampler2D depthtex1;
 uniform sampler2D colortex1; // gbuffer0
@@ -52,6 +55,7 @@ uniform vec3 light_dir;
 uniform float near;
 uniform float far;
 uniform vec2 taa_offset;
+uniform float eye_skylight;
 
 #define TEMPORAL_REPROJECTION
 #include "/include/utility/color.glsl"
@@ -60,7 +64,6 @@ uniform vec2 taa_offset;
 #include "/include/utility/random.glsl"
 #include "/include/lighting/rt/path_trace.glsl"
 #include "/include/lighting/rt/pt_state.glsl"
-#include "/include/lighting/rt/contact_bleed.glsl"
 
 void main() {
 #if RTGI_RESOLUTION == 0
@@ -121,17 +124,39 @@ void main() {
     vec3 view_pos = screen_to_view_space(screen_pos, true);
     vec3 scene_pos = view_to_scene_space(view_pos);
 
-    // Spatio-temporal dither using channel .b (blue noise, NOT .rg which is 2D Worley cellular noise)
+    // Spatio-temporal blue-noise dither: wrap frameCounter to preserve fp32
+    // mantissa precision across multi-hour play sessions.
+    int frame_wrapped = frameCounter & 4095;
+    ivec2 temporal_tile_shift = ivec2(frame_wrapped * 59, frame_wrapped * 97);
     vec2 dither = vec2(
-        texelFetch(noisetex, texel & 511, 0).b,
-        texelFetch(noisetex, (texel + 249) & 511, 0).b
+        texelFetch(noisetex, (texel + temporal_tile_shift) & 511, 0).b,
+        texelFetch(noisetex, (texel + temporal_tile_shift + ivec2(249, 137)) & 511, 0).b
     );
-    dither = r2(frameCounter, dither);
+    dither = r2(frame_wrapped, dither);
 
-    // Direct lighting & ambient colors encoded in colortex4 column 191
+    // Fast-path for distant surfaces outside the voxel volume: evaluate sky dome
+    // directly in 0 DDA steps instead of marching backward into the player's local grid.
+    if (!rt_voxel_contains_world(scene_pos + cameraPosition)) {
+        vec3 sky_dir = sample_cosine_hemisphere(mapped_normal, dither);
+        if (dot(sky_dir, world_normal) <= 0.0) {
+            sky_dir = reflect(sky_dir, world_normal);
+        }
+#if defined WORLD_OVERWORLD
+        float sky_vis = smoothstep(0.02, 0.25, receiver_skylight) * receiver_skylight;
+#else
+        const float sky_vis = 1.0;
+#endif
+        vec3 far_sky_rad = texture(colortex4, project_sky(sky_dir)).rgb * sky_vis;
+        imageStore(rtgi_raw_img, texel, vec4(far_sky_rad, 32.0 / 34.0));
+        imageStore(rtgi_state_img, texel, pt_state_pack(PT_RESET_NONE, 0.0, 1.0, 0.0));
+#if GI_DEBUG == GI_DEBUG_HIT
+        imageStore(rtgi_hit_img, texel, vec4(0.0, 0.0, float(sky_vis > 0.0), 1.0));
+#endif
+        return;
+    }
+
+    // Direct sun/moon color encoded in colortex4 column 191
     vec3 direct_light_col = texelFetch(colortex4, ivec2(191, 0), 0).rgb;
-    // Sky irradiance feeds the skylight-bounce term of voxel hit shading.
-    vec3 sky_irradiance_col = texelFetch(colortex4, ivec2(191, 1), 0).rgb;
 
 #ifndef RTGI_RAY_COUNT
 #define RTGI_RAY_COUNT 2
@@ -153,11 +178,8 @@ void main() {
             dither,
             receiver_skylight,
             voxel_sampler,
-            voxel_mid_sampler,
-            voxel_coarse_sampler,
             colortex4,
             direct_light_col,
-            sky_irradiance_col,
             light_dir,
             r,
             hit_source
@@ -195,27 +217,6 @@ void main() {
     vec4 final_radiance = accum_radiance * (1.0 / path_divisor);
     final_radiance.a = clamp01(final_radiance.a);
     float valid_path_fraction = valid_paths / float(RTGI_RAY_COUNT);
-
-#if defined WORLD_OVERWORLD && defined COPLANAR_CONTACT_BLEED
-    vec4 contact_bleed = gather_contact_diffuse_bleed(
-        uv,
-        depth,
-        scene_pos,
-        world_normal,
-        receiver_skylight,
-        direct_light_col,
-        light_dir,
-        dither,
-        voxel_sampler
-    );
-    final_radiance.rgb += contact_bleed.rgb;
-    if (contact_bleed.a > 0.0) {
-        float bleed_lum = dot(contact_bleed.rgb, luminance_weights);
-        float final_lum = dot(final_radiance.rgb, luminance_weights);
-        final_radiance.a = mix(final_radiance.a, 1.0, clamp01(bleed_lum / max(final_lum, eps)));
-        valid_path_fraction = max(valid_path_fraction, 1.0);
-    }
-#endif
 
     imageStore(rtgi_raw_img, texel, final_radiance);
     imageStore(

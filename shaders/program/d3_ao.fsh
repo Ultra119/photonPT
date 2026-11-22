@@ -66,6 +66,12 @@ uniform bool world_age_changed;
 const float ao_render_scale = 0.5;
 
 void main() {
+    if (RT_AO_STRENGTH <= 0.0) {
+        ambient = vec4(1.0, 0.0, 0.5, 0.5);
+        ambient_history_data = vec2(0.0);
+        return;
+    }
+
     ivec2 texel = ivec2(gl_FragCoord.xy);
     ivec2 view_texel
         = ivec2(gl_FragCoord.xy * (taau_render_scale / ao_render_scale));

@@ -163,14 +163,6 @@ option.CAVE_LIGHTING_I                 = Cave Lighting Intensity
 option.CAVE_LIGHTING_I.comment         = Minimum ambient light floor in caves and enclosed areas.
 option.SUN_INDIRECT_BOOST              = Sunlight Indirect Energy
 option.SUN_INDIRECT_BOOST.comment      = Multiplier for sunlight indirect diffuse bounce energy into cave openings and covered areas.
-option.GI_BOUNCE_SATURATION            = GI Bounce Saturation
-option.GI_BOUNCE_SATURATION.comment    = Controls the color saturation of diffuse bounce light. Lower values prevent synthetic digital textures (like colored carpet) from causing unnatural radioactive neon wash while dielectric Fresnel preserves white fill.
-option.COPLANAR_CONTACT_BLEED          = Coplanar Contact Bleed
-option.COPLANAR_CONTACT_BLEED.comment  = Screen-space lateral diffuse gather on flat surfaces (walls and floors), illuminating the area around direct sunbeams with realistic soft bounce halos.
-option.COPLANAR_BLEED_STRENGTH         = Coplanar Bleed Strength
-option.COPLANAR_BLEED_STRENGTH.comment = Radiance intensity of lateral direct sunlight bounce on coplanar surfaces.
-option.COPLANAR_BLEED_RADIUS           = Coplanar Bleed Radius
-option.COPLANAR_BLEED_RADIUS.comment   = Metric search radius (in blocks) for lateral direct sunlight bounce across coplanar surfaces.
 option.LIGHTNING_FLASH                 = Lightning Flash
 option.NETHER_USE_BIOME_COLOR          = Use Biome Color
 option.NETHER_I                        = Ambient Intensity
@@ -690,7 +682,7 @@ value.DEBUG_VIEW.DEBUG_VIEW_WEATHER    = Weather
 value.DEBUG_VIEW.DEBUG_VIEW_GI         = GI Buffers\n\nRequires Ray Traced GI to be enabled, otherwise the screen turns magenta.
 
 option.GI_DEBUG                        = GI Buffer
-option.GI_DEBUG.comment                = Which GI buffer the GI debug view displays.\n\nRaw - This frame's traced radiance, before temporal accumulation. Shows the per-frame noise directly.\nHistory - After temporal accumulation. Compare with Raw to see how much work the temporal filter is doing.\nFiltered - Exactly what surfaces are lit with.\nHit Source - Green: resolved in the voxel volume. Blue: escaped to the directional sky map. Red: unused, there is no screen-space GI.\nHistory Rejected - Red: temporal history discarded (disocclusion). Yellow: history accepted. Black: no history available.\nVoxel ID / Light / Albedo - Reads the voxel volume at the surface the camera sees. Magenta: outside the volume.\nClipmap Coverage - Bright red/green/blue = populated fine/medium/coarse voxel. Dark hue = inside bounds but no voxel record at the sampled point. Yellow = owning level boundary. Magenta = outside all active clipmaps.\nConvergence - Disagreement between this frame's estimate and the accumulated history. Grey means stable. This is temporal spread, not a variance estimate.
+option.GI_DEBUG.comment                = Which GI buffer the GI debug view displays.\n\nRaw - This frame's traced radiance, before temporal accumulation. Shows the per-frame noise directly.\nHistory - After temporal accumulation. Compare with Raw to see how much work the temporal filter is doing.\nFiltered - Exactly what surfaces are lit with.\nHit Source - Green: resolved in the voxel volume. Blue: escaped to the directional sky map. Red: unused, there is no screen-space GI.\nHistory Rejected - Red: temporal history discarded (disocclusion). Yellow: history accepted. Black: no history available.\nVoxel ID / Light / Albedo - Reads the voxel volume at the surface the camera sees. Magenta: outside the volume.\nVoxel Coverage - Bright red = populated voxel. Dark hue = inside bounds but unoccupied. Yellow = volume boundary. Magenta = outside voxel grid.\nConvergence - Disagreement between this frame's estimate and the accumulated history. Grey means stable. This is temporal spread, not a variance estimate.
 value.GI_DEBUG.GI_DEBUG_OFF            = OFF
 value.GI_DEBUG.GI_DEBUG_RAW            = Raw
 value.GI_DEBUG.GI_DEBUG_HISTORY        = History
@@ -702,7 +694,7 @@ value.GI_DEBUG.GI_DEBUG_VOXEL_LIGHT    = Voxel Light
 value.GI_DEBUG.GI_DEBUG_VOXEL_ALBEDO   = Voxel Albedo
 value.GI_DEBUG.GI_DEBUG_VARIANCE       = Variance
 value.GI_DEBUG.GI_DEBUG_PROBE          = Voxel Irradiance Volume
-value.GI_DEBUG.GI_DEBUG_COVERAGE = Clipmap Coverage
+value.GI_DEBUG.GI_DEBUG_COVERAGE = Voxel Coverage
 value.GI_DEBUG.GI_DEBUG_SPP          = Accumulated Samples
 value.GI_DEBUG.GI_DEBUG_RESET        = Reset Reason
 
@@ -777,10 +769,15 @@ option.RTGI_INTENSITY                                               = RTGI Physi
 option.RTGI_INTENSITY.comment                                       = Calibrated single-bounce physical indirect lighting multiplier (default 1.00). In a diffuse enclosure, energy conservation guarantees indirect illuminance matches the incoming radiance.
 option.RTGI_BRIGHTNESS                                              = RTGI Indirect Brightness
 option.RTGI_BRIGHTNESS.comment                                      = Controls the strength and radiance of the indirect bounced lighting field. Higher values make GI bounces more prominent and vibrant.
-option.RT_CLIPMAP_SIZE = RT Clipmap Size
-option.RT_CLIPMAP_SIZE.comment = Texel side length of each clipmap level. Three levels use 1/2/4 blocks per voxel; 128 spans 128/256/512 blocks. Larger sizes cost more VRAM and DDA steps.
-option.RT_COVERAGE_LEVELS = RT Coverage Levels
-option.RT_COVERAGE_LEVELS.comment = Number of nested clipmap levels traced and populated. 1 = fine only, 2 = fine+medium, 3 = fine+medium+coarse. Coarse range still requires terrain submitted by the shadow/gbuffer passes.
+option.RT_CLIPMAP_SIZE = PT Light Distance
+option.RT_CLIPMAP_SIZE.comment = Maximum distance from the camera where voxel path-traced indirect lighting and shadows are evaluated. 4 chunks = 64 blocks, 8 chunks = 128 blocks, 16 chunks = 256 blocks. Higher distances require more VRAM and DDA steps.
+value.RT_CLIPMAP_SIZE.64 = 2 Chunks (32m)
+value.RT_CLIPMAP_SIZE.96 = 3 Chunks (48m)
+value.RT_CLIPMAP_SIZE.128 = 4 Chunks (64m)
+value.RT_CLIPMAP_SIZE.192 = 6 Chunks (96m)
+value.RT_CLIPMAP_SIZE.256 = 8 Chunks (128m)
+value.RT_CLIPMAP_SIZE.384 = 12 Chunks (192m)
+value.RT_CLIPMAP_SIZE.512 = 16 Chunks (256m)
 option.RT_AO_STRENGTH = RT Contact AO Strength
 option.RT_AO_STRENGTH.comment = Strength of short voxel-ray contact occlusion on direct light and highlights. Traced indirect lighting is not multiplied again. 0 disables contact rays.
 option.RT_AO_RADIUS = RT Contact AO Radius

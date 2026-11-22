@@ -27,32 +27,21 @@ vec3 gi_debug_tonemap(vec3 radiance) {
 }
 
 #if GI_DEBUG == GI_DEBUG_COVERAGE
-// Clipmap coverage: red = fine, green = mid, blue = coarse.
+// Voxel volume coverage: red = populated voxel, dark red = inside bounds, magenta = outside volume
 vec3 gi_debug_coverage(vec3 world_pos) {
-    int level = rt_clip_finest_containing_level(world_pos);
-    if (level < 0) return vec3(0.6, 0.0, 0.6);
+    if (!rt_voxel_contains_world(world_pos)) return vec3(0.6, 0.0, 0.6);
 
-    float scale = rt_clip_scale(level);
-    vec3 local = (world_pos - rt_clip_origin_world(level)) / scale;
-    ivec3 coord = rt_clip_texel(ivec3(floor(local)));
+    vec3 local = world_pos - rt_voxel_origin_world();
+    ivec3 coord = ivec3(local);
 
-    uint packed = 0u;
-    if (level == 0) {
-        packed = texelFetch(voxel_sampler, coord, 0).r;
-    } else if (level == 1) {
-        packed = texelFetch(voxel_mid_sampler, coord, 0).r;
-    } else {
-        packed = texelFetch(voxel_coarse_sampler, coord, 0).r;
-    }
-    bool populated = unpack_voxel_data(packed).block_id != 0u;
+    uint packed_val = texelFetch(voxel_sampler, coord, 0).r;
+    bool populated = unpack_voxel_data(packed_val).block_id != 0u;
 
-    vec3 color = level == 0 ? vec3(0.9, 0.2, 0.2)
-               : level == 1 ? vec3(0.2, 0.85, 0.25)
-                            : vec3(0.25, 0.45, 0.95);
-    // Dark hue = inside clipmap bounds but no voxel record at this point.
+    vec3 color = vec3(0.9, 0.2, 0.2);
+    // Dark hue = inside voxel volume bounds but no voxel record at this point.
     if (!populated) color *= 0.22;
 
-    vec3 edge = min(local, rt_clipmap_size_f - local);
+    vec3 edge = min(local, rt_voxel_size_f - local);
     float edge_dist = min(min(edge.x, edge.y), edge.z);
     if (edge_dist < 2.0) {
         color = mix(color, vec3(1.0, 0.9, 0.1), 0.45);
@@ -62,8 +51,8 @@ vec3 gi_debug_coverage(vec3 world_pos) {
 
 #endif // GI_DEBUG_COVERAGE
 
-vec3 gi_debug_voxel_id(uint packed) {
-    VoxelSample voxel = unpack_voxel_data(packed);
+vec3 gi_debug_voxel_id(uint packed_val) {
+    VoxelSample voxel = unpack_voxel_data(packed_val);
     if (voxel.block_id == 0u) {
         return voxel.block_light > 0.0
             ? vec3(0.10) + 0.25 * voxel.block_light
@@ -73,8 +62,8 @@ vec3 gi_debug_voxel_id(uint packed) {
 }
 
 // R = block light, G = sky light
-vec3 gi_debug_voxel_light(uint packed) {
-    VoxelSample voxel = unpack_voxel_data(packed);
+vec3 gi_debug_voxel_light(uint packed_val) {
+    VoxelSample voxel = unpack_voxel_data(packed_val);
     if (voxel.is_emitter) {
         return max(voxel.color, vec3(0.2)) * 2.0;
     }
@@ -84,8 +73,8 @@ vec3 gi_debug_voxel_light(uint packed) {
     return vec3(voxel.block_light, voxel.sky_light, 0.0);
 }
 
-vec3 gi_debug_voxel_albedo(uint packed) {
-    VoxelSample voxel = unpack_voxel_data(packed);
+vec3 gi_debug_voxel_albedo(uint packed_val) {
+    VoxelSample voxel = unpack_voxel_data(packed_val);
     if (voxel.block_id == 0u && voxel.block_light <= 0.0) {
         return vec3(0.0);
     }
@@ -193,11 +182,13 @@ vec3 gi_debug_view(ivec2 texel, vec2 uv, vec3 fallback) {
 #elif GI_DEBUG == GI_DEBUG_FILTERED
     return gi_debug_tonemap(texture(rtgi_filtered_sampler, rtgi_uv).rgb);
 #elif GI_DEBUG == GI_DEBUG_VARIANCE
-    vec4 aux_sample = ping ? texture(rtgi_sky_accum_sampler, rtgi_uv)
-                           : texture(rtgi_sky_history_sampler, rtgi_uv);
-    vec4 accum_sample = ping ? texture(rtgi_accum_sampler, rtgi_uv)
-                             : texture(rtgi_history_sampler, rtgi_uv);
-    float m1 = dot(accum_sample.rgb, vec3(0.2126, 0.7152, 0.0722));
+    ivec2 var_size = textureSize(rtgi_sky_accum_sampler, 0);
+    ivec2 var_texel = clamp(ivec2(rtgi_uv * vec2(var_size)), ivec2(0), var_size - 1);
+    vec4 aux_sample = ping ? texelFetch(rtgi_sky_accum_sampler, var_texel, 0)
+                           : texelFetch(rtgi_sky_history_sampler, var_texel, 0);
+    vec4 accum_sample = ping ? texelFetch(rtgi_accum_sampler, var_texel, 0)
+                             : texelFetch(rtgi_history_sampler, var_texel, 0);
+    float m1 = dot(accum_sample.rgb, luminance_weights);
     float m2 = aux_sample.r;
     float variance = max(0.0, m2 - m1 * m1);
     float rel_std_dev = sqrt(variance) / (m1 + 0.05);
@@ -211,10 +202,12 @@ vec3 gi_debug_view(ivec2 texel, vec2 uv, vec3 fallback) {
                    : mix(col_yellow, col_red, (t_var - 0.66) * 3.0);
     return var_color;
 #elif GI_DEBUG == GI_DEBUG_SPP
-    // Accumulated samples per pixel (0..RTGI_SPP_CAP).
-    vec4 spp_aux = ping ? texture(rtgi_sky_accum_sampler, rtgi_uv)
-                        : texture(rtgi_sky_history_sampler, rtgi_uv);
-    float spp = unpack_sky_count(spp_aux.g).y;
+    // Accumulated samples per pixel (0..RTGI_SPP_CAP), point-sampled to preserve packed integer code.
+    ivec2 spp_size = textureSize(rtgi_sky_accum_sampler, 0);
+    ivec2 spp_texel = clamp(ivec2(rtgi_uv * vec2(spp_size)), ivec2(0), spp_size - 1);
+    vec4 spp_aux = ping ? texelFetch(rtgi_sky_accum_sampler, spp_texel, 0)
+                        : texelFetch(rtgi_sky_history_sampler, spp_texel, 0);
+    float spp = unpack_hit_count(spp_aux.g).y;
     float spp_t = clamp01(spp / max(float(RTGI_SPP_CAP), 1.0));
     return mix(vec3(0.0, 0.15, 0.45), vec3(1.0, 0.85, 0.20), spp_t);
 #elif GI_DEBUG == GI_DEBUG_RESET
@@ -250,13 +243,15 @@ vec3 gi_debug_view(ivec2 texel, vec2 uv, vec3 fallback) {
     }
     return vec3(0.00, 0.70, 0.65);              // SPATIAL: fallback gather
 #elif GI_DEBUG == GI_DEBUG_BYPASS
-    // Filter convergence bypass debug visualization.
-    vec4 bp_aux = ping ? texture(rtgi_sky_accum_sampler, rtgi_uv)
-                       : texture(rtgi_sky_history_sampler, rtgi_uv);
-    vec4 bp_accum = ping ? texture(rtgi_accum_sampler, rtgi_uv)
-                         : texture(rtgi_history_sampler, rtgi_uv);
-    float bp_count = unpack_sky_count(bp_aux.g).y;
-    float bp_m1 = dot(bp_accum.rgb, vec3(0.2126, 0.7152, 0.0722));
+    // Filter convergence & hit-distance guide debug visualization.
+    ivec2 bp_size = textureSize(rtgi_sky_accum_sampler, 0);
+    ivec2 bp_texel = clamp(ivec2(rtgi_uv * vec2(bp_size)), ivec2(0), bp_size - 1);
+    vec4 bp_aux = ping ? texelFetch(rtgi_sky_accum_sampler, bp_texel, 0)
+                       : texelFetch(rtgi_sky_history_sampler, bp_texel, 0);
+    vec4 bp_accum = ping ? texelFetch(rtgi_accum_sampler, bp_texel, 0)
+                         : texelFetch(rtgi_history_sampler, bp_texel, 0);
+    float bp_count = unpack_hit_count(bp_aux.g).y;
+    float bp_m1 = dot(bp_accum.rgb, luminance_weights);
     float bp_var = max(0.0, bp_aux.r - bp_m1 * bp_m1);
     float bp_se = sqrt(bp_var / max(bp_count, 1.0)) / (bp_m1 + 0.02);
     float bp_count_ramp
@@ -307,14 +302,14 @@ vec3 gi_debug_view(ivec2 texel, vec2 uv, vec3 fallback) {
         return vec3(0.6, 0.0, 0.6);
     }
 
-    uint packed = texelFetch(voxel_sampler, voxel_coord, 0).r;
+    uint packed_val = texelFetch(voxel_sampler, voxel_coord, 0).r;
 
 #if GI_DEBUG == GI_DEBUG_VOXEL_ID
-    return gi_debug_voxel_id(packed);
+    return gi_debug_voxel_id(packed_val);
 #elif GI_DEBUG == GI_DEBUG_VOXEL_LIGHT
-    return gi_debug_voxel_light(packed);
+    return gi_debug_voxel_light(packed_val);
 #elif GI_DEBUG == GI_DEBUG_VOXEL_ALBEDO
-    return gi_debug_voxel_albedo(packed);
+    return gi_debug_voxel_albedo(packed_val);
 #else
     return fallback;
 #endif

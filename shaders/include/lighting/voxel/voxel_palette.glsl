@@ -3,6 +3,7 @@
 
 // global.glsl included by parent program
 #include "/include/lighting/voxel/light_colors.glsl"
+#include "/include/utility/color.glsl"
 
 struct VoxelMaterial {
     vec3 albedo;
@@ -45,7 +46,8 @@ VoxelMaterial get_voxel_material(uint block_id, vec3 fallback_color) {
             mat.is_solid = (block_id != 58u);
         } else {
             uint light_idx = clamp(block_id - 32u, 0u, 47u);
-            mat.emission = get_voxel_light_color(block_id)
+            vec3 emit_rec2020 = max0(get_voxel_light_color(block_id) * rec709_to_rec2020);
+            mat.emission = emit_rec2020
                 * (EMISSION_ANCHOR * EMISSION_STRENGTH
                    * voxel_light_response(voxel_light_level_table[light_idx]));
             mat.roughness = 0.5;
@@ -63,97 +65,76 @@ VoxelMaterial get_voxel_material(uint block_id, vec3 fallback_color) {
             mat.is_translucent = true;
             break;
 
-        // Small plants (grass, short_grass, flowers, dandelion, poppy, fern)
+        // Small & tall plants (10002-10004)
         case 2u:
-            mat.albedo = (max_of(fallback_color) > 0.05) ? fallback_color * 0.40 : vec3(0.12, 0.22, 0.06);
-            mat.roughness = 0.90;
-            mat.is_solid = false;
-            break;
-
-        // Tall plants (sunflowers, lilac, rose bush)
         case 3u:
+        case 4u:
             mat.albedo = (max_of(fallback_color) > 0.05) ? fallback_color * 0.40 : vec3(0.12, 0.22, 0.06);
             mat.roughness = 0.90;
             mat.is_solid = false;
             break;
 
-        // Default Stone / unassigned terrain
-        case 4u:
-            mat.albedo = (max_of(fallback_color) > 0.01) ? fallback_color : vec3(0.35, 0.35, 0.35);
-            mat.roughness = 0.80;
-            mat.is_solid = true;
-            break;
-
-        // Leaves & foliage
+        // Leaves & foliage (10005)
         case 5u:
-            mat.albedo = (max_of(fallback_color) > 0.05) ? fallback_color * 0.30 : vec3(0.06, 0.14, 0.03);
+            mat.albedo = (max_of(fallback_color) > 0.01) ? fallback_color : vec3(0.06, 0.14, 0.03);
             mat.roughness = 0.90;
             mat.sss_amount = 0.0;
             mat.is_solid = true;
             mat.is_translucent = true;
             break;
 
-        // Dirt, grass block, coarse dirt, stone, cobblestone, deepslate
-        case 6u:
-            mat.albedo = (fallback_color.g > fallback_color.r * 1.05 && fallback_color.g > 0.08)
-                ? fallback_color * 0.40
-                : ((max_of(fallback_color) > 0.01) ? fallback_color : vec3(0.35, 0.30, 0.25));
-            mat.roughness = 0.88;
-            mat.is_solid = true;
-            break;
-
-        // Sand, sandstone
+        // Sand, sandstone (10007)
         case 7u:
             mat.albedo = (max_of(fallback_color) > 0.01) ? fallback_color : vec3(0.72, 0.65, 0.46);
             mat.roughness = 0.88;
             mat.is_solid = true;
             break;
 
-        // Ice, packed ice, blue ice
+        // Ice, packed ice, blue ice (10008)
         case 8u:
-            mat.albedo = vec3(0.75, 0.85, 0.95);
+            mat.albedo = (max_of(fallback_color) > 0.01) ? fallback_color : vec3(0.55, 0.70, 0.90);
             mat.roughness = 0.20;
             mat.sss_amount = 0.25;
             mat.is_solid = true;
             mat.is_translucent = true;
             break;
 
-        // Red sand, red sandstone
+        // Red sand, red sandstone, pumpkin (10009)
         case 9u:
             mat.albedo = (max_of(fallback_color) > 0.01) ? fallback_color : vec3(0.68, 0.36, 0.18);
             mat.roughness = 0.88;
             mat.is_solid = true;
             break;
 
-        // Wood planks / logs
+        // Granite, diorite, dirt path, nylium (10010)
         case 10u:
-            mat.albedo = (max_of(fallback_color) > 0.01) ? fallback_color : vec3(0.48, 0.32, 0.18);
-            mat.roughness = 0.75;
+            mat.albedo = (max_of(fallback_color) > 0.01) ? fallback_color : vec3(0.55, 0.48, 0.44);
+            mat.roughness = 0.70;
             mat.is_solid = true;
             break;
 
-        // Terracotta
+        // Obsidian, nether bricks (10011)
         case 11u:
-            mat.albedo = (max_of(fallback_color) > 0.01) ? fallback_color : vec3(0.55, 0.35, 0.25);
-            mat.roughness = 0.85;
+            mat.albedo = (max_of(fallback_color) > 0.01) ? fallback_color : vec3(0.14, 0.08, 0.12);
+            mat.roughness = 0.45;
             mat.is_solid = true;
             break;
 
-        // Metals (Iron, gold, copper)
+        // Metals: iron, gold, netherite (10012)
         case 12u:
             mat.albedo = (max_of(fallback_color) > 0.01) ? fallback_color : vec3(0.70, 0.70, 0.70);
-            mat.roughness = 0.40;
+            mat.roughness = 0.25;
             mat.is_solid = true;
             break;
 
-        // Netherrack, nether bricks
+        // Gems & quartz: diamond, emerald, lapis, quartz, amethyst, redstone block (10013)
         case 13u:
-            mat.albedo = (max_of(fallback_color) > 0.01) ? fallback_color : vec3(0.38, 0.12, 0.12);
-            mat.roughness = 0.90;
+            mat.albedo = (max_of(fallback_color) > 0.01) ? fallback_color : vec3(0.80, 0.80, 0.80);
+            mat.roughness = 0.25;
             mat.is_solid = true;
             break;
 
-        // Strong SSS materials (azalea, sugar cane, bamboo, vine, lily pad)
+        // Strong SSS materials (azalea, sugar cane, bamboo, vine, mushroom block)
         case 14u:
             mat.albedo = (max_of(fallback_color) > 0.05) ? fallback_color * 0.30 : vec3(0.10, 0.20, 0.05);
             mat.roughness = 0.80;
@@ -166,6 +147,54 @@ VoxelMaterial get_voxel_material(uint block_id, vec3 fallback_color) {
             mat.albedo = clamp(fallback_color, vec3(0.10), vec3(0.50));
             mat.roughness = 0.70;
             mat.is_solid = false; // Never block rays! Leaf litter & petals are flat decals!
+            break;
+
+        // Chorus plant & End stone (10016-10017)
+        case 16u:
+        case 17u:
+            mat.albedo = (max_of(fallback_color) > 0.01) ? fallback_color : vec3(0.75, 0.76, 0.55);
+            mat.roughness = 0.80;
+            mat.is_solid = true;
+            break;
+
+        // Warped stems & hyphae (10019-10022)
+        case 19u:
+        case 20u:
+        case 21u:
+        case 22u:
+            mat.albedo = (max_of(fallback_color) > 0.01) ? fallback_color : vec3(0.16, 0.36, 0.34);
+            mat.roughness = 0.78;
+            mat.is_solid = true;
+#ifdef HARDCODED_EMISSION
+            mat.emission = max0(vec3(0.08, 0.35, 0.32) * rec709_to_rec2020) * EMISSION_STRENGTH;
+#endif
+            break;
+
+        // Crimson stems & hyphae (10023-10026)
+        case 23u:
+        case 24u:
+        case 25u:
+        case 26u:
+            mat.albedo = (max_of(fallback_color) > 0.01) ? fallback_color : vec3(0.36, 0.14, 0.20);
+            mat.roughness = 0.78;
+            mat.is_solid = true;
+#ifdef HARDCODED_EMISSION
+            mat.emission = max0(vec3(0.35, 0.06, 0.10) * rec709_to_rec2020) * EMISSION_STRENGTH;
+#endif
+            break;
+
+        // Solid copper blocks & double cut-copper slabs (10027)
+        case 27u:
+            mat.albedo = (max_of(fallback_color) > 0.01) ? fallback_color : vec3(0.60, 0.35, 0.25);
+            mat.roughness = 0.50;
+            mat.is_solid = true;
+            break;
+
+        // Wood planks, logs, crafting blocks (10029)
+        case 29u:
+            mat.albedo = (max_of(fallback_color) > 0.01) ? fallback_color : vec3(0.48, 0.32, 0.18);
+            mat.roughness = 0.75;
+            mat.is_solid = true;
             break;
 
         // Redstone logic components and wire
@@ -224,6 +253,7 @@ VoxelMaterial get_voxel_material(uint block_id, vec3 fallback_color) {
             break;
     }
 
+    mat.albedo = max0(mat.albedo * rec709_to_rec2020);
     return mat;
 }
 
