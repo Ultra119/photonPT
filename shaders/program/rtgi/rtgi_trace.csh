@@ -62,7 +62,7 @@ uniform mat4 gbufferPreviousProjection;
 uniform mat4 shadowModelView;
 uniform mat4 shadowProjection;
 
-#ifdef RTGI_USE_RESTIR_ANY
+#if defined RTGI_USE_RESTIR_ANY || defined RTGI_WORLD_CACHE
 #include "/include/utility/camera_motion.glsl"
 #else
 uniform vec3 cameraPosition;
@@ -77,6 +77,10 @@ uniform vec2 taa_offset;
 uniform float eye_skylight;
 
 #include "/include/lighting/rt/rtgi_opaque_depth.glsl"
+#ifdef RTGI_WORLD_CACHE
+#define RTGI_WORLD_CACHE_READONLY
+#include "/include/lighting/rt/rtgi_world_cache.glsl"
+#endif
 #include "/include/lighting/rt/path_trace.glsl"
 #include "/include/lighting/rt/pt_state.glsl"
 #ifdef RTGI_USE_RESTIR_DI

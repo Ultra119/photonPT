@@ -16,7 +16,7 @@ layout(local_size_x = 8, local_size_y = 8) in;
 #define RTGI_USE_RESTIR_DI
 #endif
 
-#if defined RTGI_USE_RESTIR_DI || defined RTGI_RESTIR_GI
+#if defined RTGI_USE_RESTIR_DI || defined RTGI_RESTIR_GI || defined RTGI_WORLD_CACHE
 
 layout(rgba16f) uniform image2D rtgi_raw_img;
 #if GI_DEBUG == GI_DEBUG_EMITTER && defined RTGI_USE_RESTIR_DI
@@ -35,11 +35,20 @@ uniform usampler2D rtgi_reservoir_odd_sampler;
 uniform mat4 gbufferModelView;
 uniform mat4 gbufferModelViewInverse;
 uniform mat4 gbufferProjection;
+#ifdef RTGI_WORLD_CACHE
+#include "/include/utility/camera_motion.glsl"
+#else
 uniform vec3 cameraPosition;
+#endif
 uniform int frameCounter;
 
 #include "/include/utility/random.glsl"
 #include "/include/lighting/rt/pt_state.glsl"
+#include "/include/lighting/rt/rtgi_surface.glsl"
+#include "/include/lighting/rt/voxel_dda.glsl"
+#ifdef RTGI_WORLD_CACHE
+#include "/include/lighting/rt/rtgi_world_cache.glsl"
+#endif
 #ifdef RTGI_USE_RESTIR_DI
 #include "/include/lighting/rt/rtgi_restir.glsl"
 #endif
@@ -83,22 +92,26 @@ void store_debug_emitter(ivec2 texel, vec4 emitter) {
 #endif
 }
 
-void finalize_raw(ivec2 texel, vec4 raw, vec3 added_rgb, bool valid_added) {
+vec3 finalize_raw(ivec2 texel, vec4 raw, vec3 added_rgb, bool valid_added, out bool ok_final) {
+    ok_final = false;
     if (!valid_added || !rtgi_finite(raw) || any(lessThan(raw.rgb, vec3(0.0)))) {
         imageStore(rtgi_raw_img, texel, vec4(0.0, 0.0, 0.0, -2.0));
-        return;
+        return vec3(0.0);
     }
     vec3 combined = raw.rgb + added_rgb;
     float lum = dot(combined, luminance_weights);
     if (!rtgi_finite(vec4(combined, lum))) {
         imageStore(rtgi_raw_img, texel, vec4(0.0, 0.0, 0.0, -2.0));
-        return;
+        return vec3(0.0);
     }
     float scale = min(1.0, 65504.0 / max(max_of(combined), eps));
     if (RTGI_MAX_RADIANCE > 0.0) {
         scale = min(scale, RTGI_MAX_RADIANCE / max(lum, eps));
     }
-    imageStore(rtgi_raw_img, texel, vec4(combined * scale, raw.a));
+    vec3 final_rgb = combined * scale;
+    imageStore(rtgi_raw_img, texel, vec4(final_rgb, raw.a));
+    ok_final = true;
+    return final_rgb;
 }
 
 void main() {
@@ -122,9 +135,10 @@ void main() {
 #else
     const bool run_di = false;
 #endif
-#ifndef RTGI_RESTIR_GI
+#if !defined RTGI_RESTIR_GI && !defined RTGI_WORLD_CACHE
     if (!run_di) {
-        finalize_raw(texel, raw, vec3(0.0), true);
+        bool dummy_ok;
+        finalize_raw(texel, raw, vec3(0.0), true, dummy_ok);
         store_debug_emitter(texel, vec4(0.0));
         return;
     }
@@ -138,7 +152,8 @@ void main() {
 
     vec3 center_view;
     if (!rtgi_view_from_guide(guide, grid.full_size, jitter, gbufferProjection, center_view)) {
-        finalize_raw(texel, raw, vec3(0.0), true);
+        bool dummy_ok;
+        finalize_raw(texel, raw, vec3(0.0), true, dummy_ok);
         store_debug_emitter(texel, vec4(0.0));
         return;
     }
@@ -147,6 +162,7 @@ void main() {
     uint material = rtgi_guide_material(guide);
     vec3 scene_pos = transform(gbufferModelViewInverse, center_view);
     vec3 voxel_pos = scene_to_voxel_space(scene_pos);
+#if defined RTGI_USE_RESTIR_DI || defined RTGI_RESTIR_GI
     vec3 origin = rtgi_receiver_origin(voxel_sampler, voxel_pos, world_normal, material);
 
     vec3 view_normal = mat3(gbufferModelView) * world_normal;
@@ -204,6 +220,7 @@ void main() {
         neighbor_normal[valid_neighbors] = n_world_normal;
         ++valid_neighbors;
     }
+#endif
 
     vec3 total_added = vec3(0.0);
     bool valid_added = true;
@@ -497,7 +514,22 @@ void main() {
     }
 #endif
 
-    finalize_raw(texel, raw, valid_added ? total_added : vec3(0.0), valid_added);
+    bool ok_final;
+    vec3 final_rgb = finalize_raw(
+        texel, raw, valid_added ? total_added : vec3(0.0), valid_added, ok_final
+    );
+#ifdef RTGI_WORLD_CACHE
+    if (ok_final) {
+        ivec3 surface_voxel = ivec3(floor(voxel_pos - 0.02 * world_normal));
+        if (is_inside_voxel_grid(surface_voxel)) {
+            bool emitter_changed = (guide.w & rtgi_guide_emitter_changed) != 0u;
+            world_cache_deposit(
+                world_cache_cell_from_voxel(surface_voxel), world_normal,
+                final_rgb, emitter_changed
+            );
+        }
+    }
+#endif
     store_debug_emitter(texel, direct_emitter);
 }
 

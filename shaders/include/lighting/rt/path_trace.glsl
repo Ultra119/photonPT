@@ -216,6 +216,16 @@ PathTraceSample evaluate_path_trace(
             result.indirect_radiance += (emission + sun + bounce_emitter) * throughput;
         }
         if (b == PT_BOUNCES - 1) {
+#ifdef RTGI_WORLD_CACHE
+            // Query face-oriented world-space residual radiance cache (D_block +
+            // D_indirect, excluding direct sun which was already evaluated above)
+            // for infinite multi-bounce GI without double-counting or blowup.
+            vec3 cached_d_gi;
+            if (world_cache_query(world_cache_cell_from_voxel(hit.cell), hit.normal, cached_d_gi)) {
+                vec3 safe_albedo = min(material.albedo, vec3(0.88));
+                result.indirect_radiance += safe_albedo * cached_d_gi * throughput;
+            }
+#endif
             break;
         }
 

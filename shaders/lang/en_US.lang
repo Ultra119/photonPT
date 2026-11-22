@@ -819,6 +819,9 @@ option.RTGI_RESTIR_DI.comment                                        = Spatiotem
 
 option.RTGI_RESTIR_GI                                                = ReSTIR GI Indirect Resampling
 option.RTGI_RESTIR_GI.comment                                        = Spatiotemporal reservoir resampling with unbiased pairwise MIS and exact reconnection Jacobians for first-bounce indirect lighting and sky openings. Reduces indirect bounce noise at low ray counts.
+
+option.RTGI_WORLD_CACHE                                              = World-Space Multi-Bounce Cache
+option.RTGI_WORLD_CACHE.comment                                      = Face-oriented world-space spatial hash radiance cache (SSBO) queried at the terminal path bounce for infinite multi-bounce GI without thin-wall leakage or extra rays.
 option.RTGI_MAX_RADIANCE                                             = GI Radiance Cap
 option.RTGI_MAX_RADIANCE.comment                                     = Limits the luminance of the combined GI observation before temporal accumulation. 0 uses the storage limit only for reference comparisons.
 value.RTGI_MAX_RADIANCE.0.0                                          = Reference

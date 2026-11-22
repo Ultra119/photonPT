@@ -64,6 +64,7 @@ const float wetnessHalflife         = 70.0;
   #define RTGI_EMITTER_SAMPLING
   #define RTGI_RESTIR_DI
   #define RTGI_RESTIR_GI
+  #define RTGI_WORLD_CACHE
 
   #define RTGI_FILTER_PHI 10.0 // [4.0 6.0 8.0 10.0 12.0 16.0 24.0 32.0]
   #define RTGI_SPP_CAP 128 // [32 64 96 128 192 255]
@@ -630,6 +631,9 @@ const float wetnessHalflife         = 70.0;
 #endif
 
 #ifdef RTGI_RESTIR_GI
+#endif
+
+#ifdef RTGI_WORLD_CACHE
 #endif
 
 #ifdef MOON_PHASE_AFFECTS_BRIGHTNESS

@@ -14,6 +14,9 @@ const uint rtgi_frame_tag = 2u
 #ifdef RTGI_RESTIR_GI
     | 16u
 #endif
+#ifdef RTGI_WORLD_CACHE
+    | 32u
+#endif
 ;
 const uint rtgi_frame_counter_period = 720720u; // Iris SystemTimeUniforms
 
