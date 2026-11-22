@@ -81,57 +81,88 @@ vec3 voxel_environment(
     return (!any(isnan(sky)) && !any(isinf(sky))) ? max0(sky) : vec3(0.0);
 }
 
-// RGB is demodulated diffuse radiance. A is the distance from the receiver
-// anchor to the first opaque hit. A miss has distance -1.
-vec4 evaluate_path_trace(
+struct PathTraceSample {
+    vec3 direct_rgb;
+    vec3 indirect_radiance;
+    vec3 primary_transmittance;
+    vec3 first_pos_or_dir;
+    vec3 first_normal;
+    float primary_distance;
+    int hit_source;
+    ivec3 bounce_emitter_cell;
+};
+
+// Evaluates one primary cosine-hemisphere path and splits primary direct-emitter
+// MIS remainder (`direct_rgb`) from first-bounce indirect outgoing radiance
+// (`indirect_radiance`, un-tinted by primary glass so ReSTIR GI can reconnect
+// and apply receiver-specific glass transmittance cleanly).
+PathTraceSample evaluate_path_trace(
     vec3 receiver, vec3 receiver_origin, vec3 receiver_normal, float receiver_skylight,
     usampler3D grid, sampler2D sky_map, vec3 direct_sun_color, vec3 light_direction,
-    uint seed, bool sample_emitters, out int hit_source
+    uint seed, bool sample_emitters
 ) {
-    hit_source = rtgi_hit_none;
-    vec3 radiance = vec3(0.0);
+    PathTraceSample result = PathTraceSample(
+        vec3(0.0), vec3(0.0), vec3(1.0), vec3(0.0), vec3(0.0), -1.0, rtgi_hit_none, ivec3(-1)
+    );
     vec3 throughput = vec3(1.0);
     vec3 origin = receiver_origin;
     vec3 normal = receiver_normal;
-    float primary_distance = -1.0;
 
     for (int b = 0; b < PT_BOUNCES; ++b) {
         vec2 u = vec2(random_dimension(seed, 3 * b), random_dimension(seed, 3 * b + 1));
         vec3 direction = sample_cosine_hemisphere(normal, u);
         float reach = b == 0 ? rt_primary_max_distance : rt_bounce_max_distance;
         VoxelHit hit = trace_voxel_segment(grid, origin, direction, reach, voxel_ray_path);
-        radiance += hit.passed_emission * throughput;
+        if (b == 0) {
+            result.direct_rgb += hit.passed_emission;
+        } else {
+            result.indirect_radiance += hit.passed_emission * throughput;
+        }
         vec3 endpoint = origin + hit.distance * direction;
 
         if (hit.status != voxel_hit_surface) {
             if (hit.status == voxel_step_limit || hit.status == voxel_invalid_ray
                 || (b == 0 && hit.status == voxel_inside_solid)) {
-                hit_source = rtgi_hit_invalid;
+                result.hit_source = rtgi_hit_invalid;
             } else if (hit.status != voxel_inside_solid) {
                 vec3 environment = voxel_environment(sky_map, direction, endpoint, receiver_skylight);
-                radiance += environment * hit.transmittance * throughput;
                 if (b == 0) {
-                    hit_source = hit.status == voxel_volume_exit ? rtgi_hit_volume_exit : rtgi_hit_distance_limit;
+                    result.primary_transmittance = hit.transmittance;
+                    result.indirect_radiance = environment;
+                    result.first_pos_or_dir = direction;
+                    result.hit_source = hit.status == voxel_volume_exit
+                        ? rtgi_hit_volume_exit : rtgi_hit_distance_limit;
+                } else {
+                    result.indirect_radiance += environment * hit.transmittance * throughput;
                 }
             }
             break;
         }
 
         if (b == 0) {
-            hit_source = rtgi_hit_voxel;
-            primary_distance = length(endpoint - receiver);
+            result.hit_source = rtgi_hit_voxel;
+            result.primary_distance = length(endpoint - receiver);
+            result.primary_transmittance = hit.transmittance;
+            result.first_pos_or_dir = endpoint;
+            result.first_normal = hit.normal;
         }
 
         VoxelSample sample_data = unpack_voxel_data(hit.payload);
         VoxelMaterial material = get_voxel_material(sample_data.block_id, sample_data.color);
         vec3 emission = material.emission;
 #ifdef RTGI_EMITTER_SAMPLING
-        if (b == 0 && sample_emitters && max_of(emission) > 0.0) {
+        if (b <= 1 && sample_emitters && max_of(emission) > 0.0
+            && (b == 0 || hit.distance < rt_bounce_max_distance)) {
             float light_pdf = primary_emitter_pdf(grid, hit, origin, normal, direction);
             if (light_pdf > 0.0) {
                 float bsdf_pdf = max0(dot(normal, direction)) * rcp_pi;
-                emission *= power_mis(float(RTGI_RAY_COUNT) * bsdf_pdf, light_pdf);
+                float mis_rays = b == 0 ? float(RTGI_RAY_COUNT) : 1.0;
+                emission *= power_mis(mis_rays * bsdf_pdf, light_pdf);
             }
+        }
+        if (b >= 1 && max_of(emission) > 0.0 && emitter_index_member(hit.payload)
+            && result.bounce_emitter_cell.x < 0) {
+            result.bounce_emitter_cell = hit.cell;
         }
 #endif
 
@@ -152,8 +183,38 @@ vec4 evaluate_path_trace(
                 * (sun_boost * rcp_pi * sun_cosine);
         }
 
-        throughput *= hit.transmittance;
-        radiance += (emission + sun) * throughput;
+        // Bounce-1 direct block-light NEE paired with b == 1 BSDF MIS above.
+        vec3 bounce_emitter = vec3(0.0);
+#ifdef RTGI_EMITTER_SAMPLING
+        if (b == 0 && b < PT_BOUNCES - 1 && sample_emitters && max_of(material.albedo) > 0.0) {
+            ivec3 b_cell;
+            vec4 b_sample = sample_direct_emitter_ex(
+                grid, next_origin, hit.normal,
+                lowbias32(seed ^ 0x9e3779b9u),
+                1.0, rt_bounce_max_distance, b_cell
+            );
+            if (b_sample.a > 1.5) {
+                bounce_emitter = material.albedo * b_sample.rgb;
+                if (result.bounce_emitter_cell.x < 0) {
+                    result.bounce_emitter_cell = b_cell;
+                }
+            }
+        }
+#endif
+
+        if (b == 0) {
+            if (sample_emitters) {
+                // Keep primary MIS-weighted direct emission out of ReSTIR GI
+                // so ReSTIR DI and ReSTIR GI remain cleanly separated and unbiased.
+                result.direct_rgb += emission * hit.transmittance;
+                result.indirect_radiance += sun + bounce_emitter;
+            } else {
+                result.indirect_radiance += emission + sun + bounce_emitter;
+            }
+        } else {
+            throughput *= hit.transmittance;
+            result.indirect_radiance += (emission + sun + bounce_emitter) * throughput;
+        }
         if (b == PT_BOUNCES - 1) {
             break;
         }
@@ -170,7 +231,7 @@ vec4 evaluate_path_trace(
         normal = hit.normal;
     }
 
-    return vec4(radiance, primary_distance);
+    return result;
 }
 
 #endif

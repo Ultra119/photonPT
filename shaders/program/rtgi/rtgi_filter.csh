@@ -16,8 +16,13 @@ layout(local_size_x = 8, local_size_y = 8) in;
 #endif
 
 #if RTGI_FILTER_PASS == 1 || RTGI_FILTER_PASS == 3
+#if GI_DEBUG == GI_DEBUG_RAW
 layout(rgba16f) writeonly uniform image2D rtgi_filter_inter_img;
 #define filter_output rtgi_filter_inter_img
+#else
+layout(rgba16f) writeonly uniform image2D rtgi_raw_img;
+#define filter_output rtgi_raw_img
+#endif
 #else
 layout(rgba16f) writeonly uniform image2D rtgi_filtered_img;
 #define filter_output rtgi_filtered_img
@@ -31,7 +36,13 @@ uniform sampler2D rtgi_stats_odd_sampler;
 #elif RTGI_FILTER_PASS == 3
 uniform sampler2D rtgi_filtered_sampler;
 #else
+#if GI_DEBUG == GI_DEBUG_RAW
 uniform sampler2D rtgi_filter_inter_sampler;
+#define filter_inter_sampler rtgi_filter_inter_sampler
+#else
+uniform sampler2D rtgi_raw_sampler;
+#define filter_inter_sampler rtgi_raw_sampler
+#endif
 #endif
 
 uniform usampler2D rtgi_frame_state_sampler;
@@ -65,7 +76,7 @@ vec4 read_filter_input(ivec2 texel, bool even, out float age) {
 #if RTGI_FILTER_PASS == 3
     return texelFetch(rtgi_filtered_sampler, texel, 0);
 #else
-    return texelFetch(rtgi_filter_inter_sampler, texel, 0);
+    return texelFetch(filter_inter_sampler, texel, 0);
 #endif
 #endif
 }

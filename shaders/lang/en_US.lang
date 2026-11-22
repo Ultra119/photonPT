@@ -816,6 +816,9 @@ option.RTGI_EMITTER_SAMPLING                                         = Sample Bl
 option.RTGI_EMITTER_SAMPLING.comment                                 = Samples indexed block lights per GI pixel in addition to the diffuse rays. Disable for a ray-only reference with the same voxel geometry.
 option.RTGI_RESTIR_DI                                                = ReSTIR DI Light Resampling
 option.RTGI_RESTIR_DI.comment                                        = Spatiotemporal reservoir resampling with unbiased pairwise MIS for direct block lights. Greatly reduces noise in multi-light and partially occluded scenes. Requires Sample Block Lights.
+
+option.RTGI_RESTIR_GI                                                = ReSTIR GI Indirect Resampling
+option.RTGI_RESTIR_GI.comment                                        = Spatiotemporal reservoir resampling with unbiased pairwise MIS and exact reconnection Jacobians for first-bounce indirect lighting and sky openings. Reduces indirect bounce noise at low ray counts.
 option.RTGI_MAX_RADIANCE                                             = GI Radiance Cap
 option.RTGI_MAX_RADIANCE.comment                                     = Limits the luminance of the combined GI observation before temporal accumulation. 0 uses the storage limit only for reference comparisons.
 value.RTGI_MAX_RADIANCE.0.0                                          = Reference

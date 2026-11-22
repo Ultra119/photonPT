@@ -4,13 +4,17 @@
 // rtgi_frame_state_img has one row per parity. Column 0 contains the frame
 // ID, layout tag and exact XY raster jitter in pixels. Columns 1 and 2
 // contain the allocated and active size of the full and GI lattices.
-#if defined RTGI_EMITTER_SAMPLING && defined RTGI_RESTIR_DI
-const uint rtgi_frame_tag = 4u;
-#elif defined RTGI_EMITTER_SAMPLING
-const uint rtgi_frame_tag = 3u;
-#else
-const uint rtgi_frame_tag = 2u;
+const uint rtgi_frame_tag = 2u
+#ifdef RTGI_EMITTER_SAMPLING
+    | 4u
+#ifdef RTGI_RESTIR_DI
+    | 8u
 #endif
+#endif
+#ifdef RTGI_RESTIR_GI
+    | 16u
+#endif
+;
 const uint rtgi_frame_counter_period = 720720u; // Iris SystemTimeUniforms
 
 bool rtgi_previous_frame(uint previous, uint current) {

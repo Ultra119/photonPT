@@ -88,6 +88,34 @@ RestirReservoir restir_unpack(uvec4 packed) {
     return r;
 }
 
+// When a pixel has no direct emitter (bit 31 == 0), packed.x bits 0..30 are
+// unused by ReSTIR DI. Store a bounce-1 emitter witness cell (bit 30 == 1)
+// so bounced-light pixels also detect broken lights deterministically on frame 1.
+const uint restir_bounce_witness_bit = 1u << 30u;
+
+uint restir_pack_bounce_witness(ivec3 cell) {
+    if (!is_inside_voxel_grid(cell)) {
+        return 0u;
+    }
+    uint cx = uint(cell.x) & 1023u;
+    uint cy = uint(cell.y) & 255u;
+    uint cz = uint(cell.z) & 1023u;
+    return cx | (cy << 10u) | (cz << 18u) | restir_bounce_witness_bit;
+}
+
+bool restir_unpack_bounce_witness(uvec4 packed, out ivec3 cell) {
+    cell = ivec3(0);
+    if ((packed.x >> 31u) != 0u || (packed.x & restir_bounce_witness_bit) == 0u) {
+        return false;
+    }
+    cell = ivec3(
+        int(packed.x & 1023u),
+        int((packed.x >> 10u) & 255u),
+        int((packed.x >> 18u) & 1023u)
+    );
+    return true;
+}
+
 // Compute the bounded receiver trace origin shared between deferred1_a and deferred1_b.
 vec3 restir_receiver_origin(usampler3D grid, vec3 voxel_pos, vec3 world_normal, uint material) {
     vec3 origin = voxel_pos + voxel_receiver_bias * world_normal;

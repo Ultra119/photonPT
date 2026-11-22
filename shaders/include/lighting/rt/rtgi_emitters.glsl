@@ -185,9 +185,13 @@ float primary_emitter_pdf(usampler3D grid, VoxelHit hit, vec3 origin, vec3 norma
     return emitter_solid_angle_pdf(selected.pmf, area, sqr(hit.distance), dot(hit.normal, -direction));
 }
 
-// RGB is the primary light-sampling contribution. A records no candidate,
+// RGB is the light-sampling contribution. A records no candidate,
 // rejected candidate or a visible sample as 0, 1 or 2.
-vec4 sample_direct_emitter(usampler3D grid, vec3 origin, vec3 normal, uint seed) {
+vec4 sample_direct_emitter_ex(
+    usampler3D grid, vec3 origin, vec3 normal, uint seed,
+    float bsdf_ray_count, float max_distance, out ivec3 sampled_cell
+) {
+    sampled_cell = ivec3(-1);
     EmitterSelection selected = select_voxel_emitter(origin, normal, seed, ivec3(-1));
     if (selected.pmf <= 0.0) {
         return vec4(0.0);
@@ -218,7 +222,7 @@ vec4 sample_direct_emitter(usampler3D grid, vec3 origin, vec3 normal, uint seed)
 
     vec3 delta = (vec3(selected.cell) - origin) + point;
     float distance_sq = dot(delta, delta);
-    if (!(distance_sq > 0.0) || distance_sq >= sqr(rt_primary_max_distance)) {
+    if (!(distance_sq > 0.0) || distance_sq >= sqr(max_distance)) {
         return rejected;
     }
     float distance_to_light = sqrt(distance_sq);
@@ -231,16 +235,24 @@ vec4 sample_direct_emitter(usampler3D grid, vec3 origin, vec3 normal, uint seed)
 
     // Include the sampled face in the half-open segment. Require the first
     // entry to match both the selected voxel and its sampled face.
-    float end = min(distance_to_light + voxel_endpoint_epsilon, rt_primary_max_distance);
+    float end = min(distance_to_light + voxel_endpoint_epsilon, max_distance);
     VoxelHit hit = trace_voxel_segment(grid, origin, direction, end, voxel_ray_visibility);
     if (hit.status != voxel_hit_surface || hit.cell != selected.cell
         || hit.normal != light_normal || abs(hit.distance - distance_to_light) > voxel_endpoint_epsilon) {
         return rejected;
     }
 
-    float mis = power_mis(light_pdf, float(RTGI_RAY_COUNT) * bsdf_pdf);
+    float mis = power_mis(light_pdf, bsdf_ray_count * bsdf_pdf);
     vec3 radiance = get_voxel_emission(block_id) * hit.transmittance * ((bsdf_pdf / light_pdf) * mis);
+    sampled_cell = selected.cell;
     return vec4(radiance, 2.0);
+}
+
+vec4 sample_direct_emitter(usampler3D grid, vec3 origin, vec3 normal, uint seed) {
+    ivec3 dummy_cell;
+    return sample_direct_emitter_ex(
+        grid, origin, normal, seed, float(RTGI_RAY_COUNT), rt_primary_max_distance, dummy_cell
+    );
 }
 
 #endif

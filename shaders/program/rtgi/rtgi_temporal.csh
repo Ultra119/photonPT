@@ -312,7 +312,7 @@ void main() {
             float nbr_delta = nbr_raw - nbr_prev;
             float frame_sigma = sqrt(history.stats.x / max(1.0 - history.stats.y, 1e-5));
             float nbr_sigma = frame_sigma * inversesqrt(float(nbr_count));
-            float threshold = max(0.008, max(0.2 * max(nbr_raw, nbr_prev), 3.0 * nbr_sigma));
+            float threshold = max(0.0004, max(0.2 * max(nbr_raw, nbr_prev), 3.0 * nbr_sigma));
             if (abs(nbr_delta) > threshold) {
                 float direction = sign(nbr_delta);
                 evidence = clamp(history.stats.w * direction + 1.0, 1.0, 3.0) * direction;
