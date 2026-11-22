@@ -268,8 +268,10 @@ void main() {
 
     float support = clamp01(history.weight);
     if (!valid_raw) {
-        // Keep well-supported history on a dropped observation without aging it.
-        bool keep = support >= 0.5;
+        // Hold well-supported history across transient dropped observations,
+        // decaying age so persistent invalid pixels expire instead of smearing.
+        history.stats.z *= 0.5;
+        bool keep = support >= 0.5 && history.stats.z >= 1.0;
         history.stats.w = 0.0;
         store_history(texel, even, keep ? history.mean : vec4(0.0),
                       keep ? history.stats : vec4(0.0), rtgi_reset_invalid, support, false, 0.0);

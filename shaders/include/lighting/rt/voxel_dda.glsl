@@ -215,11 +215,34 @@ VoxelHit trace_voxel_segment(
                     vec3 normal;
                     if (voxel_shape_hit(ray, cell, block_id, shape, t, cell_end, entry_normal,
                                         hit_distance, normal)) {
-                        if (normal == vec3(0.0) && step == 0 && mode == voxel_ray_path
-                            && block_id == 5u) {
-                            // Waving leaves displace inside their static voxel cube;
-                            // step out of the starting leaf cell instead of dropping
-                            // the primary ray as inside-solid.
+                        if (normal == vec3(0.0) && step == 0 && mode != voxel_ray_ao) {
+                            // Visible receivers can start inside a coarse 1x1x1 voxel AABB
+                            // (e.g. exposed walls above flowing/still lava or cauldrons,
+                            // waving leaves, dirt path, farmland, cactus, or depth roundoff).
+                            if (block_id == 39u || block_id == voxel_lava_cauldron_id) {
+                                if (mode == voxel_ray_path) {
+                                    if (ray.direction.y < 0.0) {
+                                        float lava_drop = min(max(ray.origin.y - float(cell.y), 1e-4), 0.01);
+                                        float t_lava = lava_drop / (-ray.direction.y);
+                                        if (t_lava < cell_end) {
+                                            result.status = voxel_hit_surface;
+                                            result.distance = t_lava;
+                                            result.cell = cell;
+                                            result.payload = payload;
+                                            result.normal = vec3(0.0, 1.0, 0.0);
+                                            return result;
+                                        }
+                                    }
+                                } else if (ray.direction.y < 0.0 && boundary.y <= crossing && crossing <= end) {
+                                    result.status = voxel_inside_solid;
+                                    result.distance = hit_distance;
+                                    result.cell = cell;
+                                    result.payload = payload;
+                                    result.normal = vec3(0.0);
+                                    return result;
+                                }
+                            }
+                            // Step out of the starting cell instead of dropping the ray as inside-solid.
                         } else {
                             result.status = normal != vec3(0.0) ? voxel_hit_surface : voxel_inside_solid;
                             result.distance = hit_distance;
