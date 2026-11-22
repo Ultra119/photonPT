@@ -65,11 +65,12 @@ const float wetnessHalflife         = 70.0;
   #define RTGI_RESTIR_DI
   #define RTGI_RESTIR_GI
   #define RTGI_WORLD_CACHE
+  #define RTGI_STBN
 
   #define RTGI_FILTER_PHI 10.0 // [4.0 6.0 8.0 10.0 12.0 16.0 24.0 32.0]
-  #define RTGI_SPP_CAP 128 // [32 64 96 128 192 255]
+  #define RTGI_SPP_CAP 64 // [32 64 96 128 192 255]
   #define RTGI_SPATIAL_FALLBACK 1 // [0 1]
-  #define RTGI_MIN_ACCUM 1.0 // [0.0 0.5 1.0 2.0]
+  #define RTGI_MIN_ACCUM 2.0 // [0.0 0.5 1.0 2.0 4.0]
   #define RTGI_ADAPT_STRENGTH 0.5 // [0.0 0.25 0.5 0.75 1.0]
   #define RTGI_MAX_RADIANCE 24.0 // [0.0 4.0 6.0 8.0 12.0 16.0 20.0 24.0 32.0 48.0 64.0]
   #define EMISSION_ANCHOR 16.0 // [4.0 6.0 8.0 10.0 12.0 16.0 20.0 24.0 32.0]
@@ -634,6 +635,9 @@ const float wetnessHalflife         = 70.0;
 #endif
 
 #ifdef RTGI_WORLD_CACHE
+#endif
+
+#ifdef RTGI_STBN
 #endif
 
 #ifdef MOON_PHASE_AFFECTS_BRIGHTNESS

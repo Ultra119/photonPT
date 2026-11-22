@@ -77,8 +77,11 @@ ivec3 world_cache_cell_from_voxel(ivec3 voxel_cell) {
 }
 #endif
 
-bool world_cache_query(ivec3 world_cell, vec3 normal, out vec3 radiance) {
+bool world_cache_query_with_age(
+    ivec3 world_cell, vec3 normal, out vec3 radiance, out float cache_age
+) {
     radiance = vec3(0.0);
+    cache_age = 0.0;
     if (world_cache_slots.length() < world_cache_size) {
         return false;
     }
@@ -94,14 +97,21 @@ bool world_cache_query(ivec3 world_cell, vec3 normal, out vec3 radiance) {
         if (hdr.x == key) {
             vec2 rg = unpackHalf2x16(hdr.z);
             vec2 ba = unpackHalf2x16(hdr.w);
-            if (ba.y >= 1.0 && !any(isnan(vec3(rg, ba.x))) && !any(isinf(vec3(rg, ba.x)))) {
+            if (ba.y >= 1.0 && !any(isnan(vec3(rg, ba.x))) && !any(isinf(vec3(rg, ba.x)))
+                && !isnan(ba.y) && !isinf(ba.y)) {
                 radiance = max0(vec3(rg, ba.x));
+                cache_age = ba.y;
                 return true;
             }
             return false;
         }
     }
     return false;
+}
+
+bool world_cache_query(ivec3 world_cell, vec3 normal, out vec3 radiance) {
+    float dummy_age;
+    return world_cache_query_with_age(world_cell, normal, radiance, dummy_age);
 }
 
 #ifndef RTGI_WORLD_CACHE_READONLY

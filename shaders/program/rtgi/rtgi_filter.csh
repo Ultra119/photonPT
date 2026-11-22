@@ -1,4 +1,5 @@
-// Display-only RTGI reconstruction. Temporal history is read-only here.
+// Display-only RTGI reconstruction via 4-pass variance-guided multi-scale
+// à-trous wavelet filtering. Temporal history is read-only here.
 
 #include "/include/global.glsl"
 
@@ -56,9 +57,9 @@ uniform int frameCounter;
 #include "/include/lighting/rt/rtgi_surface.glsl"
 #include "/include/lighting/rt/pt_state.glsl"
 #include "/include/utility/color.glsl"
-#include "/include/utility/geometry.glsl"
 
 const vec4 no_filter_sample = vec4(0.0, 0.0, 0.0, -1.0);
+const float gauss3_kernel[3] = float[3](0.25, 0.5, 0.25);
 
 vec4 read_filter_input(ivec2 texel, bool even, out float age) {
 #if RTGI_FILTER_PASS == 1
@@ -81,16 +82,21 @@ vec4 read_filter_input(ivec2 texel, bool even, out float age) {
 #endif
 }
 
-#if RTGI_FILTER_PASS == 2 || RTGI_FILTER_PASS == 3
-const vec2 vogel_disk[8] = vec2[8](
-    vec2(0.250000, 0.000000), vec2(-0.319290, 0.292496),
-    vec2(0.048872, -0.556877), vec2(0.402444, 0.524918),
-    vec2(-0.738535, -0.130636), vec2(0.699605, -0.445028),
-    vec2(-0.233999, 0.870485), vec2(-0.446271, -0.859268)
-);
+int rtgi_atrous_step() {
+#if RTGI_FILTER_PASS == 1
+    return 1;
+#elif RTGI_FILTER_PASS == 2
+    return 2;
+#elif RTGI_FILTER_PASS == 3
+    return 4;
 #else
-const float gauss3_kernel[3] = float[3](0.25, 0.5, 0.25);
+    #if RTGI_RESOLUTION == 0
+    return 4;
+    #else
+    return 8;
+    #endif
 #endif
+}
 
 void main() {
     ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
@@ -112,15 +118,13 @@ void main() {
     bool missing_center = center.a < 0.0;
     float center_y = missing_center ? 0.0 : dot(center.rgb, luminance_weights);
 #if RTGI_FILTER_PASS == 1
-    bool copy_through = RTGI_SPATIAL_FALLBACK == 0 || (!missing_center && age >= 6.0);
-    if (copy_through) {
-        imageStore(filter_output, texel, center);
+    if (missing_center && RTGI_SPATIAL_FALLBACK == 0) {
+        imageStore(filter_output, texel, no_filter_sample);
         return;
     }
 #else
-    bool copy_through = center.a <= 0.0001 + 0.015 * center_y;
-    if (missing_center || copy_through) {
-        imageStore(filter_output, texel, center);
+    if (missing_center) {
+        imageStore(filter_output, texel, no_filter_sample);
         return;
     }
 #endif
@@ -139,68 +143,33 @@ void main() {
     uint material = rtgi_guide_material(guide);
     vec3 normal = mat3(gbufferModelView) * rtgi_guide_normal(guide);
     float footprint = rtgi_view_footprint(-center_view.z, grid.gi_active, gbufferProjection);
-    float luma_floor = 0.0015 + 0.06 * center_y;
-
-#if RTGI_FILTER_PASS == 2 || RTGI_FILTER_PASS == 3
-    #if RTGI_FILTER_PASS == 2
-    const float world_cap = 1.5;
-    const float texel_cap = 6.0;
-    const mat2 rotation = mat2(1.0, 0.0, 0.0, 1.0);
-    #else
-    const float world_cap = 1.0;
-    const float texel_cap = 4.0;
-    const mat2 rotation = mat2(-0.5, 0.8660254, -0.8660254, -0.5);
-    #endif
-    float relative_se = center.a / (center_y + 0.004);
-    float radius = min(world_cap, texel_cap * footprint)
-        * mix(0.35, 1.0, smoothstep(0.03, 0.35, relative_se));
-    float max_chord = min(world_cap, radius + footprint);
-    mat3 basis = build_orthonormal_basis(normal);
-    ivec2 visited[8];
-    int visited_count = 0;
-#else
     float grazing = max(abs(dot(normal, normalize(center_view))), 0.02);
-    float max_chord = min(4.0, 0.1 + 3.0 * footprint / grazing);
-#endif
 
-    vec4 sum = missing_center ? vec4(0.0) : 0.25 * center;
-    float sum_weight = missing_center ? 0.0 : 0.25;
+    int step_px = rtgi_atrous_step();
+    float max_chord = min(6.0, 0.25 + float(step_px) * 2.2 * footprint / grazing);
+
 #if RTGI_FILTER_PASS == 1
-    float local_error = 0.0;
-    float local_weight = missing_center ? 0.0 : 0.25;
-#endif
+    // Pass 1 estimates same-surface 3x3 spatial variance for ALL pixels (including
+    // dark/zero-variance and freshly disoccluded texels) before filtering so
+    // passes 2-4 never stall on underestimated temporal variance.
+    vec4 tap_val[8];
+    float tap_geom[8];
+    float tap_y[8];
+    float mom_w = missing_center ? 0.0 : 0.25;
+    float mom_y = missing_center ? 0.0 : 0.25 * center_y;
+    float mom_y2 = missing_center ? 0.0 : 0.25 * sqr(center_y);
+    float nbr_se_sum = missing_center ? 0.0 : 0.25 * center.a;
 
     for (int k = 0; k < 8; ++k) {
-#if RTGI_FILTER_PASS == 2 || RTGI_FILTER_PASS == 3
-        vec2 offset = rotation * vogel_disk[k];
-        vec3 expected = center_view + radius * (offset.x * basis[0] + offset.y * basis[1]);
-        vec4 clip = gbufferProjection * vec4(expected, 1.0);
-        if (!rtgi_finite(clip) || clip.w <= 0.0 || abs(clip.z) > clip.w) {
-            continue;
-        }
-        vec2 pixel = rtgi_raster_position(clip.xy / clip.w, grid.full_size, jitter);
-        if (any(lessThan(pixel, vec2(0.0))) || any(greaterThanEqual(pixel, vec2(grid.full_active)))) {
-            continue;
-        }
-        ivec2 tap = rtgi_cell(ivec2(pixel), grid);
-        bool duplicate = tap == texel;
-        for (int i = 0; i < visited_count; ++i) {
-            duplicate = duplicate || visited[i] == tap;
-        }
-        if (duplicate) {
-            continue;
-        }
-        visited[visited_count++] = tap;
-        float kernel = 0.25 * exp(-dot(offset, offset));
-#else
-        int index = k + int(k >= 4); // Skip the center of the 3x3 kernel.
+        tap_geom[k] = 0.0;
+        tap_val[k] = no_filter_sample;
+        tap_y[k] = 0.0;
+        int index = k + int(k >= 4);
         ivec2 offset = ivec2(index % 3, index / 3);
         ivec2 tap = texel + offset - 1;
         if (!rtgi_in_bounds(tap, active_size)) {
             continue;
         }
-        float kernel = gauss3_kernel[offset.x] * gauss3_kernel[offset.y];
-#endif
         uvec4 tap_guide = even ? texelFetch(rtgi_guide_even_sampler, tap, 0)
                                : texelFetch(rtgi_guide_odd_sampler, tap, 0);
         vec3 tap_view;
@@ -209,6 +178,102 @@ void main() {
             continue;
         }
         vec3 tap_normal = mat3(gbufferModelView) * rtgi_guide_normal(tap_guide);
+        float gw = gauss3_kernel[offset.x] * gauss3_kernel[offset.y]
+            * rtgi_geometry_weight(tap_view - center_view, normal, tap_normal, footprint, max_chord);
+        if (gw <= 0.0) {
+            continue;
+        }
+        float tap_age;
+        vec4 sv = read_filter_input(tap, even, tap_age);
+        if (sv.a < 0.0) {
+            continue;
+        }
+        float sy = dot(sv.rgb, luminance_weights);
+        tap_val[k] = sv;
+        tap_geom[k] = gw;
+        tap_y[k] = sy;
+        mom_w += gw;
+        mom_y += gw * sy;
+        mom_y2 += gw * sqr(sy);
+        nbr_se_sum += gw * sv.a;
+    }
+
+    if (mom_w <= 0.0) {
+        imageStore(filter_output, texel, no_filter_sample);
+        return;
+    }
+
+    float local_mean = mom_y / mom_w;
+    float local_var = max(0.0, mom_y2 / mom_w - sqr(local_mean));
+    float spatial_se = sqrt(local_var / max(age, 1.0));
+    float young_factor = missing_center ? 1.0 : (1.0 - smoothstep(2.0, 12.0, age));
+    float young_prior = (0.22 * local_mean + 0.003) * inversesqrt(max(age, 1.0)) * young_factor;
+    float smooth_center_se = missing_center
+        ? max(nbr_se_sum / mom_w, 0.25 * local_mean + 0.05)
+        : max(max(center.a, max(0.55 * nbr_se_sum / mom_w, young_prior)),
+              mix(0.60, 1.0, young_factor) * spatial_se);
+
+    vec3 sum_rgb = missing_center ? vec3(0.0) : 0.25 * center.rgb;
+    float sum_w = missing_center ? 0.0 : 0.25;
+    float sum_w2_var = missing_center ? 0.0 : sqr(0.25) * sqr(smooth_center_se);
+    float sum_w_var = missing_center ? 0.0 : 0.25 * sqr(smooth_center_se);
+
+    for (int k = 0; k < 8; ++k) {
+        float gw = tap_geom[k];
+        if (gw <= 0.0) {
+            continue;
+        }
+        vec4 sv = tap_val[k];
+        float w = gw;
+        if (!missing_center) {
+            float delta = abs(tap_y[k] - center_y);
+            float sym_se = 0.5 * (smooth_center_se + max(sv.a, 0.5 * spatial_se));
+            float luma_scale = RTGI_FILTER_PHI * sym_se
+                + 0.002 + 0.05 * min(center_y, tap_y[k])
+                + 1.5 * young_factor * spatial_se;
+            w *= exp(-delta / max(luma_scale, 1e-5));
+        }
+        float sv_se = max(sv.a, mix(0.5, 1.0, young_factor) * spatial_se);
+        sum_rgb += w * sv.rgb;
+        sum_w += w;
+        sum_w2_var += sqr(w) * sqr(sv_se);
+        sum_w_var += w * sqr(sv_se);
+    }
+
+    if (sum_w <= 0.0) {
+        imageStore(filter_output, texel, no_filter_sample);
+        return;
+    }
+    vec3 out_rgb = sum_rgb / sum_w;
+    // Conservative variance propagation accounting for correlated ReSTIR taps,
+    // floored by the young/spatial uncertainty bootstrap for passes 2-4.
+    float prop_var = mix(sum_w2_var / sqr(sum_w), sum_w_var / sum_w, 0.70);
+    float out_se = max(sqrt(max(prop_var, 0.0)), max(young_prior, mix(0.60, 0.95, young_factor) * spatial_se));
+    vec4 result = vec4(out_rgb, out_se);
+#else
+    const float center_k = 0.25;
+    vec3 sum_rgb = center_k * center.rgb;
+    float sum_w = center_k;
+    float center_var = sqr(center.a);
+    float sum_w2_var = sqr(center_k) * center_var;
+    float sum_w_var = center_k * center_var;
+
+    for (int k = 0; k < 8; ++k) {
+        int index = k + int(k >= 4); // Skip the center of the 3x3 à-trous kernel.
+        ivec2 offset = ivec2(index % 3, index / 3);
+        ivec2 tap = texel + (offset - 1) * step_px;
+        if (!rtgi_in_bounds(tap, active_size)) {
+            continue;
+        }
+        uvec4 tap_guide = even ? texelFetch(rtgi_guide_even_sampler, tap, 0)
+                               : texelFetch(rtgi_guide_odd_sampler, tap, 0);
+        vec3 tap_view;
+        if (!rtgi_guide_matches(tap_guide, material)
+            || !rtgi_view_from_guide(tap_guide, grid.full_size, jitter, gbufferProjection, tap_view)) {
+            continue;
+        }
+        vec3 tap_normal = mat3(gbufferModelView) * rtgi_guide_normal(tap_guide);
+        float kernel = gauss3_kernel[offset.x] * gauss3_kernel[offset.y];
         float weight = kernel * rtgi_geometry_weight(tap_view - center_view, normal,
                                                      tap_normal, footprint, max_chord);
         if (weight <= 0.0) {
@@ -220,39 +285,27 @@ void main() {
         if (sample_value.a < 0.0) {
             continue;
         }
-        float delta = dot(sample_value.rgb, luminance_weights) - center_y;
-        float luminance_scale = RTGI_FILTER_PHI * (center.a + sample_value.a + luma_floor);
-#if RTGI_FILTER_PASS == 1
-        if (missing_center) {
-            sum += weight * sample_value;
-            sum_weight += weight;
-            continue;
-        }
-        local_error += weight * sqr(delta);
-        local_weight += weight;
-        luminance_scale += sqrt(sqr(delta) / age) * 0.5;
-#endif
-        weight *= exp(-abs(delta) / luminance_scale);
-        sum += weight * sample_value;
-        sum_weight += weight;
+        float sample_y = dot(sample_value.rgb, luminance_weights);
+        float delta = abs(sample_y - center_y);
+        float sym_se = 0.5 * (center.a + sample_value.a);
+        float luminance_scale = RTGI_FILTER_PHI * sym_se
+            + 0.002 + 0.05 * min(center_y, sample_y);
+        weight *= exp(-delta / max(luminance_scale, 1e-5));
+        float sample_var = sqr(sample_value.a);
+        sum_rgb += weight * sample_value.rgb;
+        sum_w += weight;
+        sum_w2_var += sqr(weight) * sample_var;
+        sum_w_var += weight * sample_var;
     }
 
-    if (sum_weight <= 0.0) {
+    if (sum_w <= 0.0) {
         imageStore(filter_output, texel, no_filter_sample);
         return;
     }
-    vec4 result = sum / sum_weight;
-#if RTGI_FILTER_PASS == 1
-    // Bootstrap display uncertainty from distinct same-surface neighbors.
-    // Subsequent passes propagate SE conservatively for shared support.
-    if (missing_center) {
-        result.a = max(result.a, 0.25 * dot(result.rgb, luminance_weights) + 0.05);
-    } else {
-        float young_prior = (0.20 * dot(result.rgb, luminance_weights) + 0.002)
-            * inversesqrt(max(age, 1.0));
-        result.a = max(result.a, max(sqrt(local_error / (local_weight * age)), young_prior));
-    }
+    float prop_var = mix(sum_w2_var / sqr(sum_w), sum_w_var / sum_w, 0.70);
+    vec4 result = vec4(sum_rgb / sum_w, sqrt(max(prop_var, 0.0)));
 #endif
+
     if (!rtgi_finite(result)) {
         result = no_filter_sample;
     } else if (result.a >= 0.0) {

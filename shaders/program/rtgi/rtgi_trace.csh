@@ -76,6 +76,7 @@ uniform float far;
 uniform vec2 taa_offset;
 uniform float eye_skylight;
 
+#include "/include/utility/stbn.glsl"
 #include "/include/lighting/rt/rtgi_opaque_depth.glsl"
 #ifdef RTGI_WORLD_CACHE
 #define RTGI_WORLD_CACHE_READONLY
@@ -336,7 +337,8 @@ RestirGiReservoir restir_gi_temporal_reuse(
         if (prev.sample_data.kind == restir_gi_kind_surface) {
             prev.sample_data.pos_or_dir -= vec3(grid_shift);
         }
-        if (restir_gi_surface_exists(voxel_sampler, prev.sample_data)) {
+        if (restir_gi_surface_exists(voxel_sampler, prev.sample_data)
+            && restir_gi_temporal_eligible(origin, world_normal, prev.sample_data)) {
             p0_of_1 = restir_gi_target_pdf(origin, world_normal, prev.sample_data);
             if (p0_of_1 > 0.0) {
                 vec3 dummy_trans;
@@ -354,7 +356,9 @@ RestirGiReservoir restir_gi_temporal_reuse(
     if (initial.sample_data.kind != restir_gi_kind_empty
         && initial.weight > 0.0 && initial.target_pdf > 0.0) {
         float p0_of_0 = initial.target_pdf;
-        float p1_of_0 = restir_gi_target_pdf(origin, best_prev_world_normal, initial.sample_data);
+        float p1_of_0 = restir_gi_temporal_eligible(origin, best_prev_world_normal, initial.sample_data)
+            ? restir_gi_target_pdf(origin, best_prev_world_normal, initial.sample_data)
+            : 0.0;
         float m0 = (m0_count * p0_of_0) / max(m0_count * p0_of_0 + m1_count * p1_of_0, 1e-20);
         float w0 = m0 * p0_of_0 * initial.weight;
         restir_gi_update(combined, initial.sample_data, w0, p0_of_0, random_dimension(seed, 0));
@@ -402,7 +406,7 @@ void main() {
 
     if (!rtgi_in_bounds(texel, grid.gi_active)) {
 #ifdef RTGI_RESTIR_GI
-        store_gi_reservoir(texel, target_res, bank, RestirGiSlot(uvec4(0u), uvec4(0u)));
+        store_gi_reservoir(texel, target_res, restir_gi_temporal_bank, RestirGiSlot(uvec4(0u), uvec4(0u)));
 #endif
         store_trace(texel, vec4(0.0), uvec4(0u), vec4(0.0), vec4(0.0), uvec4(0u));
         return;
@@ -415,7 +419,7 @@ void main() {
         uvec4 guide = rtgi_pack_guide(full_texel, 0.0, vec2(0.0), 0u,
                                       surface.kind, 0u);
 #ifdef RTGI_RESTIR_GI
-        store_gi_reservoir(texel, target_res, bank, RestirGiSlot(uvec4(0u), uvec4(0u)));
+        store_gi_reservoir(texel, target_res, restir_gi_temporal_bank, RestirGiSlot(uvec4(0u), uvec4(0u)));
 #endif
         store_trace(texel, vec4(0.0), guide, vec4(0.0), vec4(0.0), uvec4(0u));
         return;
@@ -436,7 +440,7 @@ void main() {
         uvec4 guide = rtgi_pack_guide(full_texel, 0.0, normal_oct, material,
                                       rtgi_world, 0u);
 #ifdef RTGI_RESTIR_GI
-        store_gi_reservoir(texel, target_res, bank, RestirGiSlot(uvec4(0u), uvec4(0u)));
+        store_gi_reservoir(texel, target_res, restir_gi_temporal_bank, RestirGiSlot(uvec4(0u), uvec4(0u)));
 #endif
         store_trace(texel, vec4(0.0), guide, vec4(0.0), vec4(0.0), uvec4(0u));
         return;
@@ -511,10 +515,11 @@ void main() {
 
     for (int r = 0; r < RTGI_RAY_COUNT && valid_batch; ++r) {
         uint ray_seed = lowbias32(seed + uint(r + 1) * 0x27d4eb2du);
+        vec2 primary_u = sample_stbn_ray(texel, frameCounter, r, ray_seed);
         PathTraceSample pt = evaluate_path_trace(
             voxel_pos, origin, world_normal, receiver_skylight,
             voxel_sampler, colortex4, direct_light_col, light_dir,
-            ray_seed, has_emitters
+            ray_seed, primary_u, has_emitters
         );
         vec3 indirect_tinted = pt.indirect_radiance * pt.primary_transmittance;
         if (pt.hit_source == rtgi_hit_invalid
@@ -580,13 +585,13 @@ void main() {
             initial_gi.target_pdf = 0.0;
         }
         RestirGiReservoir temporal_gi = restir_gi_temporal_reuse(
-            prev_found, prev_tap, prev_world_normal, prev_bank, target_res,
+            prev_found, prev_tap, prev_world_normal, restir_gi_history_bank, target_res,
             origin, world_normal, initial_gi, lowbias32(seed ^ 0x165667b1u),
             emitter_removed
         );
-        store_gi_reservoir(texel, target_res, bank, restir_gi_pack(temporal_gi));
+        store_gi_reservoir(texel, target_res, restir_gi_temporal_bank, restir_gi_pack(temporal_gi));
     } else {
-        store_gi_reservoir(texel, target_res, bank, RestirGiSlot(uvec4(0u), uvec4(0u)));
+        store_gi_reservoir(texel, target_res, restir_gi_temporal_bank, RestirGiSlot(uvec4(0u), uvec4(0u)));
     }
 #endif
 

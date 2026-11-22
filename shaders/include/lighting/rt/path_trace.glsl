@@ -99,7 +99,7 @@ struct PathTraceSample {
 PathTraceSample evaluate_path_trace(
     vec3 receiver, vec3 receiver_origin, vec3 receiver_normal, float receiver_skylight,
     usampler3D grid, sampler2D sky_map, vec3 direct_sun_color, vec3 light_direction,
-    uint seed, bool sample_emitters
+    uint seed, vec2 primary_u, bool sample_emitters
 ) {
     PathTraceSample result = PathTraceSample(
         vec3(0.0), vec3(0.0), vec3(1.0), vec3(0.0), vec3(0.0), -1.0, rtgi_hit_none, ivec3(-1)
@@ -109,7 +109,8 @@ PathTraceSample evaluate_path_trace(
     vec3 normal = receiver_normal;
 
     for (int b = 0; b < PT_BOUNCES; ++b) {
-        vec2 u = vec2(random_dimension(seed, 3 * b), random_dimension(seed, 3 * b + 1));
+        vec2 u = b == 0 ? primary_u
+                        : vec2(random_dimension(seed, 3 * b), random_dimension(seed, 3 * b + 1));
         vec3 direction = sample_cosine_hemisphere(normal, u);
         float reach = b == 0 ? rt_primary_max_distance : rt_bounce_max_distance;
         VoxelHit hit = trace_voxel_segment(grid, origin, direction, reach, voxel_ray_path);

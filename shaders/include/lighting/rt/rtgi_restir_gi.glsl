@@ -5,20 +5,37 @@
 #include "voxel_dda.glsl"
 #include "rtgi_surface.glsl"
 
-const uint restir_gi_temporal_cap = 12u;
-const int restir_gi_spatial_neighbors = 3;
+const uint restir_gi_temporal_cap = 16u;
+// Lower M cap on spatial->temporal feedback prevents a single bright sample
+// from cloning into a long-lived ~10-texel mottled clump on lit walls while
+// still letting rare doorway/bounce hits flood dark rooms in ~4 frames.
+const uint restir_gi_feedback_cap = 6u;
+const int restir_gi_spatial_neighbors = 4;
+
+// Two-bank race-free spatial->temporal feedback in bufferObject.0:
+//   bank 0: persistent spatiotemporal output written by deferred1_b, read by next deferred1_a
+//   bank 1: transient temporal output written by deferred1_a, read by current deferred1_b
+const int restir_gi_history_bank = 0;
+const int restir_gi_temporal_bank = 1;
 
 const uint restir_gi_kind_empty = 0u;
 const uint restir_gi_kind_surface = 1u;
 const uint restir_gi_kind_env = 2u;
 
 // Symmetric shift-mapping guards for unbiased vertex reconnection.
-// Because every condition is symmetric in (src, dst) and J(a->b)*J(b->a) == 1,
-// rejecting singular corner shifts preserves m_i + m_c == 1 identically.
-const float restir_gi_jacobian_max = 10.0;
-const float restir_gi_jacobian_min = 0.1;
-const float restir_gi_min_dist = 0.25;
-const float restir_gi_min_cos_hit = 0.05;
+// Because every condition is symmetric in (src, dst) and J(a->b)*J(b->a) == 1
+// (as well as pdf_ratio(a->b)*pdf_ratio(b->a) == 1 with exact power-of-2 bounds),
+// rejecting singular concave-corner / grazing shifts preserves m_i + m_c == 1
+// identically while preventing >2x Jacobian or receiver-cosine fireflies.
+const float restir_gi_jacobian_max = 2.0;
+const float restir_gi_jacobian_min = 0.5;
+const float restir_gi_pdf_ratio_max = 2.0;
+const float restir_gi_pdf_ratio_min = 0.5;
+const float restir_gi_min_dist = 0.75;
+const float restir_gi_min_cos_hit = 0.20;
+const float restir_gi_min_cos_recv = 0.15;
+const float restir_gi_temporal_min_dist = 0.25;
+const float restir_gi_temporal_min_cos = 0.08;
 
 // 32-byte std430 SSBO slot (2 banks = 64 bytes per GI pixel in bufferObject.0).
 //   w0.xyz: floatBitsToUint(pos_or_dir) (voxel-space hit pos or unit sky dir)
@@ -190,10 +207,43 @@ float restir_gi_target_pdf(vec3 origin, vec3 receiver_normal, RestirGiSample s) 
     return lum * (cos_x * rcp_pi);
 }
 
-// Exact solid-angle Jacobian |d omega_dst / d omega_src| for vertex reconnection.
-// Returns 0 when the shift is symmetrically rejected near corners/grazing angles.
-float restir_gi_shift_jacobian(vec3 src_origin, vec3 dst_origin, RestirGiSample s) {
+// Symmetric eligibility guard for temporal reuse across sub-pixel jitter:
+// excludes extreme corner-crease / grazing hits where tiny receiver shifts
+// would amplify W = pi / cos_x, while keeping m0 = 1.0 on the canonical sample.
+bool restir_gi_temporal_eligible(vec3 origin, vec3 receiver_normal, RestirGiSample s) {
     if (s.kind == restir_gi_kind_env) {
+        return dot(receiver_normal, s.pos_or_dir) >= restir_gi_temporal_min_cos;
+    }
+    if (s.kind != restir_gi_kind_surface) {
+        return false;
+    }
+    vec3 delta = s.pos_or_dir - origin;
+    float dist_sq = dot(delta, delta);
+    if (!(dist_sq >= sqr(restir_gi_temporal_min_dist)) || dist_sq >= sqr(rt_primary_max_distance)) {
+        return false;
+    }
+    vec3 dir = delta * inversesqrt(dist_sq);
+    float cos_x = dot(receiver_normal, dir);
+    float cos_y = dot(restir_gi_decode_normal(s.normal_face), -dir);
+    return cos_x >= restir_gi_temporal_min_cos && cos_y >= restir_gi_temporal_min_cos;
+}
+
+// Exact solid-angle Jacobian |d omega_dst / d omega_src| for vertex reconnection.
+// Returns 0 when the shift is symmetrically rejected near concave corners or
+// grazing receiver/hit angles where Jacobian or cos_dst/cos_src would spike.
+float restir_gi_shift_jacobian(
+    vec3 src_origin, vec3 src_normal, vec3 dst_origin, vec3 dst_normal, RestirGiSample s
+) {
+    if (s.kind == restir_gi_kind_env) {
+        float cos_r_src = dot(src_normal, s.pos_or_dir);
+        float cos_r_dst = dot(dst_normal, s.pos_or_dir);
+        if (cos_r_src < restir_gi_min_cos_recv || cos_r_dst < restir_gi_min_cos_recv) {
+            return 0.0;
+        }
+        float pdf_ratio = cos_r_dst / cos_r_src;
+        if (!(pdf_ratio >= restir_gi_pdf_ratio_min && pdf_ratio <= restir_gi_pdf_ratio_max)) {
+            return 0.0;
+        }
         return 1.0;
     }
     if (s.kind != restir_gi_kind_surface) {
@@ -208,14 +258,25 @@ float restir_gi_shift_jacobian(vec3 src_origin, vec3 dst_origin, RestirGiSample 
     if (!(l2_src >= min_l2 && l2_dst >= min_l2 && l2_src < max_l2 && l2_dst < max_l2)) {
         return 0.0;
     }
+    vec3 dir_src = d_src * inversesqrt(l2_src);
+    vec3 dir_dst = d_dst * inversesqrt(l2_dst);
+    float cos_r_src = dot(src_normal, dir_src);
+    float cos_r_dst = dot(dst_normal, dir_dst);
+    if (cos_r_src < restir_gi_min_cos_recv || cos_r_dst < restir_gi_min_cos_recv) {
+        return 0.0;
+    }
     vec3 n1 = restir_gi_decode_normal(s.normal_face);
-    float cos_src = dot(n1, -d_src * inversesqrt(l2_src));
-    float cos_dst = dot(n1, -d_dst * inversesqrt(l2_dst));
+    float cos_src = dot(n1, -dir_src);
+    float cos_dst = dot(n1, -dir_dst);
     if (cos_src < restir_gi_min_cos_hit || cos_dst < restir_gi_min_cos_hit) {
         return 0.0;
     }
     float jacobian = (cos_dst / cos_src) * (l2_src / l2_dst);
     if (!(jacobian >= restir_gi_jacobian_min && jacobian <= restir_gi_jacobian_max)) {
+        return 0.0;
+    }
+    float pdf_ratio = (cos_r_dst / cos_r_src) * jacobian;
+    if (!(pdf_ratio >= restir_gi_pdf_ratio_min && pdf_ratio <= restir_gi_pdf_ratio_max)) {
         return 0.0;
     }
     return jacobian;

@@ -43,6 +43,7 @@ uniform vec3 cameraPosition;
 uniform int frameCounter;
 
 #include "/include/utility/random.glsl"
+#include "/include/utility/stbn.glsl"
 #include "/include/lighting/rt/pt_state.glsl"
 #include "/include/lighting/rt/rtgi_surface.glsl"
 #include "/include/lighting/rt/voxel_dda.glsl"
@@ -55,7 +56,7 @@ uniform int frameCounter;
 #ifdef RTGI_RESTIR_GI
 #include "/include/lighting/rt/rtgi_restir_gi.glsl"
 
-layout(std430, binding = 0) readonly buffer RtgiRestirGiBuffer {
+layout(std430, binding = 0) buffer RtgiRestirGiBuffer {
     RestirGiSlot gi_reservoirs[];
 };
 
@@ -67,9 +68,18 @@ RestirGiSlot load_gi_reservoir(ivec2 texel, ivec2 target_res, int bank) {
     }
     return RestirGiSlot(uvec4(0u), uvec4(0u));
 }
+
+void store_gi_reservoir(ivec2 texel, ivec2 target_res, int bank, RestirGiSlot slot) {
+    uint stride = uint(target_res.x) * uint(target_res.y);
+    uint idx = uint(bank) * stride + uint(texel.y) * uint(target_res.x) + uint(texel.x);
+    if (idx < gi_reservoirs.length()) {
+        gi_reservoirs[idx] = slot;
+    }
+}
 #endif
 
-const int restir_spatial_max_neighbors = 3;
+const int restir_spatial_max_neighbors = 4;
+const int restir_di_spatial_max_neighbors = 3;
 
 uvec4 load_guide(ivec2 texel, bool even) {
     return even ? texelFetch(rtgi_guide_even_sampler, texel, 0)
@@ -125,6 +135,9 @@ void main() {
     bool even = bank == 0;
     uvec4 guide = load_guide(texel, even);
     if ((guide.w & rtgi_guide_covered) == 0u || (guide.w & rtgi_guide_raw_valid) == 0u) {
+#ifdef RTGI_RESTIR_GI
+        store_gi_reservoir(texel, target_res, restir_gi_history_bank, RestirGiSlot(uvec4(0u), uvec4(0u)));
+#endif
         store_debug_emitter(texel, vec4(0.0));
         return;
     }
@@ -152,6 +165,9 @@ void main() {
 
     vec3 center_view;
     if (!rtgi_view_from_guide(guide, grid.full_size, jitter, gbufferProjection, center_view)) {
+#ifdef RTGI_RESTIR_GI
+        store_gi_reservoir(texel, target_res, restir_gi_history_bank, RestirGiSlot(uvec4(0u), uvec4(0u)));
+#endif
         bool dummy_ok;
         finalize_raw(texel, raw, vec3(0.0), true, dummy_ok);
         store_debug_emitter(texel, vec4(0.0));
@@ -168,12 +184,12 @@ void main() {
     vec3 view_normal = mat3(gbufferModelView) * world_normal;
     float footprint = rtgi_view_footprint(-center_view.z, grid.gi_active, gbufferProjection);
     float grazing = max(abs(dot(view_normal, normalize(center_view))), 0.02);
-    float max_chord = min(4.0, 0.25 + 4.0 * footprint / grazing);
+    float max_chord = min(4.5, 0.25 + 4.5 * footprint / grazing);
 
 #if RTGI_RESOLUTION == 0
     const float search_radius = 6.0;
 #elif RTGI_RESOLUTION == 2
-    const float search_radius = 14.0;
+    const float search_radius = 16.0;
 #else
     const float search_radius = 10.0;
 #endif
@@ -182,16 +198,24 @@ void main() {
     uint seed = lowbias32(pixel_key ^ 0x517cc1b7u) ^ lowbias32(uint(frameCounter) + 0x94d049bbu);
 
     // Shared geometry-validated spatial neighbor search for ReSTIR DI and GI.
+    // Offset STBN tile from deferred1_a so spatial disk rotation is decorrelated
+    // from primary ray directions while shaping spatial reuse noise into blue noise.
+    // Radial stratification puts closer taps first (consumed by DI + GI) and wider
+    // taps later (propagating GI bounce hits rapidly across dim walls).
+    vec4 stbn_sp = sample_stbn(texel + ivec2(17, 31), frameCounter);
     ivec2 neighbor_tap[restir_spatial_max_neighbors];
     vec3 neighbor_origin[restir_spatial_max_neighbors];
     vec3 neighbor_normal[restir_spatial_max_neighbors];
     int valid_neighbors = 0;
 
-    float base_angle = random_dimension(seed, 0) * tau;
+    float base_angle = stbn_sp.b * tau;
     for (int k = 0; k < restir_spatial_max_neighbors; ++k) {
         float angle = base_angle + (tau / float(restir_spatial_max_neighbors))
             * (float(k) + random_dimension(seed, 1 + 2 * k));
-        float rad = search_radius * sqrt(0.15 + 0.85 * random_dimension(seed, 2 + 2 * k));
+        float rad_u = k == 0 ? stbn_sp.a : random_dimension(seed, 2 + 2 * k);
+        float rad = search_radius * sqrt(
+            (float(k) + 0.15 + 0.85 * rad_u) / float(restir_spatial_max_neighbors)
+        );
         ivec2 tap = texel + ivec2(round(rad * vec2(cos(angle), sin(angle))));
         if (tap == texel || !rtgi_in_bounds(tap, grid.gi_active)) {
             continue;
@@ -240,11 +264,12 @@ void main() {
             }
         }
 
-        RestirReservoir di_nbr[restir_spatial_max_neighbors];
-        int di_nbr_idx[restir_spatial_max_neighbors];
+        RestirReservoir di_nbr[restir_di_spatial_max_neighbors];
+        int di_nbr_idx[restir_di_spatial_max_neighbors];
         int di_count = 0;
         float m_neighbors = 0.0;
-        for (int i = 0; i < valid_neighbors; ++i) {
+        int di_limit = min(valid_neighbors, restir_di_spatial_max_neighbors);
+        for (int i = 0; i < di_limit; ++i) {
             RestirReservoir nr = restir_unpack(load_reservoir(neighbor_tap[i], even));
             if (nr.count > 0u) {
                 di_nbr[di_count] = nr;
@@ -373,7 +398,9 @@ void main() {
 
 #ifdef RTGI_RESTIR_GI
     {
-        RestirGiReservoir center_gi = restir_gi_unpack(load_gi_reservoir(texel, target_res, bank));
+        RestirGiReservoir center_gi = restir_gi_unpack(
+            load_gi_reservoir(texel, target_res, restir_gi_temporal_bank)
+        );
         if (center_gi.sample_data.kind != restir_gi_kind_empty) {
             float live_p = restir_gi_target_pdf(origin, world_normal, center_gi.sample_data);
             if (live_p > 0.0) {
@@ -391,7 +418,7 @@ void main() {
         float m_gi_neighbors = 0.0;
         for (int i = 0; i < valid_neighbors; ++i) {
             RestirGiReservoir nr = restir_gi_unpack(
-                load_gi_reservoir(neighbor_tap[i], target_res, bank)
+                load_gi_reservoir(neighbor_tap[i], target_res, restir_gi_temporal_bank)
             );
             if (nr.count > 0u) {
                 gi_nbr[gi_count] = nr;
@@ -425,7 +452,8 @@ void main() {
                 if (center_valid) {
                     float p_i_of_c = 0.0;
                     float jac_ci = restir_gi_shift_jacobian(
-                        origin, neighbor_origin[n_idx], center_gi.sample_data
+                        origin, world_normal, neighbor_origin[n_idx], neighbor_normal[n_idx],
+                        center_gi.sample_data
                     );
                     if (jac_ci > 0.0) {
                         float p_i_raw = restir_gi_target_pdf(
@@ -447,7 +475,8 @@ void main() {
                 if (nr.sample_data.kind != restir_gi_kind_empty
                     && nr.weight > 0.0 && nr.target_pdf > 0.0) {
                     float jac_ic = restir_gi_shift_jacobian(
-                        neighbor_origin[n_idx], origin, nr.sample_data
+                        neighbor_origin[n_idx], neighbor_normal[n_idx], origin, world_normal,
+                        nr.sample_data
                     );
                     if (jac_ic > 0.0) {
                         float p_c_raw = restir_gi_target_pdf(origin, world_normal, nr.sample_data);
@@ -475,7 +504,7 @@ void main() {
 
             if (center_valid) {
                 float w_c = m_c * center_gi.target_pdf * center_gi.weight;
-                float u_pick = random_dimension(gi_seed, 4);
+                float u_pick = random_dimension(gi_seed, restir_spatial_max_neighbors);
                 if (restir_gi_update(combined_gi, center_gi.sample_data, w_c,
                                      center_gi.target_pdf, u_pick)) {
                     gi_from_center = true;
@@ -503,8 +532,18 @@ void main() {
             }
             if (visible) {
                 indirect_gi = restir_gi_shade(origin, world_normal, combined_gi, gi_winning_trans);
+            } else {
+                combined_gi.sample_data = restir_gi_empty_sample();
+                combined_gi.weight = 0.0;
+                combined_gi.target_pdf = 0.0;
             }
         }
+        // Feed spatially-reused GI reservoir back to persistent bank 0 (race-free:
+        // reads came solely from transient bank 1) so rare doorway/bounce hits
+        // propagate across dim walls within a few frames.
+        RestirGiReservoir feedback_gi = combined_gi;
+        feedback_gi.count = min(feedback_gi.count, restir_gi_feedback_cap);
+        store_gi_reservoir(texel, target_res, restir_gi_history_bank, restir_gi_pack(feedback_gi));
         bool ok_gi = rtgi_finite(vec4(indirect_gi, 0.0))
             && all(greaterThanEqual(indirect_gi, vec3(0.0)));
         valid_added = valid_added && ok_gi;
