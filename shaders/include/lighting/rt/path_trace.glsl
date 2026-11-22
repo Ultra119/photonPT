@@ -157,7 +157,7 @@ PathTraceSample evaluate_path_trace(
             if (light_pdf > 0.0) {
                 float bsdf_pdf = max0(dot(normal, direction)) * rcp_pi;
                 float mis_rays = b == 0 ? float(RTGI_RAY_COUNT) : 1.0;
-                emission *= power_mis(mis_rays * bsdf_pdf, light_pdf);
+                emission *= power_mis(mis_rays * bsdf_pdf, emitter_nee_mis_bias * light_pdf);
             }
         }
         if (b >= 1 && max_of(emission) > 0.0 && emitter_index_member(hit.payload)

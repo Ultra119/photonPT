@@ -163,9 +163,38 @@ vec3 emitter_exposed_sides(
     return sides;
 }
 
-float emitter_solid_angle_pdf(float pmf, float area, float distance_sq, float cosine) {
-    return cosine > 0.0 && area > 0.0 ? pmf * distance_sq / (area * cosine) : 0.0;
+float emitter_solid_angle_pdf(float pmf, float area_pdf_inv, float distance_sq, float cosine) {
+    return cosine > 0.0 && area_pdf_inv > 0.0 ? pmf * distance_sq / (area_pdf_inv * cosine) : 0.0;
 }
+
+// Projected-area face weights for exposed emitter sides. Weighting each facing
+// side by (face_area * projected_cosine) eliminates step discontinuities across
+// block planes (x = cx, y = cy, z = cz) where a newly visible side face starts
+// at cos_y ~ 0, removing both grazing wasted samples and 1-block variance bands.
+vec3 emitter_face_weights(EmitterBox box, vec3 sides, vec3 rel_origin) {
+    vec3 areas = emitter_face_areas(box) * abs(sides);
+    vec3 center = 0.5 * (box.lo + box.hi);
+    vec3 weights = vec3(0.0);
+    for (int axis = 0; axis < 3; ++axis) {
+        if (areas[axis] > 0.0) {
+            vec3 fc = center;
+            fc[axis] = sides[axis] > 0.0 ? box.hi[axis] : box.lo[axis];
+            vec3 to_recv = rel_origin - fc;
+            float len_sq = dot(to_recv, to_recv);
+            float proj_cos = len_sq > 1e-8
+                ? max(abs(to_recv[axis]) * inversesqrt(len_sq), 1e-3)
+                : 1.0;
+            weights[axis] = areas[axis] * proj_cos;
+        }
+    }
+    return weights;
+}
+
+// Prefer NEE/ReSTIR over cosine BSDF hits at normal distances so compact high-
+// radiance emitters (e.g. torches, nearby shroomlights) do not inject BSDF
+// sparkles, while preserving BSDF protection near 1/r^2 contact singularities.
+// Identical factor on both NEE and BSDF sides keeps w_nee + w_bsdf == 1 exactly.
+const float emitter_nee_mis_bias = 6.0;
 
 float power_mis(float a, float b) {
     float scale = max(a, b);
@@ -181,8 +210,16 @@ float primary_emitter_pdf(usampler3D grid, VoxelHit hit, vec3 origin, vec3 norma
     uint block_id = voxel_block_id(hit.payload);
     EmitterBox box = voxel_emitter_box(block_id);
     vec3 sides = emitter_exposed_sides(grid, hit.cell, block_id, box, origin);
-    float area = dot(emitter_face_areas(box), abs(sides));
-    return emitter_solid_angle_pdf(selected.pmf, area, sqr(hit.distance), dot(hit.normal, -direction));
+    vec3 areas = emitter_face_areas(box) * abs(sides);
+    vec3 weights = emitter_face_weights(box, sides, origin - vec3(hit.cell));
+    float total_w = dot(weights, vec3(1.0));
+    int hit_axis = abs(hit.normal.x) > 0.5 ? 0 : (abs(hit.normal.y) > 0.5 ? 1 : 2);
+    if (total_w <= 0.0 || weights[hit_axis] <= 0.0 || areas[hit_axis] <= 0.0) {
+        return 0.0;
+    }
+    // Effective 1 / p_A for the hit face: areas[axis] * total_w / weights[axis].
+    float inv_p_area = areas[hit_axis] * (total_w / weights[hit_axis]);
+    return emitter_solid_angle_pdf(selected.pmf, inv_p_area, sqr(hit.distance), dot(hit.normal, -direction));
 }
 
 // RGB is the light-sampling contribution. A records no candidate,
@@ -201,15 +238,16 @@ vec4 sample_direct_emitter_ex(
     EmitterBox box = voxel_emitter_box(block_id);
     vec3 sides = emitter_exposed_sides(grid, selected.cell, block_id, box, origin);
     vec3 areas = emitter_face_areas(box) * abs(sides);
-    float area = dot(areas, vec3(1.0));
-    if (area <= 0.0) {
+    vec3 weights = emitter_face_weights(box, sides, origin - vec3(selected.cell));
+    float total_w = dot(weights, vec3(1.0));
+    if (total_w <= 0.0) {
         return rejected;
     }
 
-    float face = random_dimension(seed, EMITTER_ROOT_LEVEL + 1) * area;
-    int axis = face < areas.x ? 0 : (face < areas.x + areas.y ? 1 : 2);
-    if (areas[axis] == 0.0) {
-        axis = areas.y > 0.0 ? 1 : 0;
+    float face = random_dimension(seed, EMITTER_ROOT_LEVEL + 1) * total_w;
+    int axis = face < weights.x ? 0 : (face < weights.x + weights.y ? 1 : 2);
+    if (weights[axis] == 0.0) {
+        axis = weights.y > 0.0 ? 1 : 0;
     }
     int u = (axis + 1) % 3;
     int v = (axis + 2) % 3;
@@ -227,7 +265,8 @@ vec4 sample_direct_emitter_ex(
     }
     float distance_to_light = sqrt(distance_sq);
     vec3 direction = delta / distance_to_light;
-    float light_pdf = emitter_solid_angle_pdf(selected.pmf, area, distance_sq, dot(light_normal, -direction));
+    float inv_p_area = areas[axis] * (total_w / weights[axis]);
+    float light_pdf = emitter_solid_angle_pdf(selected.pmf, inv_p_area, distance_sq, dot(light_normal, -direction));
     float bsdf_pdf = max0(dot(normal, direction)) * rcp_pi;
     if (light_pdf <= 0.0 || bsdf_pdf <= 0.0) {
         return rejected;
@@ -242,7 +281,7 @@ vec4 sample_direct_emitter_ex(
         return rejected;
     }
 
-    float mis = power_mis(light_pdf, bsdf_ray_count * bsdf_pdf);
+    float mis = power_mis(emitter_nee_mis_bias * light_pdf, bsdf_ray_count * bsdf_pdf);
     vec3 radiance = get_voxel_emission(block_id) * hit.transmittance * ((bsdf_pdf / light_pdf) * mis);
     sampled_cell = selected.cell;
     return vec4(radiance, 2.0);

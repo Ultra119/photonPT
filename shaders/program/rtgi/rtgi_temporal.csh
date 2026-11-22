@@ -307,16 +307,25 @@ void main() {
         }
         if (nbr_count >= 4) {
             // Compare matched 3x3 same-surface raw vs previous means so steep
-            // 1/r^2 peaks have zero curvature bias while independent pixel noise
-            // drops by sqrt(N), cleanly separating lighting steps from sparse noise.
+            // 1/r^2 peaks have zero curvature bias. Under ReSTIR spatial/temporal
+            // reuse, neighboring pixels share correlated reservoirs, so use a
+            // conservative effective spatial count and 5-frame persistence gate
+            // to prevent stationary false adaptive resets (yellow dots in Reset).
             float nbr_delta = nbr_raw - nbr_prev;
             float frame_sigma = sqrt(history.stats.x / max(1.0 - history.stats.y, 1e-5));
-            float nbr_sigma = frame_sigma * inversesqrt(float(nbr_count));
-            float threshold = max(0.0004, max(0.2 * max(nbr_raw, nbr_prev), 3.0 * nbr_sigma));
+#if (defined RTGI_EMITTER_SAMPLING && defined RTGI_RESTIR_DI) || defined RTGI_RESTIR_GI
+            float eff_nbr = min(float(nbr_count), 2.5);
+            const float evidence_limit = 5.0;
+#else
+            float eff_nbr = float(nbr_count);
+            const float evidence_limit = 3.0;
+#endif
+            float nbr_sigma = frame_sigma * inversesqrt(eff_nbr);
+            float threshold = max(0.001, max(0.2 * max(nbr_raw, nbr_prev), 3.0 * nbr_sigma));
             if (abs(nbr_delta) > threshold) {
                 float direction = sign(nbr_delta);
-                evidence = clamp(history.stats.w * direction + 1.0, 1.0, 3.0) * direction;
-                if (abs(evidence) >= 3.0) {
+                evidence = clamp(history.stats.w * direction + 1.0, 1.0, evidence_limit) * direction;
+                if (abs(evidence) >= evidence_limit) {
                     alpha = max(alpha, 0.6 * RTGI_ADAPT_STRENGTH);
                     age = min(age, max(1.0 / alpha, 6.0));
                     reason = rtgi_reset_adaptive;

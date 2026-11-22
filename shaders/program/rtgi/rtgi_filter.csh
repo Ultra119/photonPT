@@ -112,13 +112,13 @@ void main() {
     bool missing_center = center.a < 0.0;
     float center_y = missing_center ? 0.0 : dot(center.rgb, luminance_weights);
 #if RTGI_FILTER_PASS == 1
-    bool copy_through = RTGI_SPATIAL_FALLBACK == 0 || (!missing_center && age >= 3.0);
+    bool copy_through = RTGI_SPATIAL_FALLBACK == 0 || (!missing_center && age >= 6.0);
     if (copy_through) {
         imageStore(filter_output, texel, center);
         return;
     }
 #else
-    bool copy_through = center.a <= 0.001 + 0.02 * center_y;
+    bool copy_through = center.a <= 0.0001 + 0.015 * center_y;
     if (missing_center || copy_through) {
         imageStore(filter_output, texel, center);
         return;
@@ -139,7 +139,7 @@ void main() {
     uint material = rtgi_guide_material(guide);
     vec3 normal = mat3(gbufferModelView) * rtgi_guide_normal(guide);
     float footprint = rtgi_view_footprint(-center_view.z, grid.gi_active, gbufferProjection);
-    float luma_floor = 0.004 + 0.06 * center_y;
+    float luma_floor = 0.0015 + 0.06 * center_y;
 
 #if RTGI_FILTER_PASS == 2 || RTGI_FILTER_PASS == 3
     #if RTGI_FILTER_PASS == 2
@@ -151,7 +151,7 @@ void main() {
     const float texel_cap = 4.0;
     const mat2 rotation = mat2(-0.5, 0.8660254, -0.8660254, -0.5);
     #endif
-    float relative_se = center.a / (center_y + 0.04);
+    float relative_se = center.a / (center_y + 0.004);
     float radius = min(world_cap, texel_cap * footprint)
         * mix(0.35, 1.0, smoothstep(0.03, 0.35, relative_se));
     float max_chord = min(world_cap, radius + footprint);
@@ -248,7 +248,9 @@ void main() {
     if (missing_center) {
         result.a = max(result.a, 0.25 * dot(result.rgb, luminance_weights) + 0.05);
     } else {
-        result.a = max(result.a, sqrt(local_error / (local_weight * age)));
+        float young_prior = (0.20 * dot(result.rgb, luminance_weights) + 0.002)
+            * inversesqrt(max(age, 1.0));
+        result.a = max(result.a, max(sqrt(local_error / (local_weight * age)), young_prior));
     }
 #endif
     if (!rtgi_finite(result)) {

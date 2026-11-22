@@ -255,15 +255,16 @@ RestirReservoir restir_sample_initial(usampler3D grid, vec3 origin, vec3 normal,
         EmitterBox box = voxel_emitter_box(block_id);
         vec3 sides = emitter_exposed_sides(grid, selected.cell, block_id, box, origin);
         vec3 areas = emitter_face_areas(box) * abs(sides);
-        float area = dot(areas, vec3(1.0));
-        if (area <= 0.0) {
+        vec3 weights = emitter_face_weights(box, sides, origin - vec3(selected.cell));
+        float total_w = dot(weights, vec3(1.0));
+        if (total_w <= 0.0) {
             continue;
         }
 
-        float face_u = random_dimension(cseed, EMITTER_ROOT_LEVEL + 1) * area;
-        int axis = face_u < areas.x ? 0 : (face_u < areas.x + areas.y ? 1 : 2);
-        if (areas[axis] == 0.0) {
-            axis = areas.y > 0.0 ? 1 : 0;
+        float face_u = random_dimension(cseed, EMITTER_ROOT_LEVEL + 1) * total_w;
+        int axis = face_u < weights.x ? 0 : (face_u < weights.x + weights.y ? 1 : 2);
+        if (weights[axis] == 0.0) {
+            axis = weights.y > 0.0 ? 1 : 0;
         }
         // Pre-quantize strictly inside (0, 1) on the 10-bit packing lattice so
         // deferred1_b evaluates the exact same face interior point with no
@@ -283,7 +284,7 @@ RestirReservoir restir_sample_initial(usampler3D grid, vec3 origin, vec3 normal,
             continue;
         }
         float p_hat = restir_target_pdf_from_geom(emission, cos_x, cos_y, dist_sq);
-        float p_area = selected.pmf / area;
+        float p_area = selected.pmf * (weights[axis] / total_w) / areas[axis];
         if (p_hat <= 0.0 || p_area <= 0.0) {
             continue;
         }
@@ -333,13 +334,20 @@ vec4 restir_shade_sample(
     EmitterSelection selected = select_voxel_emitter(origin, normal, 0u, r.sample_data.cell);
     EmitterBox box = voxel_emitter_box(block_id);
     vec3 sides = emitter_exposed_sides(grid, r.sample_data.cell, block_id, box, origin);
-    float area = dot(emitter_face_areas(box), abs(sides));
-    float light_pdf = emitter_solid_angle_pdf(selected.pmf, area, distance_sq, cos_y);
+    vec3 areas = emitter_face_areas(box) * abs(sides);
+    vec3 weights = emitter_face_weights(box, sides, origin - vec3(r.sample_data.cell));
+    float total_w = dot(weights, vec3(1.0));
+    int hit_axis = int(r.sample_data.face >> 1u);
+    if (total_w <= 0.0 || weights[hit_axis] <= 0.0 || areas[hit_axis] <= 0.0) {
+        return vec4(0.0, 0.0, 0.0, 1.0);
+    }
+    float inv_p_area = areas[hit_axis] * (total_w / weights[hit_axis]);
+    float light_pdf = emitter_solid_angle_pdf(selected.pmf, inv_p_area, distance_sq, cos_y);
     float bsdf_pdf = cos_x * rcp_pi;
     if (light_pdf <= 0.0 || bsdf_pdf <= 0.0) {
         return vec4(0.0, 0.0, 0.0, 1.0);
     }
-    float mis = power_mis(light_pdf, float(RTGI_RAY_COUNT) * bsdf_pdf);
+    float mis = power_mis(emitter_nee_mis_bias * light_pdf, float(RTGI_RAY_COUNT) * bsdf_pdf);
     vec3 radiance = emission * transmittance
         * ((cos_x * cos_y * rcp_pi / distance_sq) * mis * r.weight);
     if (!rtgi_finite(vec4(radiance, 0.0)) || any(lessThan(radiance, vec3(0.0)))) {
