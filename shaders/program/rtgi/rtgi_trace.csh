@@ -78,6 +78,9 @@ uniform float eye_skylight;
 
 #include "/include/utility/stbn.glsl"
 #include "/include/lighting/rt/rtgi_opaque_depth.glsl"
+#ifdef RTGI_EMITTER_SAMPLING
+#define VOXEL_DDA_USE_OCCUPANCY
+#endif
 #ifdef RTGI_WORLD_CACHE
 #define RTGI_WORLD_CACHE_READONLY
 #include "/include/lighting/rt/rtgi_world_cache.glsl"
@@ -246,6 +249,7 @@ RestirReservoir restir_temporal_reuse(
     // validate live emitter membership + current visibility.
     float p0_of_1 = 0.0;
     bool prev_valid = false;
+    bool prev_tinted = false;
     if (prev.sample_data.valid && prev.weight > 0.0 && prev.target_pdf > 0.0) {
         prev.sample_data.cell -= grid_shift;
         if (is_inside_voxel_grid(prev.sample_data.cell)
@@ -264,6 +268,7 @@ RestirReservoir restir_temporal_reuse(
                                         lnorm, delta, dist_sq, trans)) {
                 p0_of_1 = restir_target_pdf_from_geom(em, cx, cy, dist_sq);
                 prev_valid = p0_of_1 > 0.0;
+                prev_tinted = any(lessThan(trans, vec3(0.999)));
             }
         }
     }
@@ -279,14 +284,18 @@ RestirReservoir restir_temporal_reuse(
                                           initial.sample_data);
         float m0 = (m0_count * p0_of_0) / max(m0_count * p0_of_0 + m1_count * p1_of_0, 1e-20);
         float w0 = m0 * p0_of_0 * initial.weight;
-        restir_update(combined, initial.sample_data, w0, p0_of_0, random_dimension(seed, 0));
+        if (restir_update(combined, initial.sample_data, w0, p0_of_0, random_dimension(seed, 0))) {
+            combined.tinted = initial.tinted;
+        }
     }
 
     if (prev_valid) {
         float p1_of_1 = prev.target_pdf;
         float m1 = (m1_count * p1_of_1) / max(m1_count * p1_of_1 + m0_count * p0_of_1, 1e-20);
         float w1 = m1 * p0_of_1 * prev.weight;
-        restir_update(combined, prev.sample_data, w1, p0_of_1, random_dimension(seed, 1));
+        if (restir_update(combined, prev.sample_data, w1, p0_of_1, random_dimension(seed, 1))) {
+            combined.tinted = prev_tinted;
+        }
     }
 
     combined.count = min(initial.count + prev.count, restir_temporal_cap);
@@ -319,6 +328,7 @@ RestirGiReservoir restir_gi_temporal_reuse(
     ivec3 grid_shift = camera_grid_shift();
     float p0_of_1 = 0.0;
     bool prev_valid = false;
+    bool prev_tinted = false;
     if (prev.sample_data.kind != restir_gi_kind_empty && prev.weight > 0.0 && prev.target_pdf > 0.0) {
         if (prev.sample_data.emitter_cell.x >= 0) {
             prev.sample_data.emitter_cell -= grid_shift;
@@ -341,10 +351,11 @@ RestirGiReservoir restir_gi_temporal_reuse(
             && restir_gi_temporal_eligible(origin, world_normal, prev.sample_data)) {
             p0_of_1 = restir_gi_target_pdf(origin, world_normal, prev.sample_data);
             if (p0_of_1 > 0.0) {
-                vec3 dummy_trans;
+                vec3 prev_trans;
                 prev_valid = restir_gi_trace_visibility(
-                    voxel_sampler, origin, prev.sample_data, dummy_trans
+                    voxel_sampler, origin, prev.sample_data, prev_trans
                 );
+                prev_tinted = prev_valid && any(lessThan(prev_trans, vec3(0.999)));
             }
         }
     }
@@ -361,14 +372,18 @@ RestirGiReservoir restir_gi_temporal_reuse(
             : 0.0;
         float m0 = (m0_count * p0_of_0) / max(m0_count * p0_of_0 + m1_count * p1_of_0, 1e-20);
         float w0 = m0 * p0_of_0 * initial.weight;
-        restir_gi_update(combined, initial.sample_data, w0, p0_of_0, random_dimension(seed, 0));
+        if (restir_gi_update(combined, initial.sample_data, w0, p0_of_0, random_dimension(seed, 0))) {
+            combined.tinted = initial.tinted;
+        }
     }
 
     if (prev_valid) {
         float p1_of_1 = prev.target_pdf;
         float m1 = (m1_count * p1_of_1) / max(m1_count * p1_of_1 + m0_count * p0_of_1, 1e-20);
         float w1 = m1 * p0_of_1 * prev.weight;
-        restir_gi_update(combined, prev.sample_data, w1, p0_of_1, random_dimension(seed, 1));
+        if (restir_gi_update(combined, prev.sample_data, w1, p0_of_1, random_dimension(seed, 1))) {
+            combined.tinted = prev_tinted;
+        }
     }
 
     combined.count = min(initial.count + prev.count, restir_gi_temporal_cap);
@@ -553,9 +568,11 @@ void main() {
                 // Primary ray drawn from cosine hemisphere p(w) = cos_x / pi,
                 // so target_pdf / p(w) == luma(L_o) identically.
                 float w_init = dot(gi_s.radiance, luminance_weights);
-                restir_gi_update(
-                    initial_gi, gi_s, w_init, p_hat, random_dimension(ray_seed, 11)
-                );
+                if (restir_gi_update(
+                        initial_gi, gi_s, w_init, p_hat, random_dimension(ray_seed, 11)
+                    )) {
+                    initial_gi.tinted = any(lessThan(pt.primary_transmittance, vec3(0.999)));
+                }
             }
         }
 #else

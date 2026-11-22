@@ -15,18 +15,22 @@ bool has_voxel_emitters() {
     return load_emitter_word(emitter_level_offset(EMITTER_ROOT_LEVEL)) > 0u;
 }
 
-float emitter_node_weight(ivec3 node, int level, uint count, vec3 origin, vec3 normal) {
-    if (count == 0u) {
-        return 0.0;
-    }
-    float side = float(8 << level);
+bool emitter_node_reachable(
+    ivec3 node, int level, vec3 origin, vec3 normal, float max_distance,
+    out float distance_sq, out float side
+) {
+    side = float(8 << level);
     vec3 lo = vec3(node) * side;
     vec3 hi = min(lo + side, rt_voxel_size_f);
     vec3 delta = origin - clamp(origin, lo, hi);
-    float distance_sq = dot(delta, delta);
-    float reach = rt_primary_max_distance + voxel_endpoint_epsilon;
+    distance_sq = dot(delta, delta);
+    float reach = max_distance + voxel_endpoint_epsilon;
     vec3 furthest = mix(lo, hi, greaterThanEqual(normal, vec3(0.0)));
-    if (distance_sq > sqr(reach) || dot(furthest - origin, normal) < -voxel_endpoint_epsilon) {
+    return distance_sq <= sqr(reach) && dot(furthest - origin, normal) >= -voxel_endpoint_epsilon;
+}
+
+float emitter_node_weight(uint count, float distance_sq, float side) {
+    if (count == 0u) {
         return 0.0;
     }
     // A broad internal node gets a finite representative distance even when
@@ -41,7 +45,9 @@ struct EmitterSelection {
 
 // A target cell follows its known branch to compute the reverse probability.
 // A negative target draws from the same per-node categorical distribution.
-EmitterSelection select_voxel_emitter(vec3 origin, vec3 normal, uint seed, ivec3 target) {
+EmitterSelection select_voxel_emitter(
+    vec3 origin, vec3 normal, uint seed, ivec3 target, float max_distance
+) {
     EmitterSelection result = EmitterSelection(ivec3(-1), 0.0);
     bool query = target.x >= 0;
     ivec3 leaf = ivec3(0);
@@ -57,8 +63,11 @@ EmitterSelection select_voxel_emitter(vec3 origin, vec3 normal, uint seed, ivec3
             ivec3 child = first + ivec3(i & 1, (i >> 1) & 1, i >> 2);
             float weight = 0.0;
             if (all(lessThan(child, size))) {
-                uint count = load_emitter_word(offset + emitter_flatten(child, size));
-                weight = emitter_node_weight(child, level, count, origin, normal);
+                float distance_sq, side;
+                if (emitter_node_reachable(child, level, origin, normal, max_distance, distance_sq, side)) {
+                    uint count = load_emitter_word(offset + emitter_flatten(child, size));
+                    weight = emitter_node_weight(count, distance_sq, side);
+                }
             }
             weights[i] = weight;
             total += weight;
@@ -119,6 +128,10 @@ EmitterSelection select_voxel_emitter(vec3 origin, vec3 normal, uint seed, ivec3
         rank -= word_count;
     }
     return result;
+}
+
+EmitterSelection select_voxel_emitter(vec3 origin, vec3 normal, uint seed, ivec3 target) {
+    return select_voxel_emitter(origin, normal, seed, target, rt_primary_max_distance);
 }
 
 vec3 emitter_facing_sides(EmitterBox box, vec3 origin) {
@@ -202,11 +215,13 @@ float power_mis(float a, float b) {
     return sqr(p.x) / dot(p, p);
 }
 
-float primary_emitter_pdf(usampler3D grid, VoxelHit hit, vec3 origin, vec3 normal, vec3 direction) {
+float primary_emitter_pdf(
+    usampler3D grid, VoxelHit hit, vec3 origin, vec3 normal, vec3 direction, float max_distance
+) {
     if (!emitter_index_member(hit.payload)) {
         return 0.0;
     }
-    EmitterSelection selected = select_voxel_emitter(origin, normal, 0u, hit.cell);
+    EmitterSelection selected = select_voxel_emitter(origin, normal, 0u, hit.cell, max_distance);
     uint block_id = voxel_block_id(hit.payload);
     EmitterBox box = voxel_emitter_box(block_id);
     vec3 sides = emitter_exposed_sides(grid, hit.cell, block_id, box, origin);
@@ -222,6 +237,10 @@ float primary_emitter_pdf(usampler3D grid, VoxelHit hit, vec3 origin, vec3 norma
     return emitter_solid_angle_pdf(selected.pmf, inv_p_area, sqr(hit.distance), dot(hit.normal, -direction));
 }
 
+float primary_emitter_pdf(usampler3D grid, VoxelHit hit, vec3 origin, vec3 normal, vec3 direction) {
+    return primary_emitter_pdf(grid, hit, origin, normal, direction, rt_primary_max_distance);
+}
+
 // RGB is the light-sampling contribution. A records no candidate,
 // rejected candidate or a visible sample as 0, 1 or 2.
 vec4 sample_direct_emitter_ex(
@@ -229,7 +248,7 @@ vec4 sample_direct_emitter_ex(
     float bsdf_ray_count, float max_distance, out ivec3 sampled_cell
 ) {
     sampled_cell = ivec3(-1);
-    EmitterSelection selected = select_voxel_emitter(origin, normal, seed, ivec3(-1));
+    EmitterSelection selected = select_voxel_emitter(origin, normal, seed, ivec3(-1), max_distance);
     if (selected.pmf <= 0.0) {
         return vec4(0.0);
     }

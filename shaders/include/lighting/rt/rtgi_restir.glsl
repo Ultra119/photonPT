@@ -22,6 +22,7 @@ struct RestirReservoir {
     float weight;
     float target_pdf;
     uint count;
+    bool tinted;
 };
 
 RestirSample restir_empty_sample() {
@@ -29,7 +30,7 @@ RestirSample restir_empty_sample() {
 }
 
 RestirReservoir restir_empty_reservoir() {
-    return RestirReservoir(restir_empty_sample(), 0.0, 0.0, 0.0, 0u);
+    return RestirReservoir(restir_empty_sample(), 0.0, 0.0, 0.0, 0u, false);
 }
 
 uint restir_encode_face(int axis, float side) {
@@ -43,11 +44,11 @@ void restir_decode_face(uint face, out int axis, out float side) {
 
 // Pack reservoir into RGBA32UI (128 bits):
 //   R: cell.x (10b) | cell.y (8b) | cell.z (10b) | face (3b) | valid (1b)
-//   G: u (10b) | v (10b) | M (12b)
+//   G: u (10b) | v (10b) | M (11b) | tinted (1b)
 //   B: floatBitsToUint(W)
 //   A: floatBitsToUint(target_pdf)
 uvec4 restir_pack(RestirReservoir r) {
-    uint count_packed = min(r.count, 4095u);
+    uint count_packed = min(r.count, 2047u);
     bool ok = r.sample_data.valid && r.sample_data.face < 6u && count_packed > 0u
         && is_inside_voxel_grid(r.sample_data.cell)
         && rtgi_finite(vec4(r.weight, r.target_pdf, r.sample_data.uv))
@@ -61,13 +62,13 @@ uvec4 restir_pack(RestirReservoir r) {
     uint r0 = cx | (cy << 10u) | (cz << 18u) | ((r.sample_data.face & 7u) << 28u) | (1u << 31u);
     uint uq = uint(round(clamp01(r.sample_data.uv.x) * 1023.0)) & 1023u;
     uint vq = uint(round(clamp01(r.sample_data.uv.y) * 1023.0)) & 1023u;
-    uint r1 = uq | (vq << 10u) | (count_packed << 20u);
+    uint r1 = uq | (vq << 10u) | (count_packed << 20u) | (r.tinted ? (1u << 31u) : 0u);
     return uvec4(r0, r1, floatBitsToUint(r.weight), floatBitsToUint(r.target_pdf));
 }
 
 RestirReservoir restir_unpack(uvec4 packed) {
     RestirReservoir r = restir_empty_reservoir();
-    r.count = (packed.y >> 20u) & 4095u;
+    r.count = (packed.y >> 20u) & 2047u;
     if ((packed.x >> 31u) == 0u || r.count == 0u) {
         return r;
     }
@@ -84,6 +85,7 @@ RestirReservoir restir_unpack(uvec4 packed) {
         r.sample_data = RestirSample(cell, face, uv, true);
         r.weight = w;
         r.target_pdf = pdf;
+        r.tinted = (packed.y >> 31u) != 0u;
     }
     return r;
 }
@@ -245,7 +247,9 @@ RestirReservoir restir_sample_initial(usampler3D grid, vec3 origin, vec3 normal,
         uint cseed = lowbias32(seed ^ (uint(m + 1) * 0x9e3779b9u));
         EmitterSelection selected = select_voxel_emitter(origin, normal, cseed, ivec3(-1));
         if (selected.pmf <= 0.0) {
-            continue;
+            // The octree traversal weights depend only on (origin, normal);
+            // zero pmf means no reachable emitter exists in this hemisphere.
+            break;
         }
         uint payload = texelFetch(grid, selected.cell, 0).r;
         if (!emitter_index_member(payload)) {
@@ -276,13 +280,28 @@ RestirReservoir restir_sample_initial(usampler3D grid, vec3 origin, vec3 normal,
             selected.cell, restir_encode_face(axis, sides[axis]), suv, true
         );
 
-        uint dummy_id;
-        vec3 emission, lnorm, delta;
-        float dist_sq, cos_x, cos_y;
-        if (!restir_eval_geometry(grid, origin, normal, cand, dummy_id, emission, lnorm,
-                                  delta, dist_sq, cos_x, cos_y)) {
+        // Evaluate geometry directly from the already-fetched block_id and box
+        // instead of re-fetching voxel_grid inside restir_eval_geometry.
+        int u = (axis + 1) % 3;
+        int v = (axis + 2) % 3;
+        vec3 point = vec3(0.0);
+        point[axis] = sides[axis] > 0.0 ? box.hi[axis] : box.lo[axis];
+        point[u] = mix(box.lo[u], box.hi[u], suv.x);
+        point[v] = mix(box.lo[v], box.hi[v], suv.y);
+        vec3 lnorm = vec3(0.0);
+        lnorm[axis] = sides[axis];
+        vec3 delta = (vec3(selected.cell) - origin) + point;
+        float dist_sq = dot(delta, delta);
+        if (!(dist_sq > 0.0) || dist_sq >= sqr(rt_primary_max_distance)) {
             continue;
         }
+        vec3 dir = delta * inversesqrt(dist_sq);
+        float cos_x = dot(normal, dir);
+        float cos_y = dot(lnorm, -dir);
+        if (cos_x <= 0.0 || cos_y <= 0.0) {
+            continue;
+        }
+        vec3 emission = get_voxel_emission(block_id);
         float p_hat = restir_target_pdf_from_geom(emission, cos_x, cos_y, dist_sq);
         float p_area = selected.pmf * (weights[axis] / total_w) / areas[axis];
         if (p_hat <= 0.0 || p_area <= 0.0) {
@@ -303,33 +322,31 @@ RestirReservoir restir_sample_initial(usampler3D grid, vec3 origin, vec3 normal,
         if (restir_trace_visibility(grid, origin, r.sample_data, best_light_normal,
                                     best_delta, best_dist_sq, trans)) {
             r.weight = r.w_sum / (float(r.count) * r.target_pdf);
+            r.tinted = any(lessThan(trans, vec3(0.999)));
         } else {
             r.sample_data = restir_empty_sample();
             r.weight = 0.0;
             r.target_pdf = 0.0;
+            r.tinted = false;
         }
     } else {
         r.sample_data = restir_empty_sample();
         r.weight = 0.0;
         r.target_pdf = 0.0;
+        r.tinted = false;
     }
     return r;
 }
 
-// Shade a visibility-validated reservoir with power MIS against RTGI_RAY_COUNT BSDF rays.
+// Shade a visibility-validated reservoir with power MIS against RTGI_RAY_COUNT BSDF rays,
+// reusing precomputed geometry when available.
 // RGB is direct emitter radiance; A encodes 0 (no candidate), 1 (rejected), or 2 (visible).
-vec4 restir_shade_sample(
-    usampler3D grid, vec3 origin, vec3 normal, RestirReservoir r, vec3 transmittance
+vec4 restir_shade_sample_from_geom(
+    usampler3D grid, vec3 origin, vec3 normal, RestirReservoir r, vec3 transmittance,
+    uint block_id, vec3 emission, float distance_sq, float cos_x, float cos_y
 ) {
     if (!r.sample_data.valid || r.weight <= 0.0) {
         return vec4(0.0, 0.0, 0.0, r.count > 0u ? 1.0 : 0.0);
-    }
-    uint block_id;
-    vec3 emission, light_normal, delta;
-    float distance_sq, cos_x, cos_y;
-    if (!restir_eval_geometry(grid, origin, normal, r.sample_data, block_id, emission,
-                              light_normal, delta, distance_sq, cos_x, cos_y)) {
-        return vec4(0.0, 0.0, 0.0, 1.0);
     }
     EmitterSelection selected = select_voxel_emitter(origin, normal, 0u, r.sample_data.cell);
     EmitterBox box = voxel_emitter_box(block_id);
@@ -354,6 +371,24 @@ vec4 restir_shade_sample(
         return vec4(0.0, 0.0, 0.0, 1.0);
     }
     return vec4(radiance, 2.0);
+}
+
+vec4 restir_shade_sample(
+    usampler3D grid, vec3 origin, vec3 normal, RestirReservoir r, vec3 transmittance
+) {
+    if (!r.sample_data.valid || r.weight <= 0.0) {
+        return vec4(0.0, 0.0, 0.0, r.count > 0u ? 1.0 : 0.0);
+    }
+    uint block_id;
+    vec3 emission, light_normal, delta;
+    float distance_sq, cos_x, cos_y;
+    if (!restir_eval_geometry(grid, origin, normal, r.sample_data, block_id, emission,
+                              light_normal, delta, distance_sq, cos_x, cos_y)) {
+        return vec4(0.0, 0.0, 0.0, 1.0);
+    }
+    return restir_shade_sample_from_geom(
+        grid, origin, normal, r, transmittance, block_id, emission, distance_sq, cos_x, cos_y
+    );
 }
 
 #endif // INCLUDE_LIGHTING_RT_RTGI_RESTIR

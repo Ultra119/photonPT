@@ -40,7 +40,7 @@ const float restir_gi_temporal_min_cos = 0.08;
 // 32-byte std430 SSBO slot (2 banks = 64 bytes per GI pixel in bufferObject.0).
 //   w0.xyz: floatBitsToUint(pos_or_dir) (voxel-space hit pos or unit sky dir)
 //   w0.w  : packHalf2x16(rad.rg)
-//   w1.x  : rad.b (FP16 low 16b) | count (12b) | kind (2b) | reserved (2b)
+//   w1.x  : rad.b (FP16 low 16b) | count (12b) | kind (2b) | tinted (1b) | reserved (1b)
 //   w1.y  : floatBitsToUint(W)
 //   w1.z  : floatBitsToUint(target_pdf)
 //   w1.w  : emitter_cell (10b x | 8b y | 10b z) | normal_face (3b) | has_emitter (1b)
@@ -63,6 +63,7 @@ struct RestirGiReservoir {
     float weight;
     float target_pdf;
     uint count;
+    bool tinted;
 };
 
 RestirGiSample restir_gi_empty_sample() {
@@ -70,7 +71,7 @@ RestirGiSample restir_gi_empty_sample() {
 }
 
 RestirGiReservoir restir_gi_empty_reservoir() {
-    return RestirGiReservoir(restir_gi_empty_sample(), 0.0, 0.0, 0.0, 0u);
+    return RestirGiReservoir(restir_gi_empty_sample(), 0.0, 0.0, 0.0, 0u, false);
 }
 
 uint restir_gi_encode_normal(vec3 n) {
@@ -113,7 +114,7 @@ RestirGiSlot restir_gi_pack(RestirGiReservoir r) {
         packHalf2x16(rad.rg)
     );
     uint rad_b_half = packHalf2x16(vec2(rad.b, 0.0)) & 0xFFFFu;
-    uint w1_x = rad_b_half | (count_packed << 16u) | ((kind & 3u) << 28u);
+    uint w1_x = rad_b_half | (count_packed << 16u) | ((kind & 3u) << 28u) | (r.tinted ? (1u << 30u) : 0u);
     uint w1_w = (r.sample_data.normal_face & 7u) << 28u;
     if (r.sample_data.emitter_cell.x >= 0 && is_inside_voxel_grid(r.sample_data.emitter_cell)) {
         uint cx = uint(r.sample_data.emitter_cell.x) & 1023u;
@@ -161,6 +162,7 @@ RestirGiReservoir restir_gi_unpack(RestirGiSlot slot) {
         r.sample_data = RestirGiSample(pos_or_dir, face, rad, em_cell, kind);
         r.weight = w;
         r.target_pdf = pdf;
+        r.tinted = ((slot.w1.x >> 30u) & 1u) != 0u;
     }
     return r;
 }
@@ -228,12 +230,16 @@ bool restir_gi_temporal_eligible(vec3 origin, vec3 receiver_normal, RestirGiSamp
     return cos_x >= restir_gi_temporal_min_cos && cos_y >= restir_gi_temporal_min_cos;
 }
 
-// Exact solid-angle Jacobian |d omega_dst / d omega_src| for vertex reconnection.
+// Exact solid-angle Jacobian |d omega_dst / d omega_src| for vertex reconnection,
+// also outputting the destination receiver cosine so callers avoid recomputing
+// delta/inversesqrt inside restir_gi_target_pdf.
 // Returns 0 when the shift is symmetrically rejected near concave corners or
 // grazing receiver/hit angles where Jacobian or cos_dst/cos_src would spike.
-float restir_gi_shift_jacobian(
-    vec3 src_origin, vec3 src_normal, vec3 dst_origin, vec3 dst_normal, RestirGiSample s
+float restir_gi_shift_jacobian_ex(
+    vec3 src_origin, vec3 src_normal, vec3 dst_origin, vec3 dst_normal, RestirGiSample s,
+    out float dst_cos_r
 ) {
+    dst_cos_r = 0.0;
     if (s.kind == restir_gi_kind_env) {
         float cos_r_src = dot(src_normal, s.pos_or_dir);
         float cos_r_dst = dot(dst_normal, s.pos_or_dir);
@@ -244,6 +250,7 @@ float restir_gi_shift_jacobian(
         if (!(pdf_ratio >= restir_gi_pdf_ratio_min && pdf_ratio <= restir_gi_pdf_ratio_max)) {
             return 0.0;
         }
+        dst_cos_r = cos_r_dst;
         return 1.0;
     }
     if (s.kind != restir_gi_kind_surface) {
@@ -279,7 +286,15 @@ float restir_gi_shift_jacobian(
     if (!(pdf_ratio >= restir_gi_pdf_ratio_min && pdf_ratio <= restir_gi_pdf_ratio_max)) {
         return 0.0;
     }
+    dst_cos_r = cos_r_dst;
     return jacobian;
+}
+
+float restir_gi_shift_jacobian(
+    vec3 src_origin, vec3 src_normal, vec3 dst_origin, vec3 dst_normal, RestirGiSample s
+) {
+    float dst_cos_r;
+    return restir_gi_shift_jacobian_ex(src_origin, src_normal, dst_origin, dst_normal, s, dst_cos_r);
 }
 
 bool restir_gi_surface_exists(usampler3D grid, RestirGiSample s) {

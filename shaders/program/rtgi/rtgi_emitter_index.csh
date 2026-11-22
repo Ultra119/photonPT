@@ -39,7 +39,7 @@ void main() {
     int lane = int(gl_LocalInvocationIndex);
     int leaf_index = emitter_flatten(leaf, emitter_leaf_size);
     int count_word = emitter_level_offset(0) + leaf_index;
-    if (texelFetch(rtgi_emitter_marks_sampler, emitter_mark_texel(leaf), 0).r == 0u) {
+    if ((texelFetch(rtgi_emitter_marks_sampler, emitter_mark_texel(leaf), 0).r & 1u) == 0u) {
         if (lane == 0) {
             imageStore(rtgi_emitter_index_img, emitter_index_texel(count_word), uvec4(0u));
         }

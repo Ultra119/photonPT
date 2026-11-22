@@ -46,6 +46,9 @@ uniform int frameCounter;
 #include "/include/utility/stbn.glsl"
 #include "/include/lighting/rt/pt_state.glsl"
 #include "/include/lighting/rt/rtgi_surface.glsl"
+#ifdef RTGI_EMITTER_SAMPLING
+#define VOXEL_DDA_USE_OCCUPANCY
+#endif
 #include "/include/lighting/rt/voxel_dda.glsl"
 #ifdef RTGI_WORLD_CACHE
 #include "/include/lighting/rt/rtgi_world_cache.glsl"
@@ -253,98 +256,177 @@ void main() {
 #ifdef RTGI_USE_RESTIR_DI
     if (run_di) {
         RestirReservoir center = restir_unpack(load_reservoir(texel, even));
-        if (center.sample_data.valid) {
-            float live_p = restir_target_pdf(voxel_sampler, origin, world_normal, center.sample_data);
+        uint c_block_id = 0u;
+        vec3 c_emission = vec3(0.0);
+        vec3 c_lnorm = vec3(0.0);
+        vec3 c_delta = vec3(0.0);
+        float c_dist_sq = 0.0, c_cos_x = 0.0, c_cos_y = 0.0;
+        bool center_valid = center.sample_data.valid && center.weight > 0.0
+            && restir_eval_geometry(voxel_sampler, origin, world_normal, center.sample_data,
+                                    c_block_id, c_emission, c_lnorm, c_delta, c_dist_sq,
+                                    c_cos_x, c_cos_y);
+        if (center_valid) {
+            float live_p = restir_target_pdf_from_geom(c_emission, c_cos_x, c_cos_y, c_dist_sq);
             if (live_p > 0.0) {
                 center.target_pdf = live_p;
             } else {
-                center.sample_data = restir_empty_sample();
-                center.weight = 0.0;
-                center.target_pdf = 0.0;
+                center_valid = false;
             }
         }
+        if (!center_valid) {
+            center.sample_data = restir_empty_sample();
+            center.weight = 0.0;
+            center.target_pdf = 0.0;
+            center.tinted = false;
+        }
 
-        RestirReservoir di_nbr[restir_di_spatial_max_neighbors];
-        int di_nbr_idx[restir_di_spatial_max_neighbors];
-        int di_count = 0;
+        uint di_valid_mask = 0u;
+        bool di_any_active = false;
         float m_neighbors = 0.0;
         int di_limit = min(valid_neighbors, restir_di_spatial_max_neighbors);
         for (int i = 0; i < di_limit; ++i) {
-            RestirReservoir nr = restir_unpack(load_reservoir(neighbor_tap[i], even));
-            if (nr.count > 0u) {
-                di_nbr[di_count] = nr;
-                di_nbr_idx[di_count] = i;
-                m_neighbors += float(nr.count);
-                ++di_count;
+            uvec4 packed_n = load_reservoir(neighbor_tap[i], even);
+            uint n_cnt = (packed_n.y >> 20u) & 2047u;
+            if (n_cnt > 0u) {
+                di_valid_mask |= (1u << uint(i));
+                m_neighbors += float(n_cnt);
+                di_any_active = di_any_active || ((packed_n.x >> 31u) != 0u);
             }
         }
 
         RestirReservoir combined = restir_empty_reservoir();
         vec3 winning_trans = vec3(1.0);
         bool from_center = true;
+        uint win_block_id = c_block_id;
+        vec3 win_emission = c_emission;
+        float win_dist_sq = c_dist_sq, win_cos_x = c_cos_x, win_cos_y = c_cos_y;
         uint total_count = center.count;
 
-        if (di_count == 0) {
+        if (di_valid_mask == 0u) {
             combined = center;
+        } else if (!center_valid && !di_any_active) {
+            combined.count = center.count + uint(m_neighbors);
         } else {
+            vec3 c_world_point = origin + c_delta;
             float inv_m_neighbors = 1.0 / max(m_neighbors, 1.0);
             float m_c = 0.0;
 
-            uint c_block_id = 0u;
-            vec3 c_emission = vec3(0.0);
-            vec3 c_lnorm = vec3(0.0);
-            vec3 c_delta = vec3(0.0);
-            float c_dist_sq = 0.0, c_cos_x = 0.0, c_cos_y = 0.0;
-            bool center_valid = center.sample_data.valid && center.weight > 0.0
-                && center.target_pdf > 0.0
-                && restir_eval_geometry(voxel_sampler, origin, world_normal, center.sample_data,
-                                        c_block_id, c_emission, c_lnorm, c_delta, c_dist_sq,
-                                        c_cos_x, c_cos_y);
+            bool has_last_di = false;
+            RestirSample last_di_sample = restir_empty_sample();
+            bool last_di_vis = false;
+            vec3 last_di_trans = vec3(1.0);
+            float last_di_pdf = 0.0;
+            uint last_di_id = 0u;
+            vec3 last_di_em = vec3(0.0);
+            float last_di_d2 = 0.0, last_di_cx = 0.0, last_di_cy = 0.0;
 
-            for (int i = 0; i < di_count; ++i) {
-                RestirReservoir nr = di_nbr[i];
-                int n_idx = di_nbr_idx[i];
+            for (int i = 0; i < di_limit; ++i) {
+                if ((di_valid_mask & (1u << uint(i))) == 0u) {
+                    continue;
+                }
+                RestirReservoir nr = restir_unpack(load_reservoir(neighbor_tap[i], even));
                 total_count += nr.count;
                 float alpha_i = float(nr.count) * inv_m_neighbors;
 
+                bool nr_active = nr.sample_data.valid && nr.weight > 0.0 && nr.target_pdf > 0.0;
+                bool same_as_center = center_valid && nr_active
+                    && nr.sample_data.cell == center.sample_data.cell
+                    && nr.sample_data.face == center.sample_data.face
+                    && nr.sample_data.uv == center.sample_data.uv;
+
                 if (center_valid) {
-                    uint nb_id;
-                    vec3 nb_em, nb_lnorm, nb_delta;
-                    float nb_dist_sq, nb_cx, nb_cy;
                     float p_i_of_c = 0.0;
-                    if (restir_eval_geometry(voxel_sampler, neighbor_origin[n_idx], neighbor_normal[n_idx],
-                                             center.sample_data, nb_id, nb_em, nb_lnorm, nb_delta,
-                                             nb_dist_sq, nb_cx, nb_cy)) {
-                        vec3 dummy_trans;
-                        if (restir_trace_visibility(voxel_sampler, neighbor_origin[n_idx],
-                                                    center.sample_data, nb_lnorm, nb_delta,
-                                                    nb_dist_sq, dummy_trans)) {
-                            p_i_of_c = restir_target_pdf_from_geom(nb_em, nb_cx, nb_cy, nb_dist_sq);
+                    if (same_as_center) {
+                        // Neighbor already verified visibility of this exact sample at
+                        // neighbor_origin[i] in deferred1_a; reuse its live target PDF.
+                        p_i_of_c = nr.target_pdf;
+                    } else {
+                        vec3 nb_delta = c_world_point - neighbor_origin[i];
+                        float nb_dist_sq = dot(nb_delta, nb_delta);
+                        if (nb_dist_sq > 0.0 && nb_dist_sq < sqr(rt_primary_max_distance)) {
+                            vec3 nb_dir = nb_delta * inversesqrt(nb_dist_sq);
+                            float nb_cx = dot(neighbor_normal[i], nb_dir);
+                            float nb_cy = dot(c_lnorm, -nb_dir);
+                            if (nb_cx > 0.0 && nb_cy > 0.0) {
+                                vec3 dummy_trans;
+                                if (restir_trace_visibility(voxel_sampler, neighbor_origin[i],
+                                                            center.sample_data, c_lnorm, nb_delta,
+                                                            nb_dist_sq, dummy_trans)) {
+                                    p_i_of_c = restir_target_pdf_from_geom(
+                                        c_emission, nb_cx, nb_cy, nb_dist_sq
+                                    );
+                                }
+                            }
                         }
                     }
                     float num = float(center.count) * center.target_pdf;
                     m_c += alpha_i * (num / max(num + m_neighbors * p_i_of_c, 1e-20));
                 }
 
-                if (nr.sample_data.valid && nr.weight > 0.0 && nr.target_pdf > 0.0) {
-                    uint b_id;
-                    vec3 em, lnorm, delta;
-                    float dist_sq, cx, cy;
-                    if (restir_eval_geometry(voxel_sampler, origin, world_normal, nr.sample_data,
-                                             b_id, em, lnorm, delta, dist_sq, cx, cy)) {
-                        vec3 trans;
-                        if (restir_trace_visibility(voxel_sampler, origin, nr.sample_data,
-                                                    lnorm, delta, dist_sq, trans)) {
-                            float p_c_of_i = restir_target_pdf_from_geom(em, cx, cy, dist_sq);
-                            float denom = m_neighbors * nr.target_pdf
-                                + float(center.count) * p_c_of_i;
-                            float m_i = alpha_i * (m_neighbors * nr.target_pdf) / max(denom, 1e-20);
-                            float w_i = m_i * p_c_of_i * nr.weight;
-                            float u_pick = random_dimension(seed, 8 + i);
-                            if (restir_update(combined, nr.sample_data, w_i, p_c_of_i, u_pick)) {
-                                winning_trans = trans;
-                                from_center = false;
+                if (nr_active) {
+                    bool vis_ok = false;
+                    vec3 trans = vec3(1.0);
+                    float p_c_of_i = 0.0;
+                    uint b_id = 0u;
+                    vec3 em = vec3(0.0);
+                    float dist_sq = 0.0, cx = 0.0, cy = 0.0;
+
+                    if (same_as_center && !center.tinted) {
+                        vis_ok = true;
+                        p_c_of_i = center.target_pdf;
+                        b_id = c_block_id;
+                        em = c_emission;
+                        dist_sq = c_dist_sq;
+                        cx = c_cos_x;
+                        cy = c_cos_y;
+                    } else if (has_last_di
+                               && nr.sample_data.cell == last_di_sample.cell
+                               && nr.sample_data.face == last_di_sample.face
+                               && nr.sample_data.uv == last_di_sample.uv) {
+                        vis_ok = last_di_vis;
+                        trans = last_di_trans;
+                        p_c_of_i = last_di_pdf;
+                        b_id = last_di_id;
+                        em = last_di_em;
+                        dist_sq = last_di_d2;
+                        cx = last_di_cx;
+                        cy = last_di_cy;
+                    } else {
+                        vec3 lnorm, delta;
+                        if (restir_eval_geometry(voxel_sampler, origin, world_normal, nr.sample_data,
+                                                 b_id, em, lnorm, delta, dist_sq, cx, cy)) {
+                            if (restir_trace_visibility(voxel_sampler, origin, nr.sample_data,
+                                                        lnorm, delta, dist_sq, trans)) {
+                                vis_ok = true;
+                                p_c_of_i = restir_target_pdf_from_geom(em, cx, cy, dist_sq);
                             }
+                        }
+                        has_last_di = true;
+                        last_di_sample = nr.sample_data;
+                        last_di_vis = vis_ok;
+                        last_di_trans = trans;
+                        last_di_pdf = p_c_of_i;
+                        last_di_id = b_id;
+                        last_di_em = em;
+                        last_di_d2 = dist_sq;
+                        last_di_cx = cx;
+                        last_di_cy = cy;
+                    }
+
+                    if (vis_ok) {
+                        float denom = m_neighbors * nr.target_pdf
+                            + float(center.count) * p_c_of_i;
+                        float m_i = alpha_i * (m_neighbors * nr.target_pdf) / max(denom, 1e-20);
+                        float w_i = m_i * p_c_of_i * nr.weight;
+                        float u_pick = random_dimension(seed, 8 + i);
+                        if (restir_update(combined, nr.sample_data, w_i, p_c_of_i, u_pick)) {
+                            winning_trans = trans;
+                            from_center = false;
+                            win_block_id = b_id;
+                            win_emission = em;
+                            win_dist_sq = dist_sq;
+                            win_cos_x = cx;
+                            win_cos_y = cy;
                         }
                     }
                 }
@@ -355,6 +437,11 @@ void main() {
                 float u_pick = random_dimension(seed, 12);
                 if (restir_update(combined, center.sample_data, w_c, center.target_pdf, u_pick)) {
                     from_center = true;
+                    win_block_id = c_block_id;
+                    win_emission = c_emission;
+                    win_dist_sq = c_dist_sq;
+                    win_cos_x = c_cos_x;
+                    win_cos_y = c_cos_y;
                 }
             }
 
@@ -372,18 +459,19 @@ void main() {
         if (combined.sample_data.valid && combined.weight > 0.0) {
             bool visible = true;
             if (from_center) {
-                uint b_id;
-                vec3 em, lnorm, delta;
-                float dist_sq, cx, cy;
-                visible = restir_eval_geometry(voxel_sampler, origin, world_normal,
-                                               combined.sample_data, b_id, em, lnorm, delta,
-                                               dist_sq, cx, cy)
-                    && restir_trace_visibility(voxel_sampler, origin, combined.sample_data,
-                                               lnorm, delta, dist_sq, winning_trans);
+                // Center was already visibility-validated at origin in deferred1_a;
+                // only re-trace when the sample passed through stained glass to recover tint.
+                if (center.tinted) {
+                    visible = restir_trace_visibility(voxel_sampler, origin, combined.sample_data,
+                                                      c_lnorm, c_delta, c_dist_sq, winning_trans);
+                } else {
+                    winning_trans = vec3(1.0);
+                }
             }
             if (visible) {
-                direct_emitter = restir_shade_sample(
-                    voxel_sampler, origin, world_normal, combined, winning_trans
+                direct_emitter = restir_shade_sample_from_geom(
+                    voxel_sampler, origin, world_normal, combined, winning_trans,
+                    win_block_id, win_emission, win_dist_sq, win_cos_x, win_cos_y
                 );
             }
         }
@@ -409,22 +497,17 @@ void main() {
                 center_gi.sample_data = restir_gi_empty_sample();
                 center_gi.weight = 0.0;
                 center_gi.target_pdf = 0.0;
+                center_gi.tinted = false;
             }
         }
 
-        RestirGiReservoir gi_nbr[restir_spatial_max_neighbors];
-        int gi_nbr_idx[restir_spatial_max_neighbors];
-        int gi_count = 0;
+        uint gi_valid_mask = 0u;
         float m_gi_neighbors = 0.0;
         for (int i = 0; i < valid_neighbors; ++i) {
-            RestirGiReservoir nr = restir_gi_unpack(
-                load_gi_reservoir(neighbor_tap[i], target_res, restir_gi_temporal_bank)
-            );
-            if (nr.count > 0u) {
-                gi_nbr[gi_count] = nr;
-                gi_nbr_idx[gi_count] = i;
-                m_gi_neighbors += float(nr.count);
-                ++gi_count;
+            uint n_cnt = (load_gi_reservoir(neighbor_tap[i], target_res, restir_gi_temporal_bank).w1.x >> 16u) & 4095u;
+            if (n_cnt > 0u) {
+                gi_valid_mask |= (1u << uint(i));
+                m_gi_neighbors += float(n_cnt);
             }
         }
 
@@ -434,36 +517,61 @@ void main() {
         uint gi_total_count = center_gi.count;
         uint gi_seed = lowbias32(seed ^ 0x3c6ef372u);
 
-        if (gi_count == 0) {
+        if (gi_valid_mask == 0u) {
             combined_gi = center_gi;
         } else {
             float inv_m_nbr = 1.0 / max(m_gi_neighbors, 1.0);
             float m_c = 0.0;
             bool center_valid = center_gi.sample_data.kind != restir_gi_kind_empty
                 && center_gi.weight > 0.0 && center_gi.target_pdf > 0.0;
+            float center_gi_lum = center_valid
+                ? dot(center_gi.sample_data.radiance, luminance_weights) : 0.0;
 
-            for (int i = 0; i < gi_count; ++i) {
-                RestirGiReservoir nr = gi_nbr[i];
-                int n_idx = gi_nbr_idx[i];
+            bool has_last_gi = false;
+            uint last_gi_kind = restir_gi_kind_empty;
+            vec3 last_gi_pos = vec3(0.0);
+            bool last_gi_vis = false;
+            vec3 last_gi_trans = vec3(1.0);
+
+            for (int i = 0; i < valid_neighbors; ++i) {
+                if ((gi_valid_mask & (1u << uint(i))) == 0u) {
+                    continue;
+                }
+                RestirGiReservoir nr = restir_gi_unpack(
+                    load_gi_reservoir(neighbor_tap[i], target_res, restir_gi_temporal_bank)
+                );
                 gi_total_count += nr.count;
                 float alpha_i = float(nr.count) * inv_m_nbr;
+
+                bool nr_active = nr.sample_data.kind != restir_gi_kind_empty
+                    && nr.weight > 0.0 && nr.target_pdf > 0.0;
+                bool same_gi_geom = center_valid && nr_active
+                    && nr.sample_data.kind == center_gi.sample_data.kind
+                    && nr.sample_data.pos_or_dir == center_gi.sample_data.pos_or_dir
+                    && (nr.sample_data.kind == restir_gi_kind_env
+                        || nr.sample_data.normal_face == center_gi.sample_data.normal_face);
 
                 // Canonical MIS weight for center sample shifted to neighbor i.
                 if (center_valid) {
                     float p_i_of_c = 0.0;
-                    float jac_ci = restir_gi_shift_jacobian(
-                        origin, world_normal, neighbor_origin[n_idx], neighbor_normal[n_idx],
-                        center_gi.sample_data
+                    float cos_r_dst = 0.0;
+                    float jac_ci = restir_gi_shift_jacobian_ex(
+                        origin, world_normal, neighbor_origin[i], neighbor_normal[i],
+                        center_gi.sample_data, cos_r_dst
                     );
                     if (jac_ci > 0.0) {
-                        float p_i_raw = restir_gi_target_pdf(
-                            neighbor_origin[n_idx], neighbor_normal[n_idx], center_gi.sample_data
-                        );
+                        float p_i_raw = center_gi_lum * (cos_r_dst * rcp_pi);
                         if (p_i_raw > 0.0) {
-                            vec3 dummy_trans;
-                            if (restir_gi_trace_visibility(voxel_sampler, neighbor_origin[n_idx],
-                                                           center_gi.sample_data, dummy_trans)) {
+                            if (same_gi_geom) {
+                                // Neighbor already proved visibility of this exact hit/direction
+                                // from neighbor_origin[i] in deferred1_a.
                                 p_i_of_c = p_i_raw * jac_ci;
+                            } else {
+                                vec3 dummy_trans;
+                                if (restir_gi_trace_visibility(voxel_sampler, neighbor_origin[i],
+                                                               center_gi.sample_data, dummy_trans)) {
+                                    p_i_of_c = p_i_raw * jac_ci;
+                                }
                             }
                         }
                     }
@@ -472,18 +580,37 @@ void main() {
                 }
 
                 // Neighbor i's sample shifted to center receiver.
-                if (nr.sample_data.kind != restir_gi_kind_empty
-                    && nr.weight > 0.0 && nr.target_pdf > 0.0) {
-                    float jac_ic = restir_gi_shift_jacobian(
-                        neighbor_origin[n_idx], neighbor_normal[n_idx], origin, world_normal,
-                        nr.sample_data
+                if (nr_active) {
+                    float cos_r_dst = 0.0;
+                    float jac_ic = restir_gi_shift_jacobian_ex(
+                        neighbor_origin[i], neighbor_normal[i], origin, world_normal,
+                        nr.sample_data, cos_r_dst
                     );
                     if (jac_ic > 0.0) {
-                        float p_c_raw = restir_gi_target_pdf(origin, world_normal, nr.sample_data);
+                        float nr_lum = dot(nr.sample_data.radiance, luminance_weights);
+                        float p_c_raw = (nr_lum > 0.0 && rtgi_finite(vec4(nr_lum, 0.0, 0.0, 0.0)))
+                            ? nr_lum * (cos_r_dst * rcp_pi) : 0.0;
                         if (p_c_raw > 0.0) {
-                            vec3 trans;
-                            if (restir_gi_trace_visibility(voxel_sampler, origin,
-                                                           nr.sample_data, trans)) {
+                            bool vis_ok = false;
+                            vec3 trans = vec3(1.0);
+                            if (same_gi_geom && !center_gi.tinted) {
+                                vis_ok = true;
+                            } else if (has_last_gi
+                                       && nr.sample_data.kind == last_gi_kind
+                                       && nr.sample_data.pos_or_dir == last_gi_pos) {
+                                vis_ok = last_gi_vis;
+                                trans = last_gi_trans;
+                            } else {
+                                vis_ok = restir_gi_trace_visibility(
+                                    voxel_sampler, origin, nr.sample_data, trans
+                                );
+                                has_last_gi = true;
+                                last_gi_kind = nr.sample_data.kind;
+                                last_gi_pos = nr.sample_data.pos_or_dir;
+                                last_gi_vis = vis_ok;
+                                last_gi_trans = trans;
+                            }
+                            if (vis_ok) {
                                 float p_c_of_i = p_c_raw * jac_ic;
                                 float denom = m_gi_neighbors * nr.target_pdf
                                     + float(center_gi.count) * p_c_of_i;
@@ -526,9 +653,15 @@ void main() {
         if (combined_gi.sample_data.kind != restir_gi_kind_empty && combined_gi.weight > 0.0) {
             bool visible = true;
             if (gi_from_center) {
-                visible = restir_gi_trace_visibility(
-                    voxel_sampler, origin, combined_gi.sample_data, gi_winning_trans
-                );
+                // Center was already visibility-validated at origin in deferred1_a;
+                // only re-trace when the sample passed through stained glass to recover tint.
+                if (center_gi.tinted) {
+                    visible = restir_gi_trace_visibility(
+                        voxel_sampler, origin, combined_gi.sample_data, gi_winning_trans
+                    );
+                } else {
+                    gi_winning_trans = vec3(1.0);
+                }
             }
             if (visible) {
                 indirect_gi = restir_gi_shade(origin, world_normal, combined_gi, gi_winning_trans);
@@ -543,6 +676,7 @@ void main() {
         // propagate across dim walls within a few frames.
         RestirGiReservoir feedback_gi = combined_gi;
         feedback_gi.count = min(feedback_gi.count, restir_gi_feedback_cap);
+        feedback_gi.tinted = any(lessThan(gi_winning_trans, vec3(0.999)));
         store_gi_reservoir(texel, target_res, restir_gi_history_bank, restir_gi_pack(feedback_gi));
         bool ok_gi = rtgi_finite(vec4(indirect_gi, 0.0))
             && all(greaterThanEqual(indirect_gi, vec3(0.0)));

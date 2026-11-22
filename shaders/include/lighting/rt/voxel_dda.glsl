@@ -2,6 +2,10 @@
 #define INCLUDE_LIGHTING_RT_VOXEL_DDA
 
 #include "/include/lighting/voxel/voxel_storage.glsl"
+#ifdef VOXEL_DDA_USE_OCCUPANCY
+#include "/include/lighting/voxel/emitter_index_layout.glsl"
+uniform usampler2D rtgi_emitter_marks_sampler;
+#endif
 
 const int voxel_hit_surface = 1;
 const int voxel_distance_limit = 2;
@@ -175,9 +179,13 @@ VoxelHit trace_voxel_segment(
     }
 
     vec3 step_dir = sign(direction);
+    ivec3 istep = ivec3(step_dir);
+    ivec3 pos_step = ivec3(greaterThan(direction, vec3(0.0)));
+    ivec3 neg_step = ivec3(lessThan(direction, vec3(0.0)));
+    vec3 delta_t = mix(abs(ray.inverse), vec3(0.0), parallel);
     vec3 first = origin + start * direction;
     vec3 cell_corner = floor(first);
-    ivec3 negative_boundary = ivec3(lessThan(direction, vec3(0.0))) * ivec3(equal(first, cell_corner));
+    ivec3 negative_boundary = neg_step * ivec3(equal(first, cell_corner));
     ivec3 cell = clamp_to_voxel_grid(ivec3(cell_corner) - negative_boundary);
     vec3 entry_normal = enter >= 0.0
         ? voxel_entry_normal(equal(volume_entry, vec3(enter)), step_dir) : vec3(0.0);
@@ -190,7 +198,51 @@ VoxelHit trace_voxel_segment(
     int budget = min(voxel_dda_max_steps,
                      int(ceil((end - start) * dot(abs(direction), vec3(1.0)))) + 4);
     float t = start;
+#ifdef VOXEL_DDA_USE_OCCUPANCY
+    ivec3 cached_brick = ivec3(-1);
+    uint cached_submask = 0u;
+#endif
     for (int step = 0; step < budget; ++step) {
+#ifdef VOXEL_DDA_USE_OCCUPANCY
+        ivec3 brick = cell >> 3;
+        if (brick != cached_brick) {
+            cached_brick = brick;
+            cached_submask = (texelFetch(rtgi_emitter_marks_sampler, emitter_mark_texel(brick), 0).r >> 8u) & 0xFFu;
+        }
+        ivec3 sub = (cell >> 2) & 1;
+        uint sub_bit = 1u << uint(sub.x | (sub.y << 1) | (sub.z << 2));
+        if (cached_submask == 0u || (cached_submask & sub_bit) == 0u) {
+            int shift = cached_submask == 0u ? 3 : 2;
+            ivec3 c_coord = cell >> shift;
+            vec3 c_plane = vec3((c_coord + pos_step) << shift);
+            vec3 c_exit = mix((c_plane - ray.origin) * ray.inverse, vec3(voxel_infinity), ray.parallel);
+            float c_cross = min_of(c_exit);
+            if (c_cross >= end) {
+                return result;
+            }
+            bvec3 c_axes = equal(c_exit, vec3(c_cross));
+            t = max(t, c_cross);
+            vec3 p_next = ray.origin + t * ray.direction;
+            vec3 p_floor = floor(p_next);
+            ivec3 next_cell = ivec3(p_floor) - neg_step * ivec3(equal(p_next, p_floor));
+            ivec3 exact_axis = ivec3(c_plane) - neg_step;
+            ivec3 c_lo = c_coord << shift;
+            ivec3 clamped_cell = clamp(next_cell, c_lo, c_lo + ((1 << shift) - 1));
+            cell = ivec3(
+                c_axes.x ? exact_axis.x : clamped_cell.x,
+                c_axes.y ? exact_axis.y : clamped_cell.y,
+                c_axes.z ? exact_axis.z : clamped_cell.z
+            );
+            if (!is_inside_voxel_grid(cell)) {
+                result.status = voxel_volume_exit;
+                result.distance = t;
+                return result;
+            }
+            entry_normal = voxel_entry_normal(c_axes, step_dir);
+            boundary = voxel_boundary_times(ray, cell);
+            continue;
+        }
+#endif
         float crossing = min_of(boundary);
         float cell_end = min(crossing, end);
         if (cell_end > t) {
@@ -260,16 +312,16 @@ VoxelHit trace_voxel_segment(
         }
 
         // Step all tied axes at once. Zero-length corner contacts never
-        // sample a cell. Recompute crossing times to avoid accumulated drift.
+        // sample a cell. Advance crossing times incrementally inside bricks.
         bvec3 axes = equal(boundary, vec3(crossing));
-        cell += ivec3(axes) * ivec3(step_dir);
+        cell += ivec3(axes) * istep;
         if (!is_inside_voxel_grid(cell)) {
             result.status = voxel_volume_exit;
             result.distance = max(t, crossing);
             return result;
         }
         entry_normal = voxel_entry_normal(axes, step_dir);
-        boundary = voxel_boundary_times(ray, cell);
+        boundary += vec3(axes) * delta_t;
         t = max(t, crossing);
     }
 

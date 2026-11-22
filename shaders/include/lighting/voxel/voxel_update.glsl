@@ -218,8 +218,21 @@ void update_rt_voxel_grid(
     ivec3 cell = ivec3(local);
     uint previous = imageAtomicMax(voxel_img, cell, packed_data);
 #ifdef RTGI_EMITTER_SAMPLING
+    // Bit 0 marks 8x8x8 bricks containing emitters; bits 8..15 conservatively
+    // mark occupied 4x4x4 sub-bricks for 2-level empty-space DDA skipping.
+    uint mark_bits = 0u;
+    if (previous == 0u) {
+        ivec3 sub = (cell >> 2) & 1;
+        mark_bits |= 1u << (8u + uint(sub.x | (sub.y << 1) | (sub.z << 2)));
+    }
     if (emitter_index_member(packed_data) && !emitter_index_member(previous)) {
-        imageAtomicOr(rtgi_emitter_marks_img, emitter_mark_texel(cell / 8), 1u);
+        mark_bits |= 1u;
+    }
+    if (mark_bits != 0u) {
+        ivec2 mark_texel = emitter_mark_texel(cell >> 3);
+        if ((imageLoad(rtgi_emitter_marks_img, mark_texel).r & mark_bits) != mark_bits) {
+            imageAtomicOr(rtgi_emitter_marks_img, mark_texel, mark_bits);
+        }
     }
 #endif
 }

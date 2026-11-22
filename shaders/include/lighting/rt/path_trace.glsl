@@ -171,7 +171,7 @@ PathTraceSample evaluate_path_trace(
 #ifdef RTGI_EMITTER_SAMPLING
         if (sample_emitters && max_of(emission) > 0.0
             && (b == 0 || hit.distance < rt_bounce_max_distance)) {
-            float light_pdf = primary_emitter_pdf(grid, hit, origin, normal, direction);
+            float light_pdf = primary_emitter_pdf(grid, hit, origin, normal, direction, reach);
             if (light_pdf > 0.0) {
                 float bsdf_pdf = max0(dot(normal, direction)) * rcp_pi;
                 float mis_rays = b == 0 ? float(RTGI_RAY_COUNT) : 1.0;
