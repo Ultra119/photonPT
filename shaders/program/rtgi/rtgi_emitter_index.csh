@@ -91,6 +91,9 @@ const ivec3 workGroups = ivec3(1, 1, 1);
 #endif
 
 layout(r32ui) uniform uimage2D rtgi_emitter_index_img;
+#if EMITTER_BUILD_LEVEL == 1 || EMITTER_BUILD_LEVEL == 2
+layout(r32ui) uniform uimage2D rtgi_emitter_marks_img;
+#endif
 
 void main() {
     const int level = EMITTER_BUILD_LEVEL;
@@ -103,15 +106,56 @@ void main() {
     ivec3 first = 2 * emitter_unflatten(index, emitter_level_size(level));
     int child_offset = emitter_level_offset(level - 1);
     uint count = 0u;
+#if EMITTER_BUILD_LEVEL == 1 || EMITTER_BUILD_LEVEL == 2
+    bool all_empty = true;
+#endif
     for (int i = 0; i < 8; ++i) {
         ivec3 child = first + ivec3(i & 1, (i >> 1) & 1, i >> 2);
         if (all(lessThan(child, child_size))) {
             int word = child_offset + emitter_flatten(child, child_size);
             count += imageLoad(rtgi_emitter_index_img, emitter_index_texel(word)).r;
+#if EMITTER_BUILD_LEVEL == 1
+            if ((imageLoad(rtgi_emitter_marks_img, emitter_mark_texel(child)).r & 0xFF00u) != 0u) {
+                all_empty = false;
+            }
+#elif EMITTER_BUILD_LEVEL == 2
+            if ((imageLoad(rtgi_emitter_marks_img, emitter_mark_texel(child * 2)).r & (1u << 16u)) == 0u) {
+                all_empty = false;
+            }
+#endif
+        } else {
+#if EMITTER_BUILD_LEVEL == 1 || EMITTER_BUILD_LEVEL == 2
+            all_empty = false;
+#endif
         }
     }
     int word = child_offset + emitter_level_count(level - 1) + index;
     imageStore(rtgi_emitter_index_img, emitter_index_texel(word), uvec4(count));
+#if EMITTER_BUILD_LEVEL == 1
+    // Stamp bit 16 on all 8 child 8x8x8 bricks when the entire 16x16x16 super-brick is empty.
+    if (all_empty) {
+        for (int i = 0; i < 8; ++i) {
+            ivec3 child = first + ivec3(i & 1, (i >> 1) & 1, i >> 2);
+            imageStore(rtgi_emitter_marks_img, emitter_mark_texel(child), uvec4(1u << 16u));
+        }
+    }
+#elif EMITTER_BUILD_LEVEL == 2
+    // Stamp bit 17 on all 64 child 8x8x8 bricks when the entire 32x32x32 mega-brick is empty.
+    if (all_empty) {
+        ivec3 leaf_base = first * 2;
+        for (int z = 0; z < 4; ++z) {
+            for (int y = 0; y < 4; ++y) {
+                for (int x = 0; x < 4; ++x) {
+                    imageStore(
+                        rtgi_emitter_marks_img,
+                        emitter_mark_texel(leaf_base + ivec3(x, y, z)),
+                        uvec4((1u << 16u) | (1u << 17u))
+                    );
+                }
+            }
+        }
+    }
+#endif
 }
 
 #endif

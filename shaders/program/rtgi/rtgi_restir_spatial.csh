@@ -81,7 +81,11 @@ void store_gi_reservoir(ivec2 texel, ivec2 target_res, int bank, RestirGiSlot sl
 }
 #endif
 
+#ifdef RTGI_RESTIR_GI
 const int restir_spatial_max_neighbors = 4;
+#else
+const int restir_spatial_max_neighbors = 3;
+#endif
 const int restir_di_spatial_max_neighbors = 3;
 
 uvec4 load_guide(ivec2 texel, bool even) {
@@ -182,70 +186,78 @@ void main() {
     vec3 scene_pos = transform(gbufferModelViewInverse, center_view);
     vec3 voxel_pos = scene_to_voxel_space(scene_pos);
 #if defined RTGI_USE_RESTIR_DI || defined RTGI_RESTIR_GI
-    vec3 origin = rtgi_receiver_origin(voxel_sampler, voxel_pos, world_normal, material);
-
-    vec3 view_normal = mat3(gbufferModelView) * world_normal;
-    float footprint = rtgi_view_footprint(-center_view.z, grid.gi_active, gbufferProjection);
-    float grazing = max(abs(dot(view_normal, normalize(center_view))), 0.02);
-    float max_chord = min(4.5, 0.25 + 4.5 * footprint / grazing);
-
-#if RTGI_RESOLUTION == 0
-    const float search_radius = 6.0;
-#elif RTGI_RESOLUTION == 2
-    const float search_radius = 16.0;
-#else
-    const float search_radius = 10.0;
-#endif
-
-    uint pixel_key = uint(texel.x) | (uint(texel.y) << 16u);
-    uint seed = lowbias32(pixel_key ^ 0x517cc1b7u) ^ lowbias32(uint(frameCounter) + 0x94d049bbu);
-
-    // Shared geometry-validated spatial neighbor search for ReSTIR DI and GI.
-    // Offset STBN tile from deferred1_a so spatial disk rotation is decorrelated
-    // from primary ray directions while shaping spatial reuse noise into blue noise.
-    // Radial stratification puts closer taps first (consumed by DI + GI) and wider
-    // taps later (propagating GI bounce hits rapidly across dim walls).
-    vec4 stbn_sp = sample_stbn(texel + ivec2(17, 31), frameCounter);
+    vec3 origin = vec3(0.0);
     ivec2 neighbor_tap[restir_spatial_max_neighbors];
     vec3 neighbor_origin[restir_spatial_max_neighbors];
     vec3 neighbor_normal[restir_spatial_max_neighbors];
     int valid_neighbors = 0;
+    uint pixel_key = uint(texel.x) | (uint(texel.y) << 16u);
+    uint seed = lowbias32(pixel_key ^ 0x517cc1b7u) ^ lowbias32(uint(frameCounter) + 0x94d049bbu);
 
-    float base_angle = stbn_sp.b * tau;
-    for (int k = 0; k < restir_spatial_max_neighbors; ++k) {
-        float angle = base_angle + (tau / float(restir_spatial_max_neighbors))
-            * (float(k) + random_dimension(seed, 1 + 2 * k));
-        float rad_u = k == 0 ? stbn_sp.a : random_dimension(seed, 2 + 2 * k);
-        float rad = search_radius * sqrt(
-            (float(k) + 0.15 + 0.85 * rad_u) / float(restir_spatial_max_neighbors)
-        );
-        ivec2 tap = texel + ivec2(round(rad * vec2(cos(angle), sin(angle))));
-        if (tap == texel || !rtgi_in_bounds(tap, grid.gi_active)) {
-            continue;
+#ifdef RTGI_RESTIR_GI
+    const bool run_spatial = true;
+#else
+    bool run_spatial = run_di;
+#endif
+    if (run_spatial) {
+        origin = rtgi_receiver_origin(voxel_sampler, voxel_pos, world_normal, material);
+
+        vec3 view_normal = mat3(gbufferModelView) * world_normal;
+        float footprint = rtgi_view_footprint(-center_view.z, grid.gi_active, gbufferProjection);
+        float grazing = max(abs(dot(view_normal, normalize(center_view))), 0.02);
+        float max_chord = min(4.5, 0.25 + 4.5 * footprint / grazing);
+
+#if RTGI_RESOLUTION == 0
+        const float search_radius = 6.0;
+#elif RTGI_RESOLUTION == 2
+        const float search_radius = 16.0;
+#else
+        const float search_radius = 10.0;
+#endif
+
+        // Shared geometry-validated spatial neighbor search for ReSTIR DI and GI.
+        // Offset STBN tile from deferred1_a so spatial disk rotation is decorrelated
+        // from primary ray directions while shaping spatial reuse noise into blue noise.
+        // Radial stratification puts closer taps first (consumed by DI + GI) and wider
+        // taps later (propagating GI bounce hits rapidly across dim walls).
+        vec4 stbn_sp = sample_stbn(texel + ivec2(17, 31), frameCounter);
+
+        float base_angle = stbn_sp.b * tau;
+        for (int k = 0; k < restir_spatial_max_neighbors; ++k) {
+            float angle = base_angle + (tau / float(restir_spatial_max_neighbors))
+                * (float(k) + random_dimension(seed, 1 + 2 * k));
+            float rad_u = k == 0 ? stbn_sp.a : random_dimension(seed, 2 + 2 * k);
+            float rad = search_radius * sqrt(
+                (float(k) + 0.15 + 0.85 * rad_u) / float(restir_spatial_max_neighbors)
+            );
+            ivec2 tap = texel + ivec2(round(rad * vec2(cos(angle), sin(angle))));
+            if (tap == texel || !rtgi_in_bounds(tap, grid.gi_active)) {
+                continue;
+            }
+            uvec4 n_guide = load_guide(tap, even);
+            vec3 n_view;
+            if (!rtgi_guide_matches(n_guide, material)
+                || !rtgi_view_from_guide(n_guide, grid.full_size, jitter, gbufferProjection, n_view)) {
+                continue;
+            }
+            vec3 n_world_normal = rtgi_guide_normal(n_guide);
+            vec3 n_view_normal = mat3(gbufferModelView) * n_world_normal;
+            if (rtgi_geometry_weight(n_view - center_view, view_normal, n_view_normal,
+                                     footprint, max_chord) <= 0.5) {
+                continue;
+            }
+            vec3 n_scene = transform(gbufferModelViewInverse, n_view);
+            vec3 n_voxel = scene_to_voxel_space(n_scene);
+            if (any(lessThan(n_voxel, vec3(0.0))) || any(greaterThanEqual(n_voxel, rt_voxel_size_f))) {
+                continue;
+            }
+            neighbor_tap[valid_neighbors] = tap;
+            neighbor_origin[valid_neighbors] = rtgi_receiver_origin(
+                voxel_sampler, n_voxel, n_world_normal, material
+            );
+            neighbor_normal[valid_neighbors] = n_world_normal;
+            ++valid_neighbors;
         }
-        uvec4 n_guide = load_guide(tap, even);
-        vec3 n_view;
-        if (!rtgi_guide_matches(n_guide, material)
-            || !rtgi_view_from_guide(n_guide, grid.full_size, jitter, gbufferProjection, n_view)) {
-            continue;
-        }
-        vec3 n_world_normal = rtgi_guide_normal(n_guide);
-        vec3 n_view_normal = mat3(gbufferModelView) * n_world_normal;
-        if (rtgi_geometry_weight(n_view - center_view, view_normal, n_view_normal,
-                                 footprint, max_chord) <= 0.5) {
-            continue;
-        }
-        vec3 n_scene = transform(gbufferModelViewInverse, n_view);
-        vec3 n_voxel = scene_to_voxel_space(n_scene);
-        if (any(lessThan(n_voxel, vec3(0.0))) || any(greaterThanEqual(n_voxel, rt_voxel_size_f))) {
-            continue;
-        }
-        neighbor_tap[valid_neighbors] = tap;
-        neighbor_origin[valid_neighbors] = rtgi_receiver_origin(
-            voxel_sampler, n_voxel, n_world_normal, material
-        );
-        neighbor_normal[valid_neighbors] = n_world_normal;
-        ++valid_neighbors;
     }
 #endif
 

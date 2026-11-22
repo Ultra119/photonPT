@@ -200,19 +200,22 @@ VoxelHit trace_voxel_segment(
     float t = start;
 #ifdef VOXEL_DDA_USE_OCCUPANCY
     ivec3 cached_brick = ivec3(-1);
-    uint cached_submask = 0u;
+    uint cached_mark = 0u;
 #endif
     for (int step = 0; step < budget; ++step) {
 #ifdef VOXEL_DDA_USE_OCCUPANCY
         ivec3 brick = cell >> 3;
         if (brick != cached_brick) {
             cached_brick = brick;
-            cached_submask = (texelFetch(rtgi_emitter_marks_sampler, emitter_mark_texel(brick), 0).r >> 8u) & 0xFFu;
+            cached_mark = texelFetch(rtgi_emitter_marks_sampler, emitter_mark_texel(brick), 0).r >> 8u;
         }
+        uint submask = cached_mark & 0xFFu;
         ivec3 sub = (cell >> 2) & 1;
         uint sub_bit = 1u << uint(sub.x | (sub.y << 1) | (sub.z << 2));
-        if (cached_submask == 0u || (cached_submask & sub_bit) == 0u) {
-            int shift = cached_submask == 0u ? 3 : 2;
+        if (submask == 0u || (submask & sub_bit) == 0u) {
+            // Hierarchical empty-space skip: 32^3 (bit 9), 16^3 (bit 8), 8^3 (submask == 0), or 4^3.
+            int shift = (cached_mark & 0x200u) != 0u ? 5
+                      : ((cached_mark & 0x100u) != 0u ? 4 : (submask == 0u ? 3 : 2));
             ivec3 c_coord = cell >> shift;
             vec3 c_plane = vec3((c_coord + pos_step) << shift);
             vec3 c_exit = mix((c_plane - ray.origin) * ray.inverse, vec3(voxel_infinity), ray.parallel);

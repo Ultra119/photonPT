@@ -4,7 +4,7 @@ profile.low                            = §eLow
 profile.medium                         = §aMedium
 profile.high                           = §bHigh
 profile.ultra                          = §dUltra
-profile.extreme                        = §cExtreme
+profile.screenshot                     = §cScreenshot
 
 # Screens
 
@@ -762,7 +762,7 @@ screen.raytracing                                                    = Ray Traci
 screen.ao                                                           = RT Contact Occlusion
 
 # PT-only fork: there is no lighting-mode switch and no GI-off mode. The five
-# profiles (low / medium / high / ultra / extreme) are PT quality tiers.
+# profiles (low / medium / high / ultra / screenshot) are PT quality tiers.
 option.RTGI_INTENSITY                                               = RTGI Indirect Intensity
 option.RTGI_INTENSITY.comment                                       = Calibrated multiplier for traced indirect diffuse lighting (default 1.00). Keeps energy-conserving diffuse balance at 1.00.
 option.RT_CLIPMAP_SIZE = PT Light Distance
