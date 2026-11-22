@@ -11,6 +11,9 @@ const uint voxel_copper_torch_id = 118u;
 const uint voxel_copper_lantern_id = 119u;
 const uint voxel_redstone_torch_id = 120u;
 const uint voxel_lava_cauldron_id = 121u;
+const uint voxel_shroomlight_id = 122u;
+const uint voxel_furnace_id = 123u;
+const uint voxel_crying_obsidian_id = 124u;
 
 uint emitter_palette_id(uint block_id) {
     switch (block_id) {
@@ -22,13 +25,16 @@ uint emitter_palette_id(uint block_id) {
         case voxel_copper_lantern_id: return 60u;
         case voxel_redstone_torch_id: return 38u;
         case voxel_lava_cauldron_id: return 39u;
+        case voxel_shroomlight_id: return 40u;
+        case voxel_furnace_id: return 36u;
+        case voxel_crying_obsidian_id: return 47u;
         default: return block_id;
     }
 }
 
 bool voxel_emitter_id(uint block_id) {
     return (32u <= block_id && block_id < 80u && block_id != 58u && block_id != 63u)
-        || (voxel_torch_id <= block_id && block_id <= voxel_lava_cauldron_id);
+        || (voxel_torch_id <= block_id && block_id <= voxel_crying_obsidian_id);
 }
 
 bool voxel_torch_emitter(uint block_id) {
@@ -42,10 +48,11 @@ bool voxel_lantern_emitter(uint block_id) {
 }
 
 bool voxel_box_emitter(uint block_id) {
-    return block_id == 32u || block_id == 35u || block_id == 39u || block_id == 42u
+    return block_id == 32u || block_id == 35u || block_id == 38u || block_id == 39u
+        || block_id == 42u || block_id == 44u
         || (51u <= block_id && block_id <= 53u) || block_id == 61u
         || (64u <= block_id && block_id <= 79u)
-        || voxel_torch_emitter(block_id) || voxel_lantern_emitter(block_id);
+        || (voxel_torch_id <= block_id && block_id <= voxel_crying_obsidian_id);
 }
 
 #endif

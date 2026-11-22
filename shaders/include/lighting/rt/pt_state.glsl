@@ -4,7 +4,9 @@
 // rtgi_frame_state_img has one row per parity. Column 0 contains the frame
 // ID, layout tag and exact XY raster jitter in pixels. Columns 1 and 2
 // contain the allocated and active size of the full and GI lattices.
-#ifdef RTGI_EMITTER_SAMPLING
+#if defined RTGI_EMITTER_SAMPLING && defined RTGI_RESTIR_DI
+const uint rtgi_frame_tag = 4u;
+#elif defined RTGI_EMITTER_SAMPLING
 const uint rtgi_frame_tag = 3u;
 #else
 const uint rtgi_frame_tag = 2u;

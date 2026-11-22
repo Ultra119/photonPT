@@ -139,41 +139,56 @@ RtgiHistory gather_history(
     return history;
 }
 
-bool rtgi_neighbor_change(
-    ivec2 texel, RtgiGrid grid, vec2 jitter, bool even, uint material,
-    vec3 center_view, vec3 normal, float previous_luminance, float threshold, float direction
+void rtgi_neighborhood_change(
+    ivec2 texel, ivec2 prev_shift, RtgiGrid grid, vec2 jitter, bool even, uint material,
+    vec3 center_view, vec3 normal, float center_raw, float center_prev,
+    out float mean_raw, out float mean_prev, out int sample_count
 ) {
     float footprint = rtgi_view_footprint(-center_view.z, grid.gi_active, gbufferProjection);
     vec3 view_normal = transpose(mat3(gbufferModelViewInverse)) * normal;
-    int supporting = 0;
+    bool previous_even = !even;
+    float sum_raw = center_raw;
+    float sum_prev = center_prev;
+    sample_count = 1;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
             ivec2 tap = texel + ivec2(x, y);
             if (tap == texel || !rtgi_in_bounds(tap, grid.gi_active)) {
                 continue;
             }
+            ivec2 prev_tap = tap + prev_shift;
+            if (!rtgi_in_bounds(prev_tap, grid.gi_active)) {
+                continue;
+            }
             uvec4 guide = load_guide(tap, even);
             if ((guide.w & rtgi_guide_raw_valid) == 0u || !rtgi_guide_matches(guide, material)) {
                 continue;
             }
+            uvec4 p_guide = load_guide(prev_tap, previous_even);
+            if (!rtgi_guide_matches(p_guide, material)) {
+                continue;
+            }
             vec4 raw = texelFetch(rtgi_raw_sampler, tap, 0);
-            float residual = direction * (dot(raw.rgb, luminance_weights) - previous_luminance);
+            vec4 prev_mean = previous_even ? imageLoad(rtgi_accum_img, prev_tap)
+                                           : imageLoad(rtgi_history_img, prev_tap);
             vec3 tap_view;
-            if (!rtgi_finite(raw) || residual <= threshold
+            if (!rtgi_finite(raw) || any(lessThan(raw.rgb, vec3(0.0)))
+                || !rtgi_finite(prev_mean) || any(lessThan(prev_mean.rgb, vec3(0.0)))
                 || !rtgi_view_from_guide(guide, grid.full_size, jitter, gbufferProjection, tap_view)) {
                 continue;
             }
             vec3 tap_normal = transpose(mat3(gbufferModelViewInverse)) * rtgi_guide_normal(guide);
             if (rtgi_geometry_weight(tap_view - center_view, view_normal, tap_normal,
                                      footprint, 0.25 + 3.0 * footprint) > 0.5) {
-                ++supporting;
-                if (supporting == 3) {
-                    return true;
-                }
+                sum_raw += dot(raw.rgb, luminance_weights);
+                sum_prev += dot(prev_mean.rgb, luminance_weights);
+                ++sample_count;
             }
         }
     }
-    return false;
+    float inv_count = 1.0 / float(sample_count);
+    mean_raw = sum_raw * inv_count;
+    mean_prev = sum_prev * inv_count;
 }
 
 void main() {
@@ -220,6 +235,7 @@ void main() {
         && gi_layout == texelFetch(rtgi_frame_state_sampler, ivec2(2, 1 - bank), 0);
 
     RtgiHistory history = RtgiHistory(vec4(0.0), vec4(0.0), 0.0);
+    ivec2 prev_shift = ivec2(0);
     float reason = rtgi_reset_first;
     if (compatible) {
         vec3 scene_pos = transform(gbufferModelViewInverse, view_pos);
@@ -231,6 +247,10 @@ void main() {
             vec2 previous_pixel = rtgi_raster_position(clip.xy / clip.w, grid.full_size, previous_jitter);
             if (all(greaterThanEqual(previous_pixel, vec2(0.0)))
                 && all(lessThan(previous_pixel, vec2(grid.full_active)))) {
+                ivec2 p_base;
+                vec2 p_frac;
+                rtgi_footprint(previous_pixel, grid, p_base, p_frac);
+                prev_shift = ivec2(round(vec2(p_base) + p_frac)) - texel;
                 history = gather_history(previous_pixel, grid, previous_jitter,
                                          !even, previous_view, world_normal, material);
                 reason = rtgi_reset_geometry;
@@ -262,26 +282,38 @@ void main() {
     float evidence = 0.0;
     reason = rtgi_reset_none;
     if (RTGI_ADAPT_STRENGTH > 0.0 && support >= 0.65 && history.stats.z >= 6.0) {
-        float threshold = max(0.008, 0.2 * max(luminance, previous_luminance));
-        // Classify a new observation against frame noise. The error of the
-        // accumulated mean would make runs of ordinary dark samples appear
-        // significant on a stationary sparse-emitter signal.
-        float frame_sigma = sqrt(history.stats.x / max(1.0 - history.stats.y, 1e-5));
-        threshold = max(threshold, 2.5 * frame_sigma);
-        if (abs(delta) > threshold) {
-            float direction = sign(delta);
-            evidence = clamp(history.stats.w * direction + 1.0, 1.0, 3.0) * direction;
-            if (abs(evidence) >= 3.0 && rtgi_neighbor_change(texel, grid, jitter, even, material,
-                                                            view_pos, world_normal, previous_luminance,
-                                                            threshold, direction)) {
-                alpha = max(alpha, 0.5 * RTGI_ADAPT_STRENGTH);
-                reason = rtgi_reset_adaptive;
+        float nbr_raw, nbr_prev;
+        int nbr_count;
+        rtgi_neighborhood_change(
+            texel, prev_shift, grid, jitter, even, material, view_pos, world_normal,
+            luminance, previous_luminance, nbr_raw, nbr_prev, nbr_count
+        );
+        if (nbr_count >= 4) {
+            // Compare matched 3x3 same-surface raw vs previous means so steep
+            // 1/r^2 peaks have zero curvature bias while independent pixel noise
+            // drops by sqrt(N), cleanly separating lighting steps from sparse noise.
+            float nbr_delta = nbr_raw - nbr_prev;
+            float frame_sigma = sqrt(history.stats.x / max(1.0 - history.stats.y, 1e-5));
+            float nbr_sigma = frame_sigma * inversesqrt(float(nbr_count));
+            float threshold = max(0.008, max(0.2 * max(nbr_raw, nbr_prev), 3.0 * nbr_sigma));
+            if (abs(nbr_delta) > threshold) {
+                float direction = sign(nbr_delta);
+                evidence = clamp(history.stats.w * direction + 1.0, 1.0, 3.0) * direction;
+                if (abs(evidence) >= 3.0) {
+                    alpha = max(alpha, 0.55 * RTGI_ADAPT_STRENGTH);
+                    age = min(age, max(1.0 / alpha, 4.0));
+                    reason = rtgi_reset_adaptive;
+                }
             }
         }
     }
 
     vec3 mean = mix(history.mean.rgb, raw.rgb, alpha);
-    float variance = (1.0 - alpha) * (history.stats.x + alpha * sqr(delta));
+    // Do not poison stationary frame variance with a confirmed lighting-step
+    // residual; otherwise frame_sigma explodes on frame 3 and locks adaptation shut.
+    float variance = reason == rtgi_reset_adaptive
+        ? (1.0 - alpha) * history.stats.x
+        : (1.0 - alpha) * (history.stats.x + alpha * sqr(delta));
     float q = sqr(1.0 - alpha) * history.stats.y + sqr(alpha);
     store_history(texel, even, vec4(mean, raw.a), vec4(variance, q, age, evidence),
                   reason, support, true, alpha);
