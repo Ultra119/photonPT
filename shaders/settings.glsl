@@ -74,7 +74,7 @@ const float wetnessHalflife         = 70.0;
   #define RTGI_ADAPT_STRENGTH 0.5 // [0.0 0.25 0.5 0.75 1.0]
   #define RTGI_MAX_RADIANCE 24.0 // [0.0 4.0 6.0 8.0 12.0 16.0 20.0 24.0 32.0 48.0 64.0]
   #define EMISSION_ANCHOR 16.0 // [4.0 6.0 8.0 10.0 12.0 16.0 20.0 24.0 32.0]
-  #define SUN_INDIRECT_BOOST 2.50 // [1.00 1.25 1.50 1.75 2.00 2.50 3.00 3.50 4.00 5.00]
+  #define SUN_INDIRECT_BOOST 1.00 // [1.00 1.25 1.50 1.75 2.00 2.50 3.00 3.50 4.00 5.00]
 
   #define RTGI_RESOLUTION 1 // [0 1 2]
   #define RTGI_RAY_COUNT 1 // [1 2 3 4 6 8]
@@ -149,8 +149,8 @@ const float wetnessHalflife         = 70.0;
   #define PIXELATED_SHADOWS_RESOLUTION 16 // [4 8 16 32 64 128 256]
   #define SSS_STEPS 12 // [4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24]
 
-  #define SHADOW_PCF_STEPS_MIN           6 // [4 6 8 12 16 18 20 22 24 26 28 30 32]
-  #define SHADOW_PCF_STEPS_MAX          12 // [4 6 8 12 16 18 20 22 24 26 28 30 32]
+  #define SHADOW_PCF_STEPS_MIN           8 // [4 6 8 12 16 18 20 22 24 26 28 30 32]
+  #define SHADOW_PCF_STEPS_MAX          20 // [4 6 8 12 16 18 20 22 24 26 28 30 32]
   #define SHADOW_PCF_STEPS_SCALE       1.0 // [0.0 0.2 0.4 0.6 0.8 1.0 1.2 1.4 1.6 1.8 2.0]
   #define SHADOW_BLOCKER_SEARCH_RADIUS 0.5 // [0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0]
 
@@ -160,7 +160,7 @@ const float wetnessHalflife         = 70.0;
   #define RT_AO_STRENGTH 0.50 // [0.00 0.25 0.50 0.75 1.00]
   #define RT_AO_RADIUS 0.75 // [0.25 0.50 0.75 1.00 1.50 2.00]
   #define RT_AO_RAYS 4 // [2 4 8]
-  #define RT_AO_IN_DIRECT
+//#define RT_AO_IN_DIRECT
 
   #define RT_CLIPMAP_SIZE 256 // [64 96 128 192 256 384 512]
 

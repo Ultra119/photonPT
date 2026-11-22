@@ -38,8 +38,8 @@ vec3 get_shadow_bias(vec3 scene_pos, vec3 normal, float NoL, float skylight) {
     skylight = 1.0;
 #endif
 
-    // Shadow bias without peter-panning
-    return 0.25 * normal * clamp01(0.12 + 0.01 * length(scene_pos))
+    // Shadow bias without peter-panning (kept tight to prevent grazing wall-floor drift)
+    return 0.16 * normal * clamp01(0.12 + 0.01 * length(scene_pos))
         * (2.0 - clamp01(NoL));
 }
 

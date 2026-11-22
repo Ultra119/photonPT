@@ -31,7 +31,7 @@ vec3 voxel_sun_visibility(usampler3D grid, vec3 origin, vec3 direction) {
     float macro_visibility = 1.0;
     vec3 shadow_tint = vec3(1.0);
 #ifdef VOXEL_DDA_USE_SHADOWMAP
-    vec3 near_scene = voxel_to_scene_space(origin) + direction * 0.45;
+    vec3 near_scene = voxel_to_scene_space(origin) + direction * 2.5;
     vec3 shadow_clip = project_ortho(shadowProjection, transform(shadowModelView, near_scene));
     if (all(lessThan(abs(shadow_clip), vec3(0.99)))) {
         vec3 screen = distort_shadow_space(shadow_clip) * 0.5 + 0.5;
@@ -172,7 +172,22 @@ PathTraceSample evaluate_path_trace(
         float sun_cosine = dot(hit.normal, light_direction);
         vec3 safe_sun_color = max0(direct_sun_color);
         if (sun_cosine > 0.0 && max_of(safe_sun_color) > 0.0) {
-            vec3 visibility = voxel_sun_visibility(grid, next_origin, light_direction);
+            vec3 sun_ray_dir = light_direction;
+            float sun_half_angle = radians(SUN_ANGULAR_RADIUS) * max(SHADOW_PENUMBRA_SCALE, 0.0);
+            if (sun_half_angle > 1e-4) {
+                float r_u = sqrt(random_dimension(seed, 16 + 2 * b));
+                float phi_u = tau * random_dimension(seed, 17 + 2 * b);
+                mat3 sun_basis = build_orthonormal_basis(light_direction);
+                float tan_r = tan(min(sun_half_angle, 0.25)) * r_u;
+                vec3 cand_dir = normalize(
+                    light_direction
+                    + tan_r * (cos(phi_u) * sun_basis[0] + sin(phi_u) * sun_basis[1])
+                );
+                if (dot(hit.normal, cand_dir) > 0.0) {
+                    sun_ray_dir = cand_dir;
+                }
+            }
+            vec3 visibility = voxel_sun_visibility(grid, next_origin, sun_ray_dir);
             // Cap artistic sunlight bounce boost per hit so high-albedo surfaces
             // never exceed unit reflectance and create energy in 90-degree corners,
             // while darker stone/foliage retains full cave-bounce reach and hue.

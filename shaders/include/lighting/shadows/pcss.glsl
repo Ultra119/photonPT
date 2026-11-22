@@ -27,7 +27,7 @@ const int shadow_map_res = int(float(shadowMapResolution) * MC_SHADOW_QUALITY);
 const float shadow_map_pixel_size = rcp(float(shadow_map_res));
 
 vec2 blocker_search(vec3 scene_pos, float dither, bool has_sss) {
-    int step_count = has_sss ? SSS_STEPS : 3;
+    int step_count = has_sss ? SSS_STEPS : 8;
 
     vec3 shadow_view_pos = transform(shadowModelView, scene_pos);
     vec3 shadow_clip_pos = project_ortho(shadowProjection, shadow_view_pos);
@@ -212,10 +212,10 @@ vec3 get_filtered_shadows(
 
     vec3 bias = get_shadow_bias(scene_pos, flat_normal, NoL, skylight);
 
-    // Light leaking prevention from Complementary Reimagined, used with
-    // permission
+    // Gentle inward light-leak guard (kept small so grazing wall shadows
+    // remain aligned with floor shadows at 90-degree corners).
     vec3 edge_factor
-        = 0.1 - 0.2 * fract(scene_pos + cameraPosition + flat_normal * 0.01);
+        = 0.02 - 0.04 * fract(scene_pos + cameraPosition + flat_normal * 0.01);
     edge_factor -= edge_factor * skylight;
 
 #ifdef PIXELATED_SHADOWS
@@ -242,8 +242,10 @@ vec3 get_filtered_shadows(
     dither = r1(frameCounter, dither);
 
 #ifdef SHADOW_VPS
+    // Bias blocker search so grazing walls do not self-occlude into penumbra
+    // strings along narrow skylight beams.
     vec2 blocker_search_result
-        = blocker_search(scene_pos, dither, sss_amount > eps);
+        = blocker_search(scene_pos + bias, dither, sss_amount > eps);
 
     sss_depth = blocker_search_result.y;
 
