@@ -21,7 +21,10 @@ body:
       label: Minecraft Version
       description: Which version of Minecraft do you have?
       options:
+        - 26.3
+        - 26.2
         - 26.1
+        - 1.21.11
         - 1.21.10
         - 1.21.9
         - 1.21.8
@@ -33,41 +36,14 @@ body:
         - 1.21.2
         - 1.21.1
         - 1.21
-        - 1.20.6
-        - 1.20.5
-        - 1.20.4
-        - 1.20.3
-        - 1.20.2
-        - 1.20.1
-        - 1.20
-        - 1.19.4
-        - 1.19.3
-        - 1.19.2
-        - 1.19.1
-        - 1.19
-        - 1.18.2
-        - 1.18.1
-        - 1.18
-        - 1.17.1
-        - 1.17
         - Other
-    validations:
-      required: true
-  - type: dropdown
-    id: shader-mod
-    attributes:
-      label: Which shader mod are you using?
-      options:
-        - Iris
-        - Optifine
-      default: 0
     validations:
       required: true
   - type: input
     id: shader-mod-version
     attributes:
-      label: Shader mod version
-      description: For Iris you can find this in shaderpack selection screen, for Optifine you can find this in the video settings.
+      label: Iris version
+      description: You can find your Iris version on the shaderpack selection screen (note: OptiFine is not supported).
     validations:
       required: true
   - type: textarea
