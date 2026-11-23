@@ -36,6 +36,7 @@ vec3 sss_approx(
     float sheen_amount,
     float sss_depth,
     float LoV,
+    float NoL,
     float shadow
 ) {
     // Transmittance-based SSS
@@ -43,21 +44,26 @@ vec3 sss_approx(
         return vec3(0.0);
     }
 
-    vec3 coeff = albedo * inversesqrt(dot(albedo, luminance_weights) + eps);
-    coeff = 0.75 * clamp01(coeff);
+    // Normalize by peak channel so dark green foliage and bright cherry petals
+    // share consistent multi-block canopy penetration instead of dying at 1 block.
+    float albedo_peak = max(max_of(albedo), eps);
+    vec3 coeff = 0.65 * clamp01(albedo / albedo_peak);
     coeff = (1.0 - coeff) * sss_density / sss_amount;
 
+    // Emphasize backlit forward-scattering when looking toward the sun and
+    // suppress body SSS on directly sunlit front faces to prevent neon blowout.
+    float front_lit = clamp01(shadow * smoothstep(0.0, 0.35, NoL));
     float phase
-        = mix(isotropic_phase, henyey_greenstein_phase(-LoV, 0.7), 0.33);
+        = mix(isotropic_phase, henyey_greenstein_phase(-LoV, 0.60), 0.72);
 
-    vec3 sss = sss_scale * phase * exp2(-coeff * sss_depth) * dampen(sss_amount)
-        * pi;
+    vec3 transmittance = exp2(-coeff * sss_depth);
+    vec3 sss = sss_scale * phase * transmittance * dampen(sss_amount) * pi
+        * mix(1.0, 0.18, front_lit);
 
 #ifdef SSS_SHEEN
-    vec3 sheen = (0.8 * SSS_INTENSITY) * rcp(albedo + eps)
-        * exp2(-1.0 * coeff * sss_depth) * henyey_greenstein_phase(-LoV, 0.5)
-        * linear_step(-0.8, -0.2, -LoV);
-    sss += sheen * sheen_amount;
+    vec3 sheen = (0.8 * SSS_INTENSITY) * rcp(albedo + eps) * transmittance
+        * henyey_greenstein_phase(-LoV, 0.5) * linear_step(-0.8, -0.2, -LoV);
+    sss += sheen * sheen_amount * mix(1.0, 0.5, front_lit * (1.0 - sheen_amount));
 #endif
 
     return sss;
@@ -69,10 +75,12 @@ vec3 sss_approx(
     float sheen_amount,
     float sss_depth,
     float LoV,
+    float NoL,
     float shadow
 ) {
     // Blur-based SSS
-    float sss = 0.06 * sss_scale * pi;
+    float front_lit = clamp01(shadow * smoothstep(0.0, 0.35, NoL));
+    float sss = 0.06 * sss_scale * pi * mix(1.0, 0.25, front_lit);
     vec3 sheen = 0.8 * rcp(albedo + eps) * henyey_greenstein_phase(-LoV, 0.5)
         * linear_step(-0.8, -0.2, -LoV) * shadow;
 
@@ -285,7 +293,7 @@ vec3 get_diffuse_lighting(
 #if defined SHADOW || defined SHADOW_SSRT
     vec3 diffuse = vec3(
         lift(max0(NoL), 0.25 * rcp(SHADING_STRENGTH))
-        * (1.0 - 0.5 * material.sss_amount)
+        * (1.0 - 0.20 * material.sss_amount)
     );
 
     vec3 sss = sss_approx(
@@ -294,6 +302,7 @@ vec3 get_diffuse_lighting(
                    material.sheen_amount,
                    mix(sss_depth, 0.0, shadow_distance_fade),
                    LoV,
+                   NoL,
                    shadows.x
                )
         * float(!sss_blocked);
