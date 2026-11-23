@@ -71,8 +71,7 @@ uniform vec2 taa_offset;
                               // which further reduces ghosting but can
                               // introduce flickering artifacts
 #define TAA_OFFCENTER_REJECTION \
-    0.25 // Reduces blur when moving quickly. Too much offcenter rejection
-         // results in aliasing and jittering in motion
+    0.08 // Subtle crispness boost in motion without leaking raw jitter
 #define TAAU_CONFIDENCE_REJECTION \
     5.0 // Controls the impact of the "confidence-of-quality" factor on temporal
         // upscaling. Tradeoff between image clarity and time taken to converge
@@ -216,10 +215,11 @@ vec3 neighborhood_clipping(
            + i * i);
 
     // Strictness parameter, higher gamma => more temporally stable but more
-    // ghosting. Relax slightly when stationary to avoid clipping jittered edges.
-    float static_gamma = mix(1.35, 1.50, linear_step(0.25, 1.0, distance_factor));
-    float moving_gamma = mix(0.85, 1.25, linear_step(0.25, 1.0, distance_factor));
-    float gamma = mix(static_gamma, moving_gamma, smoothstep(0.0, 0.75, motion_pixels));
+    // ghosting. Keep stationary AABB wide enough that sub-pixel jittered edges
+    // and crisp ground textures converge instead of ping-pong clipping.
+    float static_gamma = mix(2.00, 2.25, linear_step(0.25, 1.0, distance_factor));
+    float moving_gamma = mix(1.15, 1.50, linear_step(0.25, 1.0, distance_factor));
+    float gamma = mix(static_gamma, moving_gamma, smoothstep(0.15, 2.0, motion_pixels));
 
     vec3 mu = moments[0];
     vec3 sigma = sqrt(max0(moments[1] - moments[0] * moments[0]));
@@ -300,10 +300,10 @@ void main() {
         float distance_factor = 1.0 - exp2(-0.025 * distance_to_camera);
         float motion_pixels = length((uv - previous_uv) * vec2(size));
 #ifndef TAAU
-        // Keep stationary native-res TAA stable against sub-pixel jitter while
-        // preserving fast response under camera or object motion.
-        float motion_t = smoothstep(0.0, 0.75, motion_pixels);
-        float min_alpha = mix(0.04, mix(0.35, 0.10, distance_factor), motion_t);
+        // Keep native-res TAA smooth against sub-pixel jitter both at rest and
+        // in motion; Catmull-Rom history + YCoCg clipping keep motion sharp.
+        float motion_t = smoothstep(0.15, 2.0, motion_pixels);
+        float min_alpha = mix(0.05, mix(0.14, 0.08, distance_factor), motion_t);
 #else
         float min_alpha = mix(0.35, 0.10, distance_factor);
 #endif
@@ -318,11 +318,14 @@ void main() {
                                               history_color, distance_factor,
                                               motion_pixels, history_clipped,
                                               min_color, max_color);
-        float flicker_reduction = history_clipped ? 0.0
-            : get_flicker_reduction(history_color, min_color, max_color);
+        // Damp sub-pixel shimmer when stationary history hugs the AABB edge.
+        float luma_span = max(max_color.x - min_color.x, 1e-4);
+        float luma_margin = min(history_color.x - min_color.x,
+                                max_color.x - history_color.x) / luma_span;
+        float edge_flicker = history_clipped ? 1.0 : (1.0 - smoothstep(0.0, 0.25, luma_margin));
         history_color = ycocg_to_rgb(history_color);
-        alpha *= mix(1.0 - 0.65 * flicker_reduction, 1.0, motion_t);
-        alpha = max(alpha, mix(0.025, 0.05, motion_t));
+        alpha *= mix(1.0 - 0.45 * edge_flicker, 1.0, motion_t);
+        alpha = max(alpha, mix(0.03, 0.06, motion_t));
 #else
         vec3 min_color = texture(colortex1, pos).rgb * 2.0 - 1.0;
         vec3 max_color = texture(colortex2, pos).rgb * 2.0 - 1.0;

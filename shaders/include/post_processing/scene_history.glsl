@@ -89,7 +89,7 @@ TaaReceiver taa_receiver(ivec2 texel, ivec2 size, vec2 jitter, vec2 display_uv) 
         // At a grazing silhouette the plane can run far beyond its texel;
         // fall back to the raster sample rather than discarding history.
         if (abs(denominator) <= eps * length(ray.xyz)
-            || abs(receiver.view_pos.z - sample_view.z) > 0.1 * -sample_view.z) {
+            || abs(receiver.view_pos.z - sample_view.z) > 0.25 * -sample_view.z) {
             receiver.view_pos = sample_view;
             receiver.unjittered_uv = rtgi_raster_ndc(sample_center, size, jitter) * 0.5 + 0.5;
         }
@@ -117,16 +117,20 @@ bool taa_guide_matches(
     if (!(tap_depth > 0.0) || isinf(tap_depth)) {
         return false;
     }
-    float error = abs(depth - tap_depth);
+    float depth_error = abs(depth - tap_depth);
+    if (depth_error <= tolerance) {
+        return true;
+    }
     if (has_plane) {
         vec2 tap_ndc = 2.0 * (vec2(tap) + 0.5) / vec2(size) - 1.0;
         vec3 tap_view;
         if (!rtgi_view_at_ndc(tap_ndc, -tap_depth, projection, tap_view)) {
             return false;
         }
-        error = abs(dot(previous_normal, tap_view - previous_view));
+        float plane_error = abs(dot(previous_normal, tap_view - previous_view));
+        return plane_error <= tolerance;
     }
-    return error <= tolerance;
+    return false;
 }
 
 TaaHistory taa_history(TaaReceiver receiver, vec2 display_uv, ivec2 size, out vec2 previous_uv) {
@@ -167,12 +171,15 @@ TaaHistory taa_history(TaaReceiver receiver, vec2 display_uv, ivec2 size, out ve
     vec3 previous_normal = mat3(gbufferPreviousModelView) * receiver.world_normal;
     bool has_plane = taa_has_plane(receiver.kind);
     float depth = -previous_view.z;
-    // Allow depth-buffer roundoff without admitting separate block layers.
-    float tolerance = clamp(0.025 + 4e-6 * depth * depth, 0.025, 0.12);
-    if (!has_plane && !sky) {
-        tolerance = clamp(0.5 * rtgi_view_footprint(depth, size, projection), 0.025, 0.12);
-    }
+    float footprint = sky ? 0.0 : rtgi_view_footprint(depth, size, projection);
+    // Scale tolerance with pixel footprint and relative depth so grazing
+    // ground, grass blades, and distant terrain steps never falsely reset TAA,
+    // while true foreground-over-background disocclusions are still rejected.
+    float tolerance = has_plane
+        ? max(0.08 + 0.025 * depth, 1.5 * footprint)
+        : max(0.10 + 0.03 * depth, 2.0 * footprint);
 
+    float matched_age = 0.0;
     for (int y = 0; y <= 1; ++y) {
         for (int x = 0; x <= 1; ++x) {
             ivec2 offset = ivec2(x, y);
@@ -195,50 +202,67 @@ TaaHistory taa_history(TaaReceiver receiver, vec2 display_uv, ivec2 size, out ve
                 continue;
             }
             history.color += weight * max0(sample_value.rgb);
-            history.age += weight * sample_value.a;
+            matched_age += weight * sample_value.a;
             history.support += weight;
         }
     }
-    if (history.support > 0.0) {
-        history.color /= history.support;
-    } else if (!sky && length((previous_uv - display_uv) * vec2(size)) < 0.25) {
-        // On a stationary camera, sub-pixel TAA jitter can straddle a geometric
-        // edge so the single center guide alternates between foreground and
-        // background. Admit the resolved center pixel if an adjacent guide
-        // confirms this surface was already present on the previous frame.
+
+    bool surface_confirmed = history.support >= 0.25;
+    if (!surface_confirmed) {
+        // Sub-pixel TAA jitter straddles geometric edges, silhouettes, and
+        // thin foliage so the center guide alternates between foreground and
+        // background. Admit history when a 3x3 neighbor confirms this surface
+        // was already present on the previous frame (not a true disocclusion).
         ivec2 center_tap = ivec2(round(previous_pixel));
-        if (rtgi_in_bounds(center_tap, size)) {
-            bool edge_confirmed = false;
-            const ivec2 cardinals[4] = ivec2[4](
-                ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1)
-            );
-            for (int k = 0; k < 4; ++k) {
-                ivec2 nb = center_tap + cardinals[k];
+        float best_age = 0.0;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                ivec2 nb = center_tap + ivec2(dx, dy);
                 if (!rtgi_in_bounds(nb, size)) {
                     continue;
                 }
                 uint nb_guide = floatBitsToUint(texelFetch(colortex19, nb, 0).r);
-                if (taa_guide_matches(nb_guide, receiver, false, has_plane, nb,
+                if (taa_guide_matches(nb_guide, receiver, sky, has_plane, nb,
                                       size, projection, previous_view,
                                       previous_normal, depth, tolerance)) {
-                    edge_confirmed = true;
-                    break;
-                }
-            }
-            if (edge_confirmed) {
-                vec4 sample_value = texelFetch(colortex5, center_tap, 0);
-                if (center_tap == ivec2(0)) {
-                    sample_value.a = 1.0;
-                }
-                if (rtgi_finite(sample_value) && sample_value.a >= 1.0) {
-                    history.color = max0(sample_value.rgb);
-                    history.age = sample_value.a;
-                    history.support = 1.0;
+                    vec4 nb_val = texelFetch(colortex5, nb, 0);
+                    float nb_age = nb == ivec2(0) ? 1.0 : nb_val.a;
+                    if (rtgi_finite(nb_val) && nb_age >= 1.0) {
+                        surface_confirmed = true;
+                        best_age = max(best_age, nb_age);
+                    }
                 }
             }
         }
+        if (surface_confirmed) {
+            matched_age = history.support > 0.0 ? (matched_age / history.support) : best_age;
+            history.support = 1.0;
+        }
+    } else {
+        matched_age /= history.support;
+        history.color /= history.support;
+        history.support = 1.0;
     }
-    // Age keeps rejected weights in its denominator.
+
+    if (surface_confirmed) {
+        // Resample confirmed history with Catmull-Rom bicubic (mip 0) so
+        // moving ground and textures stay crisp without bilinear smearing.
+        bool interior = all(greaterThan(previous_pixel, vec2(1.0)))
+            && all(lessThan(previous_pixel, vec2(size - 2)));
+        vec3 resampled = interior
+            ? catmull_rom_filter_fast_rgb(colortex5, previous_uv, 0.5)
+            : textureLod(colortex5, previous_uv, 0.0).rgb;
+        if (rtgi_finite(vec4(resampled, 0.0))) {
+            history.color = max0(resampled);
+        } else if (history.support <= 0.0) {
+            history.support = 0.0;
+            return history;
+        }
+        history.age = matched_age;
+    } else if (history.support > 0.0) {
+        history.color /= history.support;
+        history.age = matched_age;
+    }
     return history;
 }
 

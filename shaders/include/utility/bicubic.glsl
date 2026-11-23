@@ -213,17 +213,17 @@ vec3 catmull_rom_filter_fast_rgb(
 
     vec2 w12 = w1 + w2;
     vec2 tc12 = view_pixel_size * (center_position + w2 / w12);
-    vec3 center_color = texture(sampler, vec2(tc12.x, tc12.y)).rgb;
+    vec3 center_color = textureLod(sampler, vec2(tc12.x, tc12.y), 0.0).rgb;
 
     vec2 tc0 = view_pixel_size * (center_position - 1.0);
     vec2 tc3 = view_pixel_size * (center_position + 2.0);
 
     vec4 color
-        = vec4(texture(sampler, vec2(tc12.x, tc0.y)).rgb, 1.0) * (w12.x * w0.y)
-        + vec4(texture(sampler, vec2(tc0.x, tc12.y)).rgb, 1.0) * (w0.x * w12.y)
+        = vec4(textureLod(sampler, vec2(tc12.x, tc0.y), 0.0).rgb, 1.0) * (w12.x * w0.y)
+        + vec4(textureLod(sampler, vec2(tc0.x, tc12.y), 0.0).rgb, 1.0) * (w0.x * w12.y)
         + vec4(center_color, 1.0) * (w12.x * w12.y)
-        + vec4(texture(sampler, vec2(tc3.x, tc12.y)).rgb, 1.0) * (w3.x * w12.y)
-        + vec4(texture(sampler, vec2(tc12.x, tc3.y)).rgb, 1.0) * (w12.x * w3.y);
+        + vec4(textureLod(sampler, vec2(tc3.x, tc12.y), 0.0).rgb, 1.0) * (w3.x * w12.y)
+        + vec4(textureLod(sampler, vec2(tc12.x, tc3.y), 0.0).rgb, 1.0) * (w12.x * w3.y);
 
     return color.rgb / color.a;
 }

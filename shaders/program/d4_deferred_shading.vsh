@@ -15,6 +15,7 @@ out vec2 uv;
 
 flat out vec3 ambient_color;
 flat out vec3 light_color;
+flat out vec3 sky_fallback_color;
 
 #if defined WORLD_OVERWORLD
 flat out vec3 sun_color;
@@ -82,19 +83,46 @@ uniform float time_midnight;
 #if defined WORLD_OVERWORLD
 #include "/include/lighting/colors/light_color.glsl"
 #include "/include/sky/atmosphere.glsl"
-#include "/include/sky/projection.glsl"
 #include "/include/weather/fog.glsl"
 #include "/include/weather/rainbow.glsl"
 #endif
 
+#include "/include/sky/projection.glsl"
 #include "/include/utility/random.glsl"
 #include "/include/utility/sampling.glsl"
+
+#if defined WORLD_OVERWORLD || defined WORLD_END
+// Cosine-weighted upper-hemisphere integral of colortex4 (sky_map) in E/pi
+// radiance units, matching path_trace.glsl's voxel_environment() integration
+// so terrain outside the RT voxel grid matches traced sky GI in brightness
+// and color across clear, cloudy, foggy, rainy, and End skies.
+vec3 integrate_sky_map_hemisphere() {
+    const int samples = 32;
+    const float golden_angle = 2.39996323;
+    vec3 sum = vec3(0.0);
+    for (int i = 0; i < samples; ++i) {
+        float u = (float(i) + 0.5) / float(samples);
+        float y = sqrt(u);
+        float r = sqrt(max0(1.0 - u));
+        float phi = float(i) * golden_angle;
+        vec3 dir = vec3(r * cos(phi), y, r * sin(phi));
+        vec3 s = textureLod(colortex4, project_sky(dir), 0.0).rgb;
+        sum += (!any(isnan(s)) && !any(isinf(s))) ? max0(s) : vec3(0.0);
+    }
+    return sum / float(samples);
+}
+#endif
 
 void main() {
     uv = gl_MultiTexCoord0.xy;
 
     light_color = texelFetch(colortex4, ivec2(191, 0), 0).rgb;
     ambient_color = texelFetch(colortex4, ivec2(191, 1), 0).rgb;
+#if defined WORLD_OVERWORLD || defined WORLD_END
+    sky_fallback_color = integrate_sky_map_hemisphere();
+#else
+    sky_fallback_color = ambient_color;
+#endif
 
 #if defined WORLD_OVERWORLD
     Weather weather = get_weather();

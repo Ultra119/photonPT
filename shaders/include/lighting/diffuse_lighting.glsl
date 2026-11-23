@@ -80,7 +80,7 @@ vec3 sss_approx(
 }
 #endif
 
-vec3 rtgi_fallback_radiance(vec2 light_levels) {
+vec3 rtgi_fallback_radiance(vec2 light_levels, vec3 flat_normal) {
     // Reuse the underlying lightmap falloff only where traced diffuse has no
     // compatible support (or for forward translucent callers). Keep the
     // fallback deterministic and in E/pi units.
@@ -88,6 +88,22 @@ vec3 rtgi_fallback_radiance(vec2 light_levels) {
     float falloff = pow8(blocklight) + 0.18 * sqr(blocklight) + 0.16 * dampen(blocklight);
     vec3 block = (rcp_pi * blocklight_scale * falloff) * blocklight_color;
 
+#if defined PROGRAM_DEFERRED4
+#if defined WORLD_OVERWORLD
+    // Match path_trace.glsl's sky-map cosine-hemisphere integral on open
+    // surfaces and estimate warm sunlit ground bounce on vertical/underside
+    // faces so the RT coverage boundary has no brightness drop or blue shift.
+    float sky_vis = sqr(light_levels.y);
+    vec3 sky_up = sky_fallback_color * SKYLIGHT_I;
+    vec3 ground_bounce = 0.28 * (sky_up + max0(light_color) * (max0(light_dir.y) * rcp_pi));
+    float up_factor = 0.5 + 0.5 * clamp(flat_normal.y, -1.0, 1.0);
+    vec3 environment = mix(ground_bounce, sky_up, up_factor) * sky_vis;
+#elif defined WORLD_NETHER
+    vec3 environment = ambient_color;
+#else
+    vec3 environment = sky_fallback_color;
+#endif
+#else
 #if defined WORLD_OVERWORLD
     vec3 environment = ambient_color * (rcp_pi * SKYLIGHT_I * sqr(light_levels.y));
 #elif defined WORLD_NETHER
@@ -95,7 +111,12 @@ vec3 rtgi_fallback_radiance(vec2 light_levels) {
 #else
     vec3 environment = 0.1 * ambient_color;
 #endif
+#endif
     return block + environment;
+}
+
+vec3 rtgi_fallback_radiance(vec2 light_levels) {
+    return rtgi_fallback_radiance(light_levels, vec3(0.0, 1.0, 0.0));
 }
 
 #ifdef DIFFUSE_USE_RTGI
@@ -122,14 +143,14 @@ vec3 sample_rtgi_diffuse(
     ivec2 pixel, ivec2 full_size, vec3 view_pos, vec3 scene_pos,
     vec3 flat_normal, uint material, uint kind, vec2 light_levels
 ) {
-    vec3 fallback = rtgi_fallback_radiance(light_levels);
+    vec3 fallback = rtgi_fallback_radiance(light_levels, flat_normal);
     if (kind != rtgi_world || !rtgi_finite(vec4(scene_pos, view_pos.z)) || view_pos.z >= 0.0) {
         return fallback;
     }
 
     vec3 local = scene_to_voxel_space(scene_pos);
     vec3 edge = min(local, rt_voxel_size_f - local);
-    float coverage = smoothstep(0.0, 4.0, min(edge.x, min(edge.y, edge.z)));
+    float coverage = smoothstep(0.0, 8.0, min(edge.x, min(edge.y, edge.z)));
     RtgiGrid grid = rtgi_grid(full_size, textureSize(rtgi_filtered_sampler, 0));
     if (coverage <= 0.0 || !rtgi_in_bounds(pixel, grid.full_active)
         || any(equal(grid.gi_active, ivec2(0)))) {

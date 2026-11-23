@@ -20,6 +20,7 @@ in vec2 uv;
 
 flat in vec3 ambient_color;
 flat in vec3 light_color;
+flat in vec3 sky_fallback_color;
 
 #if defined WORLD_OVERWORLD
 flat in vec3 sun_color;
