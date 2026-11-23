@@ -30,6 +30,7 @@ layout(location = 1) out float bloomy_fog;
 in vec2 uv;
 
 flat in vec3 ambient_color;
+flat in vec3 water_ambient_color;
 flat in vec3 light_color;
 
 #ifdef WORLD_OVERWORLD
@@ -524,7 +525,7 @@ void main() {
 
         mat2x3 analytic_fog = water_fog_simple(
             light_color,
-            ambient_color,
+            water_ambient_color,
             water_absorption_coeff,
             vec2(0.0, eye_skylight),
             view_distance,

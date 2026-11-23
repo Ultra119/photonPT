@@ -14,6 +14,7 @@
 out vec2 uv;
 
 flat out vec3 ambient_color;
+flat out vec3 water_ambient_color;
 flat out vec3 light_color;
 
 #if defined WORLD_OVERWORLD
@@ -69,6 +70,11 @@ void main() {
     // Environment appearance for fog/media only; RT surface irradiance comes
     // from traced GI/probes, never from this sky color or an SH ambient term.
     ambient_color = texelFetch(colortex4, ivec2(191, 1), 0).rgb;
+#if defined WORLD_OVERWORLD
+    water_ambient_color = texelFetch(colortex4, ivec2(191, 2), 0).rgb * pi;
+#else
+    water_ambient_color = ambient_color;
+#endif
 
 #if defined WORLD_OVERWORLD
     fog_params = get_fog_parameters(get_weather());

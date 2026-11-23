@@ -32,6 +32,7 @@ uniform float sunAngle;
 
 uniform int worldTime;
 uniform int worldDay;
+uniform int isEyeInWater;
 
 uniform vec3 sun_dir;
 
@@ -69,7 +70,13 @@ void main() {
     light_color = texelFetch(colortex4, ivec2(191, 0), 0).rgb;
     // Environment appearance for fog/media only; RT surface irradiance comes
     // from traced GI/probes, never from this sky color or an SH ambient term.
+#if defined WORLD_OVERWORLD
+    ambient_color = (isEyeInWater == 1)
+        ? texelFetch(colortex4, ivec2(191, 2), 0).rgb * pi
+        : texelFetch(colortex4, ivec2(191, 1), 0).rgb;
+#else
     ambient_color = texelFetch(colortex4, ivec2(191, 1), 0).rgb;
+#endif
 
 #if defined WORLD_OVERWORLD
     fog_params = get_fog_parameters(get_weather());

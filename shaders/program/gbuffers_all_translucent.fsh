@@ -378,7 +378,11 @@ void main() {
     // Get light colors
 
     light_color = texelFetch(colortex4, ivec2(191, 0), 0).rgb;
+#if defined WORLD_OVERWORLD
+    ambient_color = texelFetch(colortex4, ivec2(191, 2), 0).rgb * pi;
+#else
     ambient_color = texelFetch(colortex4, ivec2(191, 1), 0).rgb;
+#endif
 
     // Space conversions
 

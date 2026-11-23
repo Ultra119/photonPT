@@ -346,6 +346,21 @@ vec3 get_diffuse_lighting(
     direct_lighting += nightVision * night_vision_scale * directional_lighting * ao;
 #endif
 
+#if defined PROGRAM_DEFERRED4 && defined WORLD_OVERWORLD
+    // Gentle overhead skylight transmission through translucent foliage so
+    // shaded tree backsides and undersides stay smooth like stock Photon
+    // without extra ray traces (naturally masked out indoors by light_levels.y).
+    if (material.sss_amount > eps) {
+        vec3 foliage_sky_fill = sky_fallback_color
+            * (0.30 * SKYLIGHT_I * material.sss_amount * sqr(light_levels.y) * ao);
+        indirect_radiance = mix(
+            indirect_radiance,
+            max(indirect_radiance, foliage_sky_fill),
+            0.50 * material.sss_amount
+        );
+    }
+#endif
+
     // The raster term is irradiance, and RTGI already includes the diffuse 1/pi.
     // Outgoing surface emission Le is already tinted in linear Rec.2020 and
     // must not be multiplied by diffuse albedo or metallic attenuation again.

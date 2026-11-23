@@ -46,6 +46,7 @@ uniform sampler3D colortex6; // 3D bubbly worley noise
 #define SAMPLER_WORLEY_BUBBLY colortex6
 uniform sampler3D colortex7; // 3D swirley worley noise
 #define SAMPLER_WORLEY_SWIRLEY colortex7
+uniform sampler2D colortex4; // previous frame sky map for hemisphere average
 
 #if defined WORLD_OVERWORLD && defined GALAXY
 uniform sampler2D colortex13;
@@ -145,6 +146,40 @@ void main() {
             case 1:
                 sky_map = ambient_color;
                 break;
+
+            case 2: {
+                // 32-sample cosine-weighted upper-hemisphere average of the
+                // previous frame's sky map (1 texel/frame = 32 fetches total).
+                // Supplies neutral sky+clouds ambient for water fog (matching
+                // stock Photon's SH skylight_up) without disturbing air fog.
+#if defined WORLD_OVERWORLD || defined WORLD_END
+                const int samples = 32;
+                const float golden_angle = 2.39996323;
+                vec3 sum = vec3(0.0);
+                for (int i = 0; i < samples; ++i) {
+                    float u = (float(i) + 0.5) / float(samples);
+                    float y = sqrt(u);
+                    float r = sqrt(max0(1.0 - u));
+                    float phi = float(i) * golden_angle;
+                    vec3 dir = vec3(r * cos(phi), y, r * sin(phi));
+                    vec3 s = textureLod(colortex4, project_sky(dir), 0.0).rgb;
+                    sum += (!any(isnan(s)) && !any(isinf(s))) ? max0(s) : vec3(0.0);
+                }
+                vec3 avg = sum / float(samples);
+#if defined WORLD_OVERWORLD
+                float night = clamp01(time_midnight);
+                if (night > 0.0) {
+                    float sky_luma = dot(avg, luminance_weights_rec2020);
+                    vec3 night_sky = mix(avg, vec3(sky_luma), 0.30) * 0.72;
+                    avg = mix(avg, night_sky, night);
+                }
+#endif
+                sky_map = max_of(avg) > 1e-6 ? avg : ambient_color * rcp_pi;
+#else
+                sky_map = ambient_color;
+#endif
+                break;
+            }
         }
     } else { // Draw sky map
         vec3 ray_dir = unproject_sky(uv);

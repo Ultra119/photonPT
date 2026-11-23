@@ -74,7 +74,7 @@ const float wetnessHalflife         = 70.0;
   #define RTGI_ADAPT_STRENGTH 0.5 // [0.0 0.25 0.5 0.75 1.0]
   #define RTGI_MAX_RADIANCE 24.0 // [0.0 4.0 6.0 8.0 12.0 16.0 20.0 24.0 32.0 48.0 64.0]
   #define EMISSION_ANCHOR 16.0 // [4.0 6.0 8.0 10.0 12.0 16.0 20.0 24.0 32.0]
-  #define SUN_INDIRECT_BOOST 1.00 // [1.00 1.25 1.50 1.75 2.00 2.50 3.00 3.50 4.00 5.00]
+  #define SUN_INDIRECT_BOOST 1.50 // [1.00 1.25 1.50 1.75 2.00 2.50 3.00 3.50 4.00 5.00]
 
   #define RTGI_RESOLUTION 1 // [0 1 2]
   #define RTGI_RAY_COUNT 1 // [1 2 3 4 6 8]

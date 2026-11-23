@@ -78,7 +78,19 @@ vec3 voxel_environment(
     }
 #endif
     vec3 sky = texture(sky_map, project_sky(direction)).rgb;
-    return (!any(isnan(sky)) && !any(isinf(sky))) ? max0(sky) : vec3(0.0);
+    sky = (!any(isnan(sky)) && !any(isinf(sky))) ? max0(sky) : vec3(0.0);
+#if defined WORLD_OVERWORLD
+    // Wire SKYLIGHT_I into traced sky GI and slightly tame/neutralize the cool
+    // night sky dome so night terrain matches stock Photon's deeper contrast.
+    float night = clamp01(time_midnight);
+    if (night > 0.0) {
+        float sky_luma = dot(sky, luminance_weights_rec2020);
+        vec3 night_sky = mix(sky, vec3(sky_luma), 0.30) * 0.72;
+        sky = mix(sky, night_sky, night);
+    }
+    sky *= SKYLIGHT_I;
+#endif
+    return sky;
 }
 
 struct PathTraceSample {

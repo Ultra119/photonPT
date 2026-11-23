@@ -75,6 +75,7 @@ uniform float near;
 uniform float far;
 uniform vec2 taa_offset;
 uniform float eye_skylight;
+uniform float time_midnight;
 
 #include "/include/utility/stbn.glsl"
 #include "/include/lighting/rt/rtgi_opaque_depth.glsl"

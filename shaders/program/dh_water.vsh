@@ -100,7 +100,11 @@ void main() {
     light_color = texelFetch(colortex4, ivec2(191, 0), 0).rgb;
     // Environment appearance for fog/media only; RT surface irradiance comes
     // from traced GI/probes, never from this sky color or an SH ambient term.
+#if defined WORLD_OVERWORLD
+    ambient_color = texelFetch(colortex4, ivec2(191, 2), 0).rgb * pi;
+#else
     ambient_color = texelFetch(colortex4, ivec2(191, 1), 0).rgb;
+#endif
 
     is_water = uint(dhMaterialId == DH_BLOCK_WATER);
 

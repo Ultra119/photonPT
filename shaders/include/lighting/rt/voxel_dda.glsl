@@ -198,6 +198,7 @@ VoxelHit trace_voxel_segment(
     int budget = min(voxel_dda_max_steps,
                      int(ceil((end - start) * dot(abs(direction), vec3(1.0)))) + 4);
     float t = start;
+    int leaf_passes = 0;
 #ifdef VOXEL_DDA_USE_OCCUPANCY
     ivec3 cached_brick = ivec3(-1);
     uint cached_mark = 0u;
@@ -252,10 +253,21 @@ VoxelHit trace_voxel_segment(
             uint payload = texelFetch(voxel_grid, cell, 0).r;
             uint block_id = voxel_block_id(payload);
             bool glass = 81u <= block_id && block_id <= 96u;
+            bool leaf = block_id == 5u && mode != voxel_ray_ao && leaf_passes < 2;
             if (glass) {
                 if (mode != voxel_ray_ao) {
                     result.transmittance *= max0(voxel_tint_color_table[block_id - 81u] * rec709_to_rec2020);
                 }
+            } else if (leaf) {
+                // Capped 2-voxel foliage pass-through: transmit dappled green-tinted
+                // sky and sunlight through thin canopy shells without extending ray
+                // marches through deep forests (3rd leaf terminates as a diffuse hit).
+                vec3 leaf_albedo = unpack_unorm_rgb555(payload & 0x7FFFu);
+                vec3 leaf_tint = max_of(leaf_albedo) > 0.01
+                    ? clamp(leaf_albedo * 2.2, vec3(0.20), vec3(0.80))
+                    : vec3(0.32, 0.58, 0.22);
+                result.transmittance *= max0(mix(vec3(0.48), leaf_tint, 0.55) * rec709_to_rec2020);
+                leaf_passes++;
             } else if (!voxel_empty_for_transport(block_id)
                        && (mode != voxel_ray_ao || (payload & (1u << 23u)) == 0u)) {
                 uint shape = (payload >> 19u) & 15u;

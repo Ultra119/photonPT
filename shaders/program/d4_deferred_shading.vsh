@@ -109,7 +109,18 @@ vec3 integrate_sky_map_hemisphere() {
         vec3 s = textureLod(colortex4, project_sky(dir), 0.0).rgb;
         sum += (!any(isnan(s)) && !any(isinf(s))) ? max0(s) : vec3(0.0);
     }
-    return sum / float(samples);
+    vec3 avg = sum / float(samples);
+#if defined WORLD_OVERWORLD
+    // Match voxel_environment() night skylight calibration so inside and
+    // outside RT coverage stay seamless at night too.
+    float night = clamp01(time_midnight);
+    if (night > 0.0) {
+        float sky_luma = dot(avg, luminance_weights_rec2020);
+        vec3 night_sky = mix(avg, vec3(sky_luma), 0.30) * 0.72;
+        avg = mix(avg, night_sky, night);
+    }
+#endif
+    return avg;
 }
 #endif
 
