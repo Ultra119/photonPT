@@ -126,7 +126,7 @@ vec3 clamp_bounce_radiance(vec3 rad, int bounce) {
 PathTraceSample evaluate_path_trace(
     vec3 receiver, vec3 receiver_origin, vec3 receiver_normal, float receiver_skylight,
     usampler3D grid, sampler2D sky_map, vec3 direct_sun_color, vec3 light_direction,
-    uint seed, vec2 primary_u, bool sample_emitters
+    uint seed, vec2 primary_u, bool sample_emitters, bool receiver_two_sided
 ) {
     PathTraceSample result = PathTraceSample(
         vec3(0.0), vec3(0.0), vec3(1.0), vec3(0.0), vec3(0.0), -1.0, rtgi_hit_none, ivec3(-1)
@@ -138,7 +138,12 @@ PathTraceSample evaluate_path_trace(
     for (int b = 0; b < PT_BOUNCES; ++b) {
         vec2 u = b == 0 ? primary_u
                         : vec2(random_dimension(seed, 3 * b), random_dimension(seed, 3 * b + 1));
-        vec3 direction = sample_cosine_hemisphere(normal, u);
+        vec3 hemi_normal = normal;
+        if (b == 0 && receiver_two_sided
+            && random_dimension(seed, 12) >= rtgi_leaf_front_prob) {
+            hemi_normal = -normal;
+        }
+        vec3 direction = sample_cosine_hemisphere(hemi_normal, u);
         float reach = b == 0 ? rt_primary_max_distance : rt_bounce_max_distance;
         VoxelHit hit = trace_voxel_segment(grid, origin, direction, reach, voxel_ray_path);
         if (b == 0) {
@@ -183,9 +188,12 @@ PathTraceSample evaluate_path_trace(
 #ifdef RTGI_EMITTER_SAMPLING
         if (sample_emitters && max_of(emission) > 0.0
             && (b == 0 || hit.distance < rt_bounce_max_distance)) {
-            float light_pdf = primary_emitter_pdf(grid, hit, origin, normal, direction, reach);
+            bool ts_bounce = (b == 0) && receiver_two_sided;
+            float light_pdf = primary_emitter_pdf(
+                grid, hit, origin, ts_bounce ? vec3(0.0) : normal, direction, reach
+            );
             if (light_pdf > 0.0) {
-                float bsdf_pdf = max0(dot(normal, direction)) * rcp_pi;
+                float bsdf_pdf = rtgi_receiver_cos(normal, direction, ts_bounce) * rcp_pi;
                 float mis_rays = b == 0 ? float(RTGI_RAY_COUNT) : 1.0;
                 emission *= power_mis(mis_rays * bsdf_pdf, emitter_nee_mis_bias * light_pdf);
             }

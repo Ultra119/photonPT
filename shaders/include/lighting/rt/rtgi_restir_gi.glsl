@@ -182,8 +182,10 @@ bool restir_gi_update(
     return false;
 }
 
-// Target PDF in solid-angle measure at the receiver: luma(L_o) * max(0, N_r . w) / pi.
-float restir_gi_target_pdf(vec3 origin, vec3 receiver_normal, RestirGiSample s) {
+// Target PDF in solid-angle measure at the receiver: luma(L_o) * rtgi_receiver_cos(N_r, w) / pi.
+float restir_gi_target_pdf(
+    vec3 origin, vec3 receiver_normal, RestirGiSample s, bool two_sided
+) {
     if (s.kind == restir_gi_kind_empty) {
         return 0.0;
     }
@@ -192,7 +194,7 @@ float restir_gi_target_pdf(vec3 origin, vec3 receiver_normal, RestirGiSample s) 
         return 0.0;
     }
     if (s.kind == restir_gi_kind_env) {
-        float cos_x = dot(receiver_normal, s.pos_or_dir);
+        float cos_x = rtgi_receiver_cos(receiver_normal, s.pos_or_dir, two_sided);
         return cos_x > 0.0 ? lum * (cos_x * rcp_pi) : 0.0;
     }
     vec3 delta = s.pos_or_dir - origin;
@@ -201,7 +203,7 @@ float restir_gi_target_pdf(vec3 origin, vec3 receiver_normal, RestirGiSample s) 
         return 0.0;
     }
     vec3 dir = delta * inversesqrt(dist_sq);
-    float cos_x = dot(receiver_normal, dir);
+    float cos_x = rtgi_receiver_cos(receiver_normal, dir, two_sided);
     float cos_y = dot(restir_gi_decode_normal(s.normal_face), -dir);
     if (cos_x <= 0.0 || cos_y <= 0.0) {
         return 0.0;
@@ -212,9 +214,11 @@ float restir_gi_target_pdf(vec3 origin, vec3 receiver_normal, RestirGiSample s) 
 // Symmetric eligibility guard for temporal reuse across sub-pixel jitter:
 // excludes extreme corner-crease / grazing hits where tiny receiver shifts
 // would amplify W = pi / cos_x, while keeping m0 = 1.0 on the canonical sample.
-bool restir_gi_temporal_eligible(vec3 origin, vec3 receiver_normal, RestirGiSample s) {
+bool restir_gi_temporal_eligible(
+    vec3 origin, vec3 receiver_normal, RestirGiSample s, bool two_sided
+) {
     if (s.kind == restir_gi_kind_env) {
-        return dot(receiver_normal, s.pos_or_dir) >= restir_gi_temporal_min_cos;
+        return rtgi_receiver_cos(receiver_normal, s.pos_or_dir, two_sided) >= restir_gi_temporal_min_cos;
     }
     if (s.kind != restir_gi_kind_surface) {
         return false;
@@ -225,7 +229,7 @@ bool restir_gi_temporal_eligible(vec3 origin, vec3 receiver_normal, RestirGiSamp
         return false;
     }
     vec3 dir = delta * inversesqrt(dist_sq);
-    float cos_x = dot(receiver_normal, dir);
+    float cos_x = rtgi_receiver_cos(receiver_normal, dir, two_sided);
     float cos_y = dot(restir_gi_decode_normal(s.normal_face), -dir);
     return cos_x >= restir_gi_temporal_min_cos && cos_y >= restir_gi_temporal_min_cos;
 }
@@ -237,12 +241,12 @@ bool restir_gi_temporal_eligible(vec3 origin, vec3 receiver_normal, RestirGiSamp
 // grazing receiver/hit angles where Jacobian or cos_dst/cos_src would spike.
 float restir_gi_shift_jacobian_ex(
     vec3 src_origin, vec3 src_normal, vec3 dst_origin, vec3 dst_normal, RestirGiSample s,
-    out float dst_cos_r
+    bool two_sided, out float dst_cos_r
 ) {
     dst_cos_r = 0.0;
     if (s.kind == restir_gi_kind_env) {
-        float cos_r_src = dot(src_normal, s.pos_or_dir);
-        float cos_r_dst = dot(dst_normal, s.pos_or_dir);
+        float cos_r_src = rtgi_receiver_cos(src_normal, s.pos_or_dir, two_sided);
+        float cos_r_dst = rtgi_receiver_cos(dst_normal, s.pos_or_dir, two_sided);
         if (cos_r_src < restir_gi_min_cos_recv || cos_r_dst < restir_gi_min_cos_recv) {
             return 0.0;
         }
@@ -267,8 +271,8 @@ float restir_gi_shift_jacobian_ex(
     }
     vec3 dir_src = d_src * inversesqrt(l2_src);
     vec3 dir_dst = d_dst * inversesqrt(l2_dst);
-    float cos_r_src = dot(src_normal, dir_src);
-    float cos_r_dst = dot(dst_normal, dir_dst);
+    float cos_r_src = rtgi_receiver_cos(src_normal, dir_src, two_sided);
+    float cos_r_dst = rtgi_receiver_cos(dst_normal, dir_dst, two_sided);
     if (cos_r_src < restir_gi_min_cos_recv || cos_r_dst < restir_gi_min_cos_recv) {
         return 0.0;
     }
@@ -291,10 +295,13 @@ float restir_gi_shift_jacobian_ex(
 }
 
 float restir_gi_shift_jacobian(
-    vec3 src_origin, vec3 src_normal, vec3 dst_origin, vec3 dst_normal, RestirGiSample s
+    vec3 src_origin, vec3 src_normal, vec3 dst_origin, vec3 dst_normal, RestirGiSample s,
+    bool two_sided
 ) {
     float dst_cos_r;
-    return restir_gi_shift_jacobian_ex(src_origin, src_normal, dst_origin, dst_normal, s, dst_cos_r);
+    return restir_gi_shift_jacobian_ex(
+        src_origin, src_normal, dst_origin, dst_normal, s, two_sided, dst_cos_r
+    );
 }
 
 bool restir_gi_surface_exists(usampler3D grid, RestirGiSample s) {
@@ -349,7 +356,7 @@ bool restir_gi_trace_visibility(
 }
 
 vec3 restir_gi_shade(
-    vec3 origin, vec3 receiver_normal, RestirGiReservoir r, vec3 transmittance
+    vec3 origin, vec3 receiver_normal, RestirGiReservoir r, vec3 transmittance, bool two_sided
 ) {
     if (r.sample_data.kind == restir_gi_kind_empty || !(r.weight > 0.0)) {
         return vec3(0.0);
@@ -365,7 +372,7 @@ vec3 restir_gi_shade(
         }
         dir = delta * inversesqrt(dist_sq);
     }
-    float cos_x = max0(dot(receiver_normal, dir));
+    float cos_x = rtgi_receiver_cos(receiver_normal, dir, two_sided);
     vec3 rad = r.sample_data.radiance * transmittance * (cos_x * rcp_pi * r.weight);
     return rtgi_finite(vec4(rad, 0.0)) ? max0(rad) : vec3(0.0);
 }

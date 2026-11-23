@@ -138,7 +138,7 @@ vec3 restir_receiver_origin(usampler3D grid, vec3 voxel_pos, vec3 world_normal, 
 }
 
 bool restir_eval_geometry(
-    usampler3D grid, vec3 origin, vec3 normal, RestirSample s,
+    usampler3D grid, vec3 origin, vec3 normal, RestirSample s, bool two_sided,
     out uint block_id, out vec3 emission, out vec3 light_normal,
     out vec3 delta, out float distance_sq, out float cos_x, out float cos_y
 ) {
@@ -176,7 +176,7 @@ bool restir_eval_geometry(
     }
     float inv_dist = inversesqrt(distance_sq);
     vec3 direction = delta * inv_dist;
-    cos_x = dot(normal, direction);
+    cos_x = rtgi_receiver_cos(normal, direction, two_sided);
     cos_y = dot(light_normal, -direction);
     if (cos_x <= 0.0 || cos_y <= 0.0) {
         return false;
@@ -192,11 +192,13 @@ float restir_target_pdf_from_geom(vec3 emission, float cos_x, float cos_y, float
     return lum > 0.0 ? lum * (cos_x * cos_y * rcp_pi / max(distance_sq, 0.25)) : 0.0;
 }
 
-float restir_target_pdf(usampler3D grid, vec3 origin, vec3 normal, RestirSample s) {
+float restir_target_pdf(
+    usampler3D grid, vec3 origin, vec3 normal, RestirSample s, bool two_sided
+) {
     uint block_id;
     vec3 emission, light_normal, delta;
     float distance_sq, cos_x, cos_y;
-    if (!restir_eval_geometry(grid, origin, normal, s, block_id, emission, light_normal,
+    if (!restir_eval_geometry(grid, origin, normal, s, two_sided, block_id, emission, light_normal,
                               delta, distance_sq, cos_x, cos_y)) {
         return 0.0;
     }
@@ -237,15 +239,18 @@ bool restir_update(
 
 // Initial RIS pass: draw restir_initial_candidates proposals from the emitter
 // tree, pick one winner by area-measure target PDF, and test visibility once.
-RestirReservoir restir_sample_initial(usampler3D grid, vec3 origin, vec3 normal, uint seed) {
+RestirReservoir restir_sample_initial(
+    usampler3D grid, vec3 origin, vec3 normal, uint seed, bool two_sided
+) {
     RestirReservoir r = restir_empty_reservoir();
     vec3 best_light_normal = vec3(0.0);
     vec3 best_delta = vec3(0.0);
     float best_dist_sq = 0.0;
+    vec3 tree_normal = two_sided ? vec3(0.0) : normal;
 
     for (int m = 0; m < restir_initial_candidates; ++m) {
         uint cseed = lowbias32(seed ^ (uint(m + 1) * 0x9e3779b9u));
-        EmitterSelection selected = select_voxel_emitter(origin, normal, cseed, ivec3(-1));
+        EmitterSelection selected = select_voxel_emitter(origin, tree_normal, cseed, ivec3(-1));
         if (selected.pmf <= 0.0) {
             // The octree traversal weights depend only on (origin, normal);
             // zero pmf means no reachable emitter exists in this hemisphere.
@@ -296,7 +301,7 @@ RestirReservoir restir_sample_initial(usampler3D grid, vec3 origin, vec3 normal,
             continue;
         }
         vec3 dir = delta * inversesqrt(dist_sq);
-        float cos_x = dot(normal, dir);
+        float cos_x = rtgi_receiver_cos(normal, dir, two_sided);
         float cos_y = dot(lnorm, -dir);
         if (cos_x <= 0.0 || cos_y <= 0.0) {
             continue;
@@ -343,12 +348,14 @@ RestirReservoir restir_sample_initial(usampler3D grid, vec3 origin, vec3 normal,
 // RGB is direct emitter radiance; A encodes 0 (no candidate), 1 (rejected), or 2 (visible).
 vec4 restir_shade_sample_from_geom(
     usampler3D grid, vec3 origin, vec3 normal, RestirReservoir r, vec3 transmittance,
-    uint block_id, vec3 emission, float distance_sq, float cos_x, float cos_y
+    bool two_sided, uint block_id, vec3 emission, float distance_sq, float cos_x, float cos_y
 ) {
     if (!r.sample_data.valid || r.weight <= 0.0) {
         return vec4(0.0, 0.0, 0.0, r.count > 0u ? 1.0 : 0.0);
     }
-    EmitterSelection selected = select_voxel_emitter(origin, normal, 0u, r.sample_data.cell);
+    EmitterSelection selected = select_voxel_emitter(
+        origin, two_sided ? vec3(0.0) : normal, 0u, r.sample_data.cell
+    );
     EmitterBox box = voxel_emitter_box(block_id);
     vec3 sides = emitter_exposed_sides(grid, r.sample_data.cell, block_id, box, origin);
     vec3 areas = emitter_face_areas(box) * abs(sides);
@@ -374,7 +381,7 @@ vec4 restir_shade_sample_from_geom(
 }
 
 vec4 restir_shade_sample(
-    usampler3D grid, vec3 origin, vec3 normal, RestirReservoir r, vec3 transmittance
+    usampler3D grid, vec3 origin, vec3 normal, RestirReservoir r, vec3 transmittance, bool two_sided
 ) {
     if (!r.sample_data.valid || r.weight <= 0.0) {
         return vec4(0.0, 0.0, 0.0, r.count > 0u ? 1.0 : 0.0);
@@ -382,12 +389,12 @@ vec4 restir_shade_sample(
     uint block_id;
     vec3 emission, light_normal, delta;
     float distance_sq, cos_x, cos_y;
-    if (!restir_eval_geometry(grid, origin, normal, r.sample_data, block_id, emission,
+    if (!restir_eval_geometry(grid, origin, normal, r.sample_data, two_sided, block_id, emission,
                               light_normal, delta, distance_sq, cos_x, cos_y)) {
         return vec4(0.0, 0.0, 0.0, 1.0);
     }
     return restir_shade_sample_from_geom(
-        grid, origin, normal, r, transmittance, block_id, emission, distance_sq, cos_x, cos_y
+        grid, origin, normal, r, transmittance, two_sided, block_id, emission, distance_sq, cos_x, cos_y
     );
 }
 

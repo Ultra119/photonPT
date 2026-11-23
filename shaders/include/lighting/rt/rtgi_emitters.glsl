@@ -147,7 +147,8 @@ bool voxel_occludes_full_face(usampler3D grid, ivec3 neighbor) {
     }
     uint payload = texelFetch(grid, neighbor, 0).r;
     uint block_id = voxel_block_id(payload);
-    if (voxel_empty_for_transport(block_id) || (81u <= block_id && block_id <= 96u)) {
+    if (voxel_empty_for_transport(block_id) || block_id == 5u
+        || (81u <= block_id && block_id <= 96u)) {
         return false;
     }
     if (voxel_torch_emitter(block_id) || voxel_lantern_emitter(block_id)) {
@@ -245,10 +246,12 @@ float primary_emitter_pdf(usampler3D grid, VoxelHit hit, vec3 origin, vec3 norma
 // rejected candidate or a visible sample as 0, 1 or 2.
 vec4 sample_direct_emitter_ex(
     usampler3D grid, vec3 origin, vec3 normal, uint seed,
-    float bsdf_ray_count, float max_distance, out ivec3 sampled_cell
+    float bsdf_ray_count, float max_distance, bool two_sided, out ivec3 sampled_cell
 ) {
     sampled_cell = ivec3(-1);
-    EmitterSelection selected = select_voxel_emitter(origin, normal, seed, ivec3(-1), max_distance);
+    EmitterSelection selected = select_voxel_emitter(
+        origin, two_sided ? vec3(0.0) : normal, seed, ivec3(-1), max_distance
+    );
     if (selected.pmf <= 0.0) {
         return vec4(0.0);
     }
@@ -286,7 +289,7 @@ vec4 sample_direct_emitter_ex(
     vec3 direction = delta / distance_to_light;
     float inv_p_area = areas[axis] * (total_w / weights[axis]);
     float light_pdf = emitter_solid_angle_pdf(selected.pmf, inv_p_area, distance_sq, dot(light_normal, -direction));
-    float bsdf_pdf = max0(dot(normal, direction)) * rcp_pi;
+    float bsdf_pdf = rtgi_receiver_cos(normal, direction, two_sided) * rcp_pi;
     if (light_pdf <= 0.0 || bsdf_pdf <= 0.0) {
         return rejected;
     }
@@ -306,11 +309,27 @@ vec4 sample_direct_emitter_ex(
     return vec4(radiance, 2.0);
 }
 
-vec4 sample_direct_emitter(usampler3D grid, vec3 origin, vec3 normal, uint seed) {
+vec4 sample_direct_emitter_ex(
+    usampler3D grid, vec3 origin, vec3 normal, uint seed,
+    float bsdf_ray_count, float max_distance, out ivec3 sampled_cell
+) {
+    return sample_direct_emitter_ex(
+        grid, origin, normal, seed, bsdf_ray_count, max_distance, false, sampled_cell
+    );
+}
+
+vec4 sample_direct_emitter(
+    usampler3D grid, vec3 origin, vec3 normal, uint seed, bool two_sided
+) {
     ivec3 dummy_cell;
     return sample_direct_emitter_ex(
-        grid, origin, normal, seed, float(RTGI_RAY_COUNT), rt_primary_max_distance, dummy_cell
+        grid, origin, normal, seed, float(RTGI_RAY_COUNT), rt_primary_max_distance,
+        two_sided, dummy_cell
     );
+}
+
+vec4 sample_direct_emitter(usampler3D grid, vec3 origin, vec3 normal, uint seed) {
+    return sample_direct_emitter(grid, origin, normal, seed, false);
 }
 
 #endif

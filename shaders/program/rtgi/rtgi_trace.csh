@@ -216,7 +216,7 @@ bool restir_find_previous_tap(
 #ifdef RTGI_USE_RESTIR_DI
 RestirReservoir restir_temporal_reuse(
     bool prev_found, ivec2 best_tap, vec3 best_prev_world_normal, int prev_bank,
-    vec3 origin, vec3 world_normal, RestirReservoir initial, uint seed,
+    vec3 origin, vec3 world_normal, RestirReservoir initial, uint seed, bool two_sided,
     inout bool emitter_removed, out ivec3 prev_bounce_witness
 ) {
     prev_bounce_witness = ivec3(-1);
@@ -263,7 +263,7 @@ RestirReservoir restir_temporal_reuse(
         vec3 em, lnorm, delta;
         float dist_sq, cx, cy;
         if (restir_eval_geometry(voxel_sampler, origin, world_normal, prev.sample_data,
-                                 b_id, em, lnorm, delta, dist_sq, cx, cy)) {
+                                 two_sided, b_id, em, lnorm, delta, dist_sq, cx, cy)) {
             vec3 trans;
             if (restir_trace_visibility(voxel_sampler, origin, prev.sample_data,
                                         lnorm, delta, dist_sq, trans)) {
@@ -282,7 +282,7 @@ RestirReservoir restir_temporal_reuse(
     if (initial.sample_data.valid && initial.weight > 0.0 && initial.target_pdf > 0.0) {
         float p0_of_0 = initial.target_pdf;
         float p1_of_0 = restir_target_pdf(voxel_sampler, origin, best_prev_world_normal,
-                                          initial.sample_data);
+                                          initial.sample_data, two_sided);
         float m0 = (m0_count * p0_of_0) / max(m0_count * p0_of_0 + m1_count * p1_of_0, 1e-20);
         float w0 = m0 * p0_of_0 * initial.weight;
         if (restir_update(combined, initial.sample_data, w0, p0_of_0, random_dimension(seed, 0))) {
@@ -315,7 +315,7 @@ RestirReservoir restir_temporal_reuse(
 RestirGiReservoir restir_gi_temporal_reuse(
     bool prev_found, ivec2 best_tap, vec3 best_prev_world_normal,
     int prev_bank, ivec2 target_res, vec3 origin, vec3 world_normal,
-    RestirGiReservoir initial, uint seed, inout bool emitter_removed
+    RestirGiReservoir initial, uint seed, bool two_sided, inout bool emitter_removed
 ) {
     if (!prev_found) {
         return initial;
@@ -349,8 +349,8 @@ RestirGiReservoir restir_gi_temporal_reuse(
             prev.sample_data.pos_or_dir -= vec3(grid_shift);
         }
         if (restir_gi_surface_exists(voxel_sampler, prev.sample_data)
-            && restir_gi_temporal_eligible(origin, world_normal, prev.sample_data)) {
-            p0_of_1 = restir_gi_target_pdf(origin, world_normal, prev.sample_data);
+            && restir_gi_temporal_eligible(origin, world_normal, prev.sample_data, two_sided)) {
+            p0_of_1 = restir_gi_target_pdf(origin, world_normal, prev.sample_data, two_sided);
             if (p0_of_1 > 0.0) {
                 vec3 prev_trans;
                 prev_valid = restir_gi_trace_visibility(
@@ -368,8 +368,9 @@ RestirGiReservoir restir_gi_temporal_reuse(
     if (initial.sample_data.kind != restir_gi_kind_empty
         && initial.weight > 0.0 && initial.target_pdf > 0.0) {
         float p0_of_0 = initial.target_pdf;
-        float p1_of_0 = restir_gi_temporal_eligible(origin, best_prev_world_normal, initial.sample_data)
-            ? restir_gi_target_pdf(origin, best_prev_world_normal, initial.sample_data)
+        float p1_of_0 = restir_gi_temporal_eligible(origin, best_prev_world_normal,
+                                                    initial.sample_data, two_sided)
+            ? restir_gi_target_pdf(origin, best_prev_world_normal, initial.sample_data, two_sided)
             : 0.0;
         float m0 = (m0_count * p0_of_0) / max(m0_count * p0_of_0 + m1_count * p1_of_0, 1e-20);
         float w0 = m0 * p0_of_0 * initial.weight;
@@ -471,6 +472,7 @@ void main() {
 
     // Both techniques evaluate their PDFs at this exact biased point.
     vec3 origin = rtgi_receiver_origin(voxel_sampler, voxel_pos, world_normal, material);
+    bool two_sided = (material == 5u);
 
 #ifdef RTGI_USE_RESTIR_ANY
     ivec2 prev_tap;
@@ -490,11 +492,11 @@ void main() {
 #ifdef RTGI_USE_RESTIR_DI
     if (has_emitters) {
         RestirReservoir initial_res = restir_sample_initial(
-            voxel_sampler, origin, world_normal, lowbias32(seed ^ 0x85ebca77u)
+            voxel_sampler, origin, world_normal, lowbias32(seed ^ 0x85ebca77u), two_sided
         );
         RestirReservoir temporal_res = restir_temporal_reuse(
             prev_found, prev_tap, prev_world_normal, prev_bank,
-            origin, world_normal, initial_res, lowbias32(seed ^ 0xc2b2ae3du),
+            origin, world_normal, initial_res, lowbias32(seed ^ 0xc2b2ae3du), two_sided,
             emitter_removed, prev_bounce_witness
         );
         packed_reservoir = restir_pack(temporal_res);
@@ -504,14 +506,16 @@ void main() {
         // reservoir so temporal history flushes immediately on frame 1.
         RestirReservoir temporal_res = restir_temporal_reuse(
             prev_found, prev_tap, prev_world_normal, prev_bank,
-            origin, world_normal, restir_empty_reservoir(), lowbias32(seed ^ 0xc2b2ae3du),
+            origin, world_normal, restir_empty_reservoir(), lowbias32(seed ^ 0xc2b2ae3du), two_sided,
             emitter_removed, prev_bounce_witness
         );
         packed_reservoir = uvec4(0u);
     }
 #else
     if (has_emitters) {
-        direct_emitter = sample_direct_emitter(voxel_sampler, origin, world_normal, lowbias32(seed ^ 0x85ebca77u));
+        direct_emitter = sample_direct_emitter(
+            voxel_sampler, origin, world_normal, lowbias32(seed ^ 0x85ebca77u), two_sided
+        );
     }
 #endif
 #else
@@ -535,7 +539,7 @@ void main() {
         PathTraceSample pt = evaluate_path_trace(
             voxel_pos, origin, world_normal, receiver_skylight,
             voxel_sampler, colortex4, direct_light_col, light_dir,
-            ray_seed, primary_u, has_emitters
+            ray_seed, primary_u, has_emitters, two_sided
         );
         vec3 indirect_tinted = pt.indirect_radiance * pt.primary_transmittance;
         if (pt.hit_source == rtgi_hit_invalid
@@ -564,7 +568,7 @@ void main() {
                 pt.first_pos_or_dir, n_face, pt.indirect_radiance,
                 pt.bounce_emitter_cell, gi_kind
             );
-            float p_hat = restir_gi_target_pdf(origin, world_normal, gi_s);
+            float p_hat = restir_gi_target_pdf(origin, world_normal, gi_s, two_sided);
             if (p_hat > 0.0) {
                 // Primary ray drawn from cosine hemisphere p(w) = cos_x / pi,
                 // so target_pdf / p(w) == luma(L_o) identically.
@@ -604,7 +608,7 @@ void main() {
         }
         RestirGiReservoir temporal_gi = restir_gi_temporal_reuse(
             prev_found, prev_tap, prev_world_normal, restir_gi_history_bank, target_res,
-            origin, world_normal, initial_gi, lowbias32(seed ^ 0x165667b1u),
+            origin, world_normal, initial_gi, lowbias32(seed ^ 0x165667b1u), two_sided,
             emitter_removed
         );
         store_gi_reservoir(texel, target_res, restir_gi_temporal_bank, restir_gi_pack(temporal_gi));

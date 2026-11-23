@@ -41,6 +41,21 @@ const float voxel_receiver_bias = 0.012;
 const float voxel_bounce_bias = 0.001;
 const float voxel_endpoint_epsilon = 0.001;
 
+// Two-sided translucent leaf receiver (MATERIAL_LEAVES = 5u): reflects front
+// hemisphere (0.58) and transmits back hemisphere (0.42). Back-hemisphere rays
+// naturally pick up Beer-Lambert foliage attenuation in voxel_dda as they pass
+// through the leaf's own voxel, keeping total energy <= 1 (0.58 + 0.42 * 0.76).
+const float rtgi_leaf_front_prob = 0.58;
+const float rtgi_leaf_back_prob = 0.42;
+
+float rtgi_receiver_cos(vec3 normal, vec3 direction, bool two_sided) {
+    float nd = dot(normal, direction);
+    if (!two_sided) {
+        return max0(nd);
+    }
+    return nd >= 0.0 ? (rtgi_leaf_front_prob * nd) : (rtgi_leaf_back_prob * -nd);
+}
+
 bool voxel_box_interval(VoxelRay ray, vec3 lo, vec3 hi, out vec3 entry, out float leave) {
     // A parallel ray on a cell boundary belongs to the higher-index cell.
     vec3 parallel_origin = mix(lo, ray.origin, ray.parallel);
@@ -198,7 +213,6 @@ VoxelHit trace_voxel_segment(
     int budget = min(voxel_dda_max_steps,
                      int(ceil((end - start) * dot(abs(direction), vec3(1.0)))) + 4);
     float t = start;
-    int leaf_passes = 0;
 #ifdef VOXEL_DDA_USE_OCCUPANCY
     ivec3 cached_brick = ivec3(-1);
     uint cached_mark = 0u;
@@ -253,21 +267,22 @@ VoxelHit trace_voxel_segment(
             uint payload = texelFetch(voxel_grid, cell, 0).r;
             uint block_id = voxel_block_id(payload);
             bool glass = 81u <= block_id && block_id <= 96u;
-            bool leaf = block_id == 5u && mode != voxel_ray_ao && leaf_passes < 2;
+            bool leaf = block_id == 5u && mode != voxel_ray_ao
+                && max_of(result.transmittance) > 0.03;
             if (glass) {
                 if (mode != voxel_ray_ao) {
                     result.transmittance *= max0(voxel_tint_color_table[block_id - 81u] * rec709_to_rec2020);
                 }
             } else if (leaf) {
-                // Capped 2-voxel foliage pass-through: transmit dappled green-tinted
-                // sky and sunlight through thin canopy shells without extending ray
-                // marches through deep forests (3rd leaf terminates as a diffuse hit).
+                // Natural hue-normalized Beer-Lambert foliage attenuation: normalize
+                // by peak channel so dark linear leaf albedos don't crush transmission
+                // in 2 blocks, letting canopy light deepen smoothly in color with depth.
                 vec3 leaf_albedo = unpack_unorm_rgb555(payload & 0x7FFFu);
-                vec3 leaf_tint = max_of(leaf_albedo) > 0.01
-                    ? clamp(leaf_albedo * 2.2, vec3(0.20), vec3(0.80))
-                    : vec3(0.32, 0.58, 0.22);
-                result.transmittance *= max0(mix(vec3(0.48), leaf_tint, 0.55) * rec709_to_rec2020);
-                leaf_passes++;
+                float leaf_peak = max_of(leaf_albedo);
+                vec3 leaf_hue = leaf_peak > 0.01
+                    ? mix(vec3(1.0), leaf_albedo / leaf_peak, 0.55)
+                    : vec3(0.65, 1.0, 0.55);
+                result.transmittance *= max0((0.76 * leaf_hue) * rec709_to_rec2020);
             } else if (!voxel_empty_for_transport(block_id)
                        && (mode != voxel_ray_ao || (payload & (1u << 23u)) == 0u)) {
                 uint shape = (payload >> 19u) & 15u;

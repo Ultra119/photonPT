@@ -183,6 +183,7 @@ void main() {
 
     vec3 world_normal = rtgi_guide_normal(guide);
     uint material = rtgi_guide_material(guide);
+    bool two_sided = (material == 5u);
     vec3 scene_pos = transform(gbufferModelViewInverse, center_view);
     vec3 voxel_pos = scene_to_voxel_space(scene_pos);
 #if defined RTGI_USE_RESTIR_DI || defined RTGI_RESTIR_GI
@@ -275,8 +276,8 @@ void main() {
         float c_dist_sq = 0.0, c_cos_x = 0.0, c_cos_y = 0.0;
         bool center_valid = center.sample_data.valid && center.weight > 0.0
             && restir_eval_geometry(voxel_sampler, origin, world_normal, center.sample_data,
-                                    c_block_id, c_emission, c_lnorm, c_delta, c_dist_sq,
-                                    c_cos_x, c_cos_y);
+                                    two_sided, c_block_id, c_emission, c_lnorm, c_delta,
+                                    c_dist_sq, c_cos_x, c_cos_y);
         if (center_valid) {
             float live_p = restir_target_pdf_from_geom(c_emission, c_cos_x, c_cos_y, c_dist_sq);
             if (live_p > 0.0) {
@@ -357,7 +358,7 @@ void main() {
                         float nb_dist_sq = dot(nb_delta, nb_delta);
                         if (nb_dist_sq > 0.0 && nb_dist_sq < sqr(rt_primary_max_distance)) {
                             vec3 nb_dir = nb_delta * inversesqrt(nb_dist_sq);
-                            float nb_cx = dot(neighbor_normal[i], nb_dir);
+                            float nb_cx = rtgi_receiver_cos(neighbor_normal[i], nb_dir, two_sided);
                             float nb_cy = dot(c_lnorm, -nb_dir);
                             if (nb_cx > 0.0 && nb_cy > 0.0) {
                                 vec3 dummy_trans;
@@ -406,7 +407,7 @@ void main() {
                     } else {
                         vec3 lnorm, delta;
                         if (restir_eval_geometry(voxel_sampler, origin, world_normal, nr.sample_data,
-                                                 b_id, em, lnorm, delta, dist_sq, cx, cy)) {
+                                                 two_sided, b_id, em, lnorm, delta, dist_sq, cx, cy)) {
                             if (restir_trace_visibility(voxel_sampler, origin, nr.sample_data,
                                                         lnorm, delta, dist_sq, trans)) {
                                 vis_ok = true;
@@ -482,7 +483,7 @@ void main() {
             }
             if (visible) {
                 direct_emitter = restir_shade_sample_from_geom(
-                    voxel_sampler, origin, world_normal, combined, winning_trans,
+                    voxel_sampler, origin, world_normal, combined, winning_trans, two_sided,
                     win_block_id, win_emission, win_dist_sq, win_cos_x, win_cos_y
                 );
             }
@@ -502,7 +503,7 @@ void main() {
             load_gi_reservoir(texel, target_res, restir_gi_temporal_bank)
         );
         if (center_gi.sample_data.kind != restir_gi_kind_empty) {
-            float live_p = restir_gi_target_pdf(origin, world_normal, center_gi.sample_data);
+            float live_p = restir_gi_target_pdf(origin, world_normal, center_gi.sample_data, two_sided);
             if (live_p > 0.0) {
                 center_gi.target_pdf = live_p;
             } else {
@@ -569,7 +570,7 @@ void main() {
                     float cos_r_dst = 0.0;
                     float jac_ci = restir_gi_shift_jacobian_ex(
                         origin, world_normal, neighbor_origin[i], neighbor_normal[i],
-                        center_gi.sample_data, cos_r_dst
+                        center_gi.sample_data, two_sided, cos_r_dst
                     );
                     if (jac_ci > 0.0) {
                         float p_i_raw = center_gi_lum * (cos_r_dst * rcp_pi);
@@ -596,7 +597,7 @@ void main() {
                     float cos_r_dst = 0.0;
                     float jac_ic = restir_gi_shift_jacobian_ex(
                         neighbor_origin[i], neighbor_normal[i], origin, world_normal,
-                        nr.sample_data, cos_r_dst
+                        nr.sample_data, two_sided, cos_r_dst
                     );
                     if (jac_ic > 0.0) {
                         float nr_lum = dot(nr.sample_data.radiance, luminance_weights);
@@ -676,7 +677,9 @@ void main() {
                 }
             }
             if (visible) {
-                indirect_gi = restir_gi_shade(origin, world_normal, combined_gi, gi_winning_trans);
+                indirect_gi = restir_gi_shade(
+                    origin, world_normal, combined_gi, gi_winning_trans, two_sided
+                );
             } else {
                 combined_gi.sample_data = restir_gi_empty_sample();
                 combined_gi.weight = 0.0;
