@@ -213,6 +213,7 @@ VoxelHit trace_voxel_segment(
     int budget = min(voxel_dda_max_steps,
                      int(ceil((end - start) * dot(abs(direction), vec3(1.0)))) + 4);
     float t = start;
+    bool leaf_tinted = false;
 #ifdef VOXEL_DDA_USE_OCCUPANCY
     ivec3 cached_brick = ivec3(-1);
     uint cached_mark = 0u;
@@ -274,15 +275,20 @@ VoxelHit trace_voxel_segment(
                     result.transmittance *= max0(voxel_tint_color_table[block_id - 81u] * rec709_to_rec2020);
                 }
             } else if (leaf) {
-                // Natural hue-normalized Beer-Lambert foliage attenuation: normalize
-                // by peak channel so dark linear leaf albedos don't crush transmission
-                // in 2 blocks, letting canopy light deepen smoothly in color with depth.
-                vec3 leaf_albedo = unpack_unorm_rgb555(payload & 0x7FFFu);
-                float leaf_peak = max_of(leaf_albedo);
-                vec3 leaf_hue = leaf_peak > 0.01
-                    ? mix(vec3(1.0), leaf_albedo / leaf_peak, 0.55)
-                    : vec3(0.65, 1.0, 0.55);
-                result.transmittance *= max0((0.76 * leaf_hue) * rec709_to_rec2020);
+                // Airy neutral Beer-Lambert canopy attenuation (0.76/voxel) with a
+                // subtle one-time foliage tint (14%) so light under dense trees stays
+                // soft and clean without compounding into green stains on stone/snow.
+                if (!leaf_tinted) {
+                    vec3 leaf_albedo = unpack_unorm_rgb555(payload & 0x7FFFu);
+                    float leaf_peak = max_of(leaf_albedo);
+                    vec3 leaf_hue = leaf_peak > 0.01
+                        ? mix(vec3(1.0), leaf_albedo / leaf_peak, 0.14)
+                        : vec3(0.92, 1.0, 0.90);
+                    result.transmittance *= max0((0.76 * leaf_hue) * rec709_to_rec2020);
+                    leaf_tinted = true;
+                } else {
+                    result.transmittance *= 0.76;
+                }
             } else if (!voxel_empty_for_transport(block_id)
                        && (mode != voxel_ray_ao || (payload & (1u << 23u)) == 0u)) {
                 uint shape = (payload >> 19u) & 15u;
