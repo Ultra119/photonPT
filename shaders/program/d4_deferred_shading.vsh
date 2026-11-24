@@ -83,6 +83,7 @@ uniform float time_midnight;
 #if defined WORLD_OVERWORLD
 #include "/include/lighting/colors/light_color.glsl"
 #include "/include/sky/atmosphere.glsl"
+#include "/include/weather/clouds.glsl"
 #include "/include/weather/fog.glsl"
 #include "/include/weather/rainbow.glsl"
 #endif
@@ -137,9 +138,12 @@ void main() {
 
 #if defined WORLD_OVERWORLD
     Weather weather = get_weather();
+    CloudsParameters clouds_params = get_clouds_parameters(weather);
+    float overcast = get_overcast_factor(clouds_params);
+    float cloud_light_scale = get_overcast_cloud_light_scale(overcast);
 
-    sun_color = get_sun_exposure() * get_sun_tint();
-    moon_color = get_moon_exposure() * get_moon_tint();
+    sun_color = get_sun_exposure() * get_sun_tint() * cloud_light_scale;
+    moon_color = get_moon_exposure() * get_moon_tint() * cloud_light_scale;
     fog_params = get_fog_parameters(weather);
 
     rainbow_amount = get_rainbow_amount(weather);

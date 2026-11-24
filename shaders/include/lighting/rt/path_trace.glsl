@@ -210,35 +210,47 @@ PathTraceSample evaluate_path_trace(
         float sun_cosine = dot(hit.normal, light_direction);
         vec3 safe_sun_color = max0(direct_sun_color);
         if (sun_cosine > 0.0 && max_of(safe_sun_color) > 0.0) {
-            vec3 sun_ray_dir = light_direction;
+#if defined WORLD_OVERWORLD && defined CLOUD_SHADOWS && defined RTGI_CLOUD_SHADOWS
+            float cloud_vis
+                = get_cloud_shadows_fast(colortex8, voxel_to_scene_space(next_origin));
+#else
+            const float cloud_vis = 1.0;
+#endif
+            if (cloud_vis > 0.005) {
+                vec3 sun_ray_dir = light_direction;
 #if INFO >= 3
-            if (b == 0) {
-                float sun_half_angle = radians(SUN_ANGULAR_RADIUS) * max(SHADOW_PENUMBRA_SCALE, 0.0);
-                if (sun_half_angle > 1e-4) {
-                    float r_u = sqrt(random_dimension(seed, 16 + 2 * b));
-                    float phi_u = tau * random_dimension(seed, 17 + 2 * b);
-                    mat3 sun_basis = build_orthonormal_basis(light_direction);
-                    float tan_r = tan(min(sun_half_angle, 0.25)) * r_u;
-                    vec3 cand_dir = normalize(
-                        light_direction
-                        + tan_r * (cos(phi_u) * sun_basis[0] + sin(phi_u) * sun_basis[1])
-                    );
-                    if (dot(hit.normal, cand_dir) > 0.0) {
-                        sun_ray_dir = cand_dir;
+                if (b == 0) {
+                    float cloud_scatter = clamp01(1.0 - cloud_vis);
+                    float sun_half_angle
+                        = (radians(SUN_ANGULAR_RADIUS) + 0.14 * sqr(cloud_scatter))
+                        * max(SHADOW_PENUMBRA_SCALE, 0.0);
+                    if (sun_half_angle > 1e-4) {
+                        float r_u = sqrt(random_dimension(seed, 16 + 2 * b));
+                        float phi_u = tau * random_dimension(seed, 17 + 2 * b);
+                        mat3 sun_basis = build_orthonormal_basis(light_direction);
+                        float tan_r = tan(min(sun_half_angle, 0.35)) * r_u;
+                        vec3 cand_dir = normalize(
+                            light_direction
+                            + tan_r * (cos(phi_u) * sun_basis[0] + sin(phi_u) * sun_basis[1])
+                        );
+                        if (dot(hit.normal, cand_dir) > 0.0) {
+                            sun_ray_dir = cand_dir;
+                        }
                     }
                 }
-            }
 #endif
-            vec3 visibility = voxel_sun_visibility(grid, next_origin, sun_ray_dir);
-            // Cap artistic sunlight bounce boost per hit so high-albedo surfaces
-            // never exceed unit reflectance and create energy in 90-degree corners,
-            // while darker stone/foliage retains full cave-bounce reach and hue.
-            float albedo_peak = max_of(material.albedo);
-            float sun_boost = albedo_peak > 0.0
-                ? min(SUN_INDIRECT_BOOST, max(1.0, 0.92 / albedo_peak))
-                : 1.0;
-            sun = material.albedo * safe_sun_color * visibility
-                * (sun_boost * rcp_pi * sun_cosine);
+                vec3 visibility
+                    = voxel_sun_visibility(grid, next_origin, sun_ray_dir) * cloud_vis;
+                // Cap artistic sunlight bounce boost per hit so high-albedo surfaces
+                // never exceed unit reflectance and create energy in 90-degree corners,
+                // while darker stone/foliage retains full cave-bounce reach and hue.
+                float albedo_peak = max_of(material.albedo);
+                float sun_boost = albedo_peak > 0.0
+                    ? min(SUN_INDIRECT_BOOST, max(1.0, 0.92 / albedo_peak))
+                    : 1.0;
+                sun = material.albedo * safe_sun_color * visibility
+                    * (sun_boost * rcp_pi * sun_cosine);
+            }
         }
 
         // Direct block-light NEE paired with BSDF MIS on the subsequent bounce

@@ -87,8 +87,11 @@ void main() {
     uv = gl_MultiTexCoord0.xy;
 
 #if defined WORLD_OVERWORLD
-    sun_color = get_sun_exposure() * get_sun_tint();
-    moon_color = get_moon_exposure() * get_moon_tint();
+    clouds_params = get_clouds_parameters(get_weather());
+    float overcast = get_overcast_factor(clouds_params);
+
+    vec3 clear_sun_color = get_sun_exposure() * get_sun_tint();
+    vec3 clear_moon_color = get_moon_exposure() * get_moon_tint();
 
     const vec3 sky_dir = normalize(
         vec3(0.0, 1.0, -0.8)
@@ -96,19 +99,25 @@ void main() {
        // rotation is 0
     sky_color = atmosphere_scattering(
         sky_dir,
-        sun_color,
+        clear_sun_color,
         sun_dir,
-        moon_color,
+        clear_moon_color,
         moon_dir,
         /* use_klein_nishina_phase */ false
     );
     sky_color = (tau * 1.13) * sky_color;
-    sky_color = mix(sky_color, tau * get_weather_color(), rainStrength);
+    sky_color = apply_overcast_sky_color(
+        sky_color,
+        tau * get_weather_color(),
+        overcast
+    );
+
+    float cloud_light_scale = get_overcast_cloud_light_scale(overcast);
+    sun_color = clear_sun_color * cloud_light_scale;
+    moon_color = clear_moon_color * cloud_light_scale;
 
     aurora_amount = get_aurora_amount();
     aurora_colors = get_aurora_colors();
-
-    clouds_params = get_clouds_parameters(get_weather());
 
     sky_color += aurora_amount * AURORA_CLOUD_LIGHTING
         * mix(aurora_colors[0], aurora_colors[1], 0.25);

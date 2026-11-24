@@ -444,8 +444,9 @@ void main() {
         vec3 shadows = vec3(0.0);
         float shadow_distance_fade = 1.0;
         float sss_depth = 0.0;
+        bool has_direct_light = (cloud_shadows * max_of(light_color)) > 1e-4;
 
-        if (NoL > 1e-3 || material.sss_amount > 1e-3) {
+        if (has_direct_light && (NoL > 1e-3 || material.sss_amount > 1e-3)) {
             // Calculate near shadows
             vec3 shadow_near = vec3(0.0);
             float shadow_distant = 0.0;
@@ -511,7 +512,7 @@ void main() {
 
         vec3 indirect_radiance = sample_rtgi_diffuse(
             texel, full_size, position_view, position_scene, flat_normal,
-            material_mask, surface.kind, light_levels
+            material_mask, surface.kind, light_levels, cloud_shadows
         ) * RTGI_INTENSITY;
         fragment_color = get_diffuse_lighting(
             material,
@@ -541,7 +542,7 @@ void main() {
         // Specular highlight
 
 #if defined WORLD_OVERWORLD || defined WORLD_END
-        if (NoL > eps && max_of(shadows) > eps) {
+        if (has_direct_light && NoL > eps && max_of(shadows) > eps) {
             vec3 direct_specular = get_specular_highlight(material, NoL, NoV, NoH, LoV, LoH)
                 * light_color * shadows * cloud_shadows;
 #ifdef RT_AO_IN_DIRECT

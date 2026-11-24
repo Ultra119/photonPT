@@ -105,9 +105,9 @@ uniform float desert_sandstorm;
 #endif
 
 #if defined WORLD_OVERWORLD
-vec3 get_ambient_color() {
-    sun_color = get_sun_exposure() * get_sun_tint();
-    moon_color = get_moon_exposure() * get_moon_tint();
+vec3 get_ambient_color(float overcast) {
+    vec3 clear_sun_color = get_sun_exposure() * get_sun_tint();
+    vec3 clear_moon_color = get_moon_exposure() * get_moon_tint();
 
     const vec3 sky_dir = normalize(
         vec3(0.0, 1.0, -0.8)
@@ -115,14 +115,22 @@ vec3 get_ambient_color() {
        // rotation is 0
     sky_color = atmosphere_scattering(
         sky_dir,
-        sun_color,
+        clear_sun_color,
         sun_dir,
-        moon_color,
+        clear_moon_color,
         moon_dir,
         false
     );
     sky_color = tau * sky_color * 1.13;
-    sky_color = mix(sky_color, tau * get_weather_color(), rainStrength);
+    sky_color = apply_overcast_sky_color(
+        sky_color,
+        tau * get_weather_color(),
+        overcast
+    );
+
+    float cloud_light_scale = get_overcast_cloud_light_scale(overcast);
+    sun_color = clear_sun_color * cloud_light_scale;
+    moon_color = clear_moon_color * cloud_light_scale;
 
     return sky_color;
 }
@@ -130,9 +138,6 @@ vec3 get_ambient_color() {
 
 void main() {
     uv = gl_MultiTexCoord0.xy;
-
-    light_color = get_light_color();
-    ambient_color = get_ambient_color();
 
 #if defined WORLD_OVERWORLD
     float aurora_amount = get_aurora_amount();
@@ -142,6 +147,10 @@ void main() {
     float rainbow_amount = get_rainbow_amount(weather);
     clouds_params = get_clouds_parameters(weather);
     fog_params = get_fog_parameters(weather);
+
+    float overcast = get_overcast_factor(clouds_params);
+    light_color = get_light_color() * get_overcast_direct_attenuation(overcast);
+    ambient_color = get_ambient_color(overcast);
 
     aurora_data = mat2x4(
         vec4(aurora_colors[0], aurora_amount),
@@ -153,6 +162,9 @@ void main() {
         = mix(aurora_colors[0], aurora_colors[1], 0.25) * aurora_amount;
     sky_color += AURORA_CLOUD_LIGHTING * aurora_lighting;
     ambient_color += AURORA_CLOUD_LIGHTING * aurora_lighting;
+#else
+    light_color = get_light_color();
+    ambient_color = get_ambient_color();
 #endif
 
     gl_Position = vec4(gl_Vertex.xy * 2.0 - 1.0, 0.0, 1.0);

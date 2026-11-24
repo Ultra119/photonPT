@@ -157,8 +157,15 @@ mat2x3 raymarch_air_fog(
 
         vec3 visible_scattering = step_transmitted_fraction * transmittance;
 
-        light_sun[0] += visible_scattering * density.x * shadow;
-        light_sun[1] += visible_scattering * density.y * shadow;
+#if defined CLOUD_SHADOWS && !defined PROGRAM_DEFERRED0
+        float step_cloud_shadow
+            = get_cloud_shadows_fast(colortex8, world_pos - cameraPosition);
+#else
+        const float step_cloud_shadow = 1.0;
+#endif
+
+        light_sun[0] += visible_scattering * density.x * shadow * step_cloud_shadow;
+        light_sun[1] += visible_scattering * density.y * shadow * step_cloud_shadow;
         light_sky[0] += visible_scattering * density.x;
         light_sky[1] += visible_scattering * density.y;
 
@@ -202,8 +209,7 @@ mat2x3 raymarch_air_fog(
             + 0.3 * henyey_greenstein_phase(LoV, -0.2 * anisotropy);
 
         scattering += scatter_amount
-            * (light_sun * vec2(isotropic_phase, mie_phase)) * light_color
-            * (1.0 - 0.9 * rainStrength);
+            * (light_sun * vec2(isotropic_phase, mie_phase)) * light_color;
 
         scatter_amount *= 0.5;
         anisotropy *= 0.7;

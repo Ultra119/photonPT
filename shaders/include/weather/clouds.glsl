@@ -183,4 +183,67 @@ CloudsParameters get_clouds_parameters(Weather weather) {
     return params;
 }
 
+// Macro sky overcast factor in [0, 1] driven by dynamic cloud deck coverage
+// and rainStrength. Stays near 0 on clear/scattered cumulus days, ramps
+// smoothly to ~0.85 on heavy dry stratus/altostratus overcast, and reaches
+// 1.0 in rain.
+float get_overcast_factor(CloudsParameters params) {
+    float l0_cover = 0.0;
+#ifdef CLOUDS_CUMULUS
+    l0_cover = clamp01(
+        dot(params.l0_coverage, vec2(0.55, 0.45))
+        * (1.0 + 0.30 * params.l0_cumulus_stratus_blend)
+    );
+#endif
+    float l1_cover = 0.0;
+#ifdef CLOUDS_ALTOCUMULUS
+    l1_cover = clamp01(
+        dot(params.l1_coverage, vec2(0.55, 0.45))
+        * (1.0 + 0.25 * params.l1_cumulus_stratus_blend)
+    );
+#endif
+    float combined_cover = 1.0 - (1.0 - l0_cover) * (1.0 - 0.65 * l1_cover);
+    float dry_overcast = smoothstep(0.50, 0.90, combined_cover);
+    return clamp01(max(dry_overcast * 0.85, rainStrength));
+}
+
+// Macro direct sun/moon attenuation from overcast haze & rain (applies to
+// both sun and moon). When CLOUD_SHADOWS is enabled, per-pixel colortex8
+// handles local cloud cores and clear breaks while this provides macro haze
+// and full rain extinction.
+float get_overcast_direct_attenuation(float overcast) {
+#ifdef CLOUD_SHADOWS
+    float dry_haze = mix(1.0, 0.70, smoothstep(0.30, 0.95, overcast));
+#else
+    float dry_haze = mix(1.0, 0.16, smoothstep(0.15, 0.90, overcast));
+#endif
+    float rain_atten = 1.0 - 0.94 * smoothstep(0.0, 0.85, rainStrength);
+    return dry_haze * rain_atten;
+}
+
+// Scales cloud/atmosphere direct sunlight & moonlight scattering during heavy
+// dry overcast and rain so dry overcast stays luminous silver-gray (~35-45%
+// dimmer than clear sun) while rain/storms step noticeably darker (~65-75%).
+float get_overcast_cloud_light_scale(float overcast) {
+    return mix(1.0, 0.86, smoothstep(0.25, 0.95, overcast))
+        * mix(1.0, 0.54, smoothstep(0.0, 0.90, rainStrength));
+}
+
+// Blends and dims overhead sky/cloud ambient color during dry overcast & rain
+// so RTGI sky illumination cools and drops ~35-50% on heavy dry overcast and
+// ~60-75% in rain.
+vec3 apply_overcast_sky_color(
+    vec3 clear_sky_color,
+    vec3 weather_sky_color,
+    float overcast
+) {
+    float blend = clamp01(
+        max(0.45 * smoothstep(0.20, 0.90, overcast), rainStrength)
+    );
+    vec3 blended = mix(clear_sky_color, weather_sky_color, blend);
+    float dim = mix(1.0, 0.90, smoothstep(0.30, 0.95, overcast))
+        * mix(1.0, 0.60, smoothstep(0.0, 0.90, rainStrength));
+    return blended * dim;
+}
+
 #endif // INCLUDE_WEATHER_CLOUDS

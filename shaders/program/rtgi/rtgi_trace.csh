@@ -50,6 +50,9 @@ uniform sampler2D shadowcolor0;
 uniform sampler2D depthtex1;
 uniform sampler2D colortex1;
 uniform sampler2D colortex4; // sky map & light colors
+#if defined WORLD_OVERWORLD && defined CLOUD_SHADOWS
+uniform sampler2D colortex8; // cloud shadow map
+#endif
 
 uniform mat4 gbufferModelViewInverse;
 uniform mat4 gbufferProjection;
@@ -76,6 +79,11 @@ uniform float far;
 uniform vec2 taa_offset;
 uniform float eye_skylight;
 uniform float time_midnight;
+#if defined WORLD_OVERWORLD && defined CLOUD_SHADOWS
+uniform float eyeAltitude;
+#define RTGI_CLOUD_SHADOWS
+#include "/include/lighting/cloud_shadows.glsl"
+#endif
 
 #include "/include/utility/stbn.glsl"
 #include "/include/lighting/rt/rtgi_opaque_depth.glsl"

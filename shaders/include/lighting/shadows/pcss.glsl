@@ -29,6 +29,8 @@ const float shadow_map_pixel_size = rcp(float(shadow_map_res));
 vec2 blocker_search(
     vec3 shadow_clip_pos,
     vec2 receiver_plane_slope,
+    float search_radius_world,
+    float sss_radius_world,
     float dither,
     bool has_sss
 ) {
@@ -43,8 +45,8 @@ vec2 blocker_search(
 
     float ref_z = shadow_clip_pos.z * (SHADOW_DEPTH_SCALE * 0.5) + 0.5;
 
-    float radius = SHADOW_BLOCKER_SEARCH_RADIUS * shadowProjection[0].x
-        * (0.5 + 0.5 * linear_step(0.2, 0.4, light_dir.y));
+    float radius = (has_sss ? min(search_radius_world, sss_radius_world) : search_radius_world)
+        * shadowProjection[0].x;
 
     float depth_sum = 0.0;
     float weight_sum = 0.0;
@@ -65,7 +67,7 @@ vec2 blocker_search(
             ivec2(shadow_map_res - 1)
         );
         float depth = texelFetch(shadowtex0, texel, 0).x;
-        float ref_z_tap = ref_z + clamp(dot(receiver_plane_slope, offset), -0.015, 0.0);
+        float ref_z_tap = ref_z + clamp(dot(receiver_plane_slope, offset), -0.04, 0.0);
         float weight = step(depth, ref_z_tap);
 
         depth_sum += weight * depth;
@@ -155,7 +157,7 @@ vec3 shadow_pcf(
         uv = uv * 0.5 + 0.5;
 
         bool in_bounds = clamp01(uv) == uv;
-        float tap_z = shadow_screen_pos.z + clamp(dot(receiver_plane_slope, offset), -0.015, 0.0);
+        float tap_z = shadow_screen_pos.z + clamp(dot(receiver_plane_slope, offset), -0.04, 0.0);
         float vis = in_bounds ? texture(shadowtex1, vec3(uv, tap_z)) : 1.0;
         opaque_sum += vis;
 
@@ -248,11 +250,31 @@ vec3 get_filtered_shadows(
         * vec2(shadow_normal.x / shadowProjection[0].x,
                shadow_normal.y / shadowProjection[1].y);
 
+    float cloud_scatter = clamp01(1.0 - cloud_shadows);
+
 #ifdef SHADOW_VPS
+#if INFO <= 1
+    const float cloud_search_mult = 2.4;
+#elif INFO == 2
+    const float cloud_search_mult = 4.4;
+#else
+    const float cloud_search_mult = 6.4;
+#endif
+    float elevation_scale = 0.5 + 0.5 * linear_step(0.2, 0.4, light_dir.y);
+    float max_penumbra_world
+        = SHADOW_BLOCKER_SEARCH_RADIUS * mix(1.0, cloud_search_mult, cloud_scatter);
+    float search_radius_world = max_penumbra_world * elevation_scale;
+    float sss_radius_world = SHADOW_BLOCKER_SEARCH_RADIUS * 1.5 * elevation_scale;
+
     // Bias blocker search so grazing walls do not self-occlude into penumbra
     // strings along narrow skylight beams.
     vec2 blocker_search_result = blocker_search(
-        shadow_clip_pos, receiver_plane_slope, dither, sss_amount > eps
+        shadow_clip_pos,
+        receiver_plane_slope,
+        search_radius_world,
+        sss_radius_world,
+        dither,
+        sss_amount > eps
     );
 
     sss_depth = blocker_search_result.y;
@@ -264,17 +286,27 @@ vec3 get_filtered_shadows(
         return vec3(1.0); // blocker search empty handed => no occluders
     }
 
-    float penumbra_size = 16.0 * SHADOW_PENUMBRA_SCALE
-        * (shadow_screen_pos.z - blocker_search_result.x)
-        / blocker_search_result.x;
-    penumbra_size
-        *= 5.0 - 4.0 * cloud_shadows; // Increase penumbra radius inside cloud
-                                      // shadows, nice overcast look
-    penumbra_size = min(penumbra_size, SHADOW_BLOCKER_SEARCH_RADIUS);
-    penumbra_size *= shadowProjection[0].x;
+    // Exact orthographic world-space blocker distance and physical sun/moon
+    // angular penumbra, widened by forward scattering through cloud droplets.
+    float depth_to_world
+        = 2.0 * abs(shadowProjectionInverse[2].z) * rcp(SHADOW_DEPTH_SCALE);
+    float blocker_distance
+        = max0(shadow_screen_pos.z - blocker_search_result.x) * depth_to_world;
+#if defined WORLD_OVERWORLD
+    float light_angular_radius
+        = (sunAngle < 0.5) ? (SUN_ANGULAR_RADIUS * degree)
+                           : (MOON_ANGULAR_RADIUS * degree);
+#else
+    const float light_angular_radius = SUN_ANGULAR_RADIUS * degree;
+#endif
+    float tan_angle = (tan(light_angular_radius) + 0.14 * sqr(cloud_scatter))
+        * SHADOW_PENUMBRA_SCALE;
+    float penumbra_world = min(blocker_distance * tan_angle, max_penumbra_world);
+    float penumbra_size = penumbra_world * shadowProjection[0].x;
 #else
     float penumbra_size
         = sqrt(0.5) * shadow_map_pixel_size * SHADOW_PENUMBRA_SCALE;
+    penumbra_size *= 1.0 + 3.0 * sqr(cloud_scatter);
 
     // Increase blur radius to approximate subsurface scattering
     penumbra_size *= 1.0 + 7.0 * sss_amount;

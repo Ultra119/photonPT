@@ -29,40 +29,61 @@
 
 const float sun_luminance = rcp(
     cone_angle_to_solid_angle(sun_angular_radius)
-); // luminance of sun disk
-const float moon_luminance = 10.0; // luminance of moon disk
+); // luminance of sun disk (solid-angle normalized for constant flux)
+const float moon_ref_solid_angle = cone_angle_to_solid_angle(3.0 * degree);
+const float moon_luminance = 10.0
+    * clamp(
+        sqrt(moon_ref_solid_angle * rcp(cone_angle_to_solid_angle(moon_angular_radius))),
+        1.0,
+        6.0
+    ); // scales luminance gently with smaller moon disc while preserving crater detail
 
 vec3 draw_sun(vec3 ray_dir) {
-    float nu = dot(ray_dir, sun_dir);
+    float nu = clamp(dot(ray_dir, sun_dir), -1.0, 1.0);
+    float angle = fast_acos(nu);
+    float aa = max(fwidth(angle), 1e-4);
+    float disc_mask
+        = 1.0 - smoothstep(sun_angular_radius - aa, sun_angular_radius + aa, angle);
+    if (disc_mask <= 0.0) {
+        return vec3(0.0);
+    }
 
     // Limb darkening model from
     // http://www.physics.hmc.edu/faculty/esin/a101/limbdarkening.pdf
+    // Normalize radius to [0, 1] and conserve integrated disc flux across
+    // all SUN_ANGULAR_RADIUS values (matching stock 2.0-deg integrated brightness).
     const vec3 alpha = vec3(0.429, 0.522, 0.614);
-    float center_to_edge = max0(sun_angular_radius - fast_acos(nu));
+    float r_norm = clamp01(angle * rcp(sun_angular_radius));
+    float mu_limb = sqrt(max0(1.0 - sqr(r_norm)));
     vec3 limb_darkening
-        = pow(vec3(1.0 - sqr(1.0 - center_to_edge)), 0.5 * alpha);
+        = pow(vec3(max(mu_limb, 1e-4)), alpha) * (0.50 * (1.0 + 0.5 * alpha));
 
-    return sun_luminance * sun_color * step(0.0, center_to_edge)
-        * limb_darkening;
+    // Clamp below R11F_G11F_B10F max (64512) so tiny angular radii / blue hour
+    // never overflow colortex0 to Inf.
+    return min(
+        sun_luminance * sun_color * disc_mask * limb_darkening,
+        vec3(48000.0)
+    );
 }
 
 vec4 draw_moon(vec3 ray_dir) {
-    const float angle = 0.7;
-    const mat2 rot = mat2(cos(angle), sin(angle), -sin(angle), cos(angle));
-
     const vec3 lit_color
         = vec3(MOON_R, MOON_G <= 0.03 ? 0.0 : MOON_G - 0.03, MOON_B);
     const vec3 glow_color
         = vec3(MOON_R <= 0.05 ? 0.0 : MOON_R - 0.05, MOON_G, MOON_B);
 
-    // Cut out the moon disc.
-    float MoV = dot(ray_dir, moon_dir);
-    if (MoV < cos(moon_angular_radius)) {
+    // Cut out the moon disc with smooth anti-aliased edge for small angular sizes.
+    float MoV = clamp(dot(ray_dir, moon_dir), -1.0, 1.0);
+    float angle = fast_acos(MoV);
+    float aa = max(fwidth(angle), 1e-4);
+    float disc_mask
+        = 1.0 - smoothstep(moon_angular_radius - aa, moon_angular_radius + aa, angle);
+    if (disc_mask <= 0.0) {
         return vec4(0.0);
     }
 
     // Find distance from center to edge.
-    float dist = clamp01(fast_acos(MoV) / moon_angular_radius);
+    float dist = clamp01(angle * rcp(moon_angular_radius));
 
     // Transform the coordinate space such that z is parallel to moon_dir
     vec3 tangent = moon_dir.y == 1.0
@@ -71,8 +92,10 @@ vec4 draw_moon(vec3 ray_dir) {
     vec3 bitangent = normalize(cross(tangent, moon_dir));
     mat3 tbn = mat3(tangent, bitangent, moon_dir);
 
-    // Vector from ray dir to moon dir.
-    vec2 offset = ((ray_dir - sun_dir) * tbn).xy;
+    // Vector from moon center scaled by angular radius so crater scale stays
+    // consistent across MOON_ANGULAR_RADIUS settings.
+    vec2 offset = ((ray_dir - moon_dir) * tbn).xy
+        * (3.0 * degree * rcp(moon_angular_radius));
     offset = fract(offset + 0.5);
 
     vec3 noise = texture(noisetex, 2.0 * offset).xyz;
@@ -96,7 +119,7 @@ vec4 draw_moon(vec3 ray_dir) {
                      0.5 * glow_color * (0.1 + 0.1 * edge_glow))
         * (0.2 + 0.8 * moon_texture);
     color = moon_luminance * sqr(color);
-    return vec4(color, 1.0);
+    return vec4(color * disc_mask, disc_mask);
 }
 
 #ifdef GALAXY
@@ -337,7 +360,10 @@ vec3 draw_sun(vec3 ray_dir) {
     flare = pow5(flare) * exp(-25.0 * (r - sun_angular_radius));
     flare = r < sun_angular_radius ? 0.0 : flare;
 
-    return end_sun_color * rcp(sun_solid_angle) * max0(sun_disk + 0.1 * flare);
+    return min(
+        end_sun_color * rcp(sun_solid_angle) * max0(sun_disk + 0.1 * flare),
+        vec3(48000.0)
+    );
 }
 
 vec3 draw_sky(vec3 ray_dir) {

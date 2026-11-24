@@ -90,7 +90,7 @@ mat2x3 air_fog_analytic(
         scattering += scatter_amount
             * (rayleigh_scattering * isotropic_phase
                + mie_scattering * mie_phase)
-            * light_color * (1.0 - 0.9 * rainStrength) * shadow;
+            * light_color * shadow;
 
         scatter_amount *= 0.5;
         anisotropy *= 0.7;

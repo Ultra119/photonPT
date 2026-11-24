@@ -88,7 +88,7 @@ vec3 sss_approx(
 }
 #endif
 
-vec3 rtgi_fallback_radiance(vec2 light_levels, vec3 flat_normal) {
+vec3 rtgi_fallback_radiance(vec2 light_levels, vec3 flat_normal, float cloud_shadows) {
     // Reuse the underlying lightmap falloff only where traced diffuse has no
     // compatible support (or for forward translucent callers). Keep the
     // fallback deterministic and in E/pi units.
@@ -103,7 +103,7 @@ vec3 rtgi_fallback_radiance(vec2 light_levels, vec3 flat_normal) {
     // faces so the RT coverage boundary has no brightness drop or blue shift.
     float sky_vis = sqr(light_levels.y);
     vec3 sky_up = sky_fallback_color * SKYLIGHT_I;
-    vec3 ground_bounce = 0.28 * (sky_up + max0(light_color) * (max0(light_dir.y) * rcp_pi));
+    vec3 ground_bounce = 0.28 * (sky_up + max0(light_color) * (cloud_shadows * max0(light_dir.y) * rcp_pi));
     float up_factor = 0.5 + 0.5 * clamp(flat_normal.y, -1.0, 1.0);
     vec3 environment = mix(ground_bounce, sky_up, up_factor) * sky_vis;
 #elif defined WORLD_NETHER
@@ -124,7 +124,7 @@ vec3 rtgi_fallback_radiance(vec2 light_levels, vec3 flat_normal) {
 }
 
 vec3 rtgi_fallback_radiance(vec2 light_levels) {
-    return rtgi_fallback_radiance(light_levels, vec3(0.0, 1.0, 0.0));
+    return rtgi_fallback_radiance(light_levels, vec3(0.0, 1.0, 0.0), 1.0);
 }
 
 #ifdef DIFFUSE_USE_RTGI
@@ -149,9 +149,10 @@ float rtgi_upsample_weight(
 
 vec3 sample_rtgi_diffuse(
     ivec2 pixel, ivec2 full_size, vec3 view_pos, vec3 scene_pos,
-    vec3 flat_normal, uint material, uint kind, vec2 light_levels
+    vec3 flat_normal, uint material, uint kind, vec2 light_levels,
+    float cloud_shadows
 ) {
-    vec3 fallback = rtgi_fallback_radiance(light_levels, flat_normal);
+    vec3 fallback = rtgi_fallback_radiance(light_levels, flat_normal, cloud_shadows);
     if (kind != rtgi_world || !rtgi_finite(vec4(scene_pos, view_pos.z)) || view_pos.z >= 0.0) {
         return fallback;
     }
