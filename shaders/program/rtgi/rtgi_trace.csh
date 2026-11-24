@@ -343,7 +343,7 @@ RestirGiReservoir restir_gi_temporal_reuse(
     ivec3 grid_shift = camera_grid_shift();
     float p0_of_1 = 0.0;
     bool prev_valid = false;
-    bool prev_tinted = false;
+    vec3 prev_trans = vec3(1.0);
     if (prev.sample_data.kind != restir_gi_kind_empty && prev.weight > 0.0 && prev.target_pdf > 0.0) {
         if (prev.sample_data.emitter_cell.x >= 0) {
             prev.sample_data.emitter_cell -= grid_shift;
@@ -366,11 +366,9 @@ RestirGiReservoir restir_gi_temporal_reuse(
             && restir_gi_temporal_eligible(origin, world_normal, prev.sample_data, two_sided)) {
             p0_of_1 = restir_gi_target_pdf(origin, world_normal, prev.sample_data, two_sided);
             if (p0_of_1 > 0.0) {
-                vec3 prev_trans;
                 prev_valid = restir_gi_trace_visibility(
                     voxel_sampler, origin, prev.sample_data, prev_trans
                 );
-                prev_tinted = prev_valid && any(lessThan(prev_trans, vec3(0.999)));
             }
         }
     }
@@ -392,6 +390,7 @@ RestirGiReservoir restir_gi_temporal_reuse(
         float w0 = m0 * p0_of_0 * initial.weight;
         if (restir_gi_update(combined, initial.sample_data, w0, p0_of_0, random_dimension(seed, 0))) {
             combined.tinted = initial.tinted;
+            combined.trans = initial.trans;
         }
     }
 
@@ -400,7 +399,7 @@ RestirGiReservoir restir_gi_temporal_reuse(
         float m1 = (m1_count * p1_of_1) / max(m1_count * p1_of_1 + m0_count * p0_of_1, 1e-20);
         float w1 = m1 * p0_of_1 * prev.weight;
         if (restir_gi_update(combined, prev.sample_data, w1, p0_of_1, random_dimension(seed, 1))) {
-            combined.tinted = prev_tinted;
+            restir_gi_set_trans(combined, prev_trans);
         }
     }
 
@@ -597,7 +596,7 @@ void main() {
                 if (restir_gi_update(
                         initial_gi, gi_s, w_init, p_hat, random_dimension(ray_seed, 11)
                     )) {
-                    initial_gi.tinted = any(lessThan(pt.primary_transmittance, vec3(0.999)));
+                    restir_gi_set_trans(initial_gi, pt.primary_transmittance);
                 }
             }
         }

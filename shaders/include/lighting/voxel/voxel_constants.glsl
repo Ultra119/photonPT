@@ -73,6 +73,9 @@ const float rt_bounce_max_distance = min(float(RT_CLIPMAP_SIZE) * 0.25, 12.0);
 #elif INFO == 2
 const float rt_primary_max_distance = min(float(RT_CLIPMAP_SIZE) * 0.5, 48.0);
 const float rt_bounce_max_distance = min(float(RT_CLIPMAP_SIZE) * 0.25, 16.0);
+#elif INFO == 3
+const float rt_primary_max_distance = min(float(RT_CLIPMAP_SIZE) * 0.5, 56.0);
+const float rt_bounce_max_distance = min(float(RT_CLIPMAP_SIZE) * 0.25, 20.0);
 #else
 const float rt_primary_max_distance = min(float(RT_CLIPMAP_SIZE) * 0.5, 72.0);
 const float rt_bounce_max_distance = min(float(RT_CLIPMAP_SIZE) * 0.25, 24.0);

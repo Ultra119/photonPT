@@ -231,12 +231,22 @@ void main() {
         vec4 stbn_sp = sample_stbn(texel + ivec2(17, 31), frameCounter);
 
         float base_angle = stbn_sp.b * tau;
-        for (int k = 0; k < restir_spatial_max_neighbors; ++k) {
-            float angle = base_angle + (tau / float(restir_spatial_max_neighbors))
+#if INFO <= 3
+        // Foliage/canopy pixels already use 3D temporal + 4-pass SVGF filtering
+        // and pass both hemispheres on cosine tests; cap their spatial search to
+        // 2 neighbors on gameplay tiers while keeping full 4-neighbor GI on walls.
+        int spatial_budget = two_sided
+            ? min(restir_spatial_max_neighbors, 2)
+            : restir_spatial_max_neighbors;
+#else
+        int spatial_budget = restir_spatial_max_neighbors;
+#endif
+        for (int k = 0; k < spatial_budget; ++k) {
+            float angle = base_angle + (tau / float(spatial_budget))
                 * (float(k) + random_dimension(seed, 1 + 2 * k));
             float rad_u = k == 0 ? stbn_sp.a : random_dimension(seed, 2 + 2 * k);
             float rad = search_radius * sqrt(
-                (float(k) + 0.15 + 0.85 * rad_u) / float(restir_spatial_max_neighbors)
+                (float(k) + 0.15 + 0.85 * rad_u) / float(spatial_budget)
             );
             ivec2 tap = texel + ivec2(round(rad * vec2(cos(angle), sin(angle))));
             if (tap == texel || !rtgi_in_bounds(tap, grid.gi_active)) {
@@ -264,11 +274,14 @@ void main() {
             }
             neighbor_tap[valid_neighbors] = tap;
 #if INFO <= 2 && !defined RTGI_RESTIR_GI
-            // Lower presets skip canonical reverse visibility traces from neighbor
-            // origins, so an un-nudged surface point suffices for nb_delta/PDF
-            // without 3D voxel fetches per neighbor.
+            // Lower presets without ReSTIR GI skip canonical reverse visibility
+            // traces from neighbor origins and do not run spatial->temporal
+            // Jacobian reconnection, so an un-nudged surface point suffices.
             neighbor_origin[valid_neighbors] = n_voxel + voxel_receiver_bias * n_world_normal;
 #else
+            // Under ReSTIR GI, neighbor_origin MUST match center's rtgi_receiver_origin
+            // (including foliage's 0.22-block nudge) so vertex-reconnection Jacobians
+            // satisfy J(a->b) * J(b->a) == 1 identically and feedback_gi cannot blow up.
             neighbor_origin[valid_neighbors] = rtgi_receiver_origin(
                 voxel_sampler, n_voxel, n_world_normal, material
             );
@@ -378,10 +391,11 @@ void main() {
                             float nb_cx = rtgi_receiver_cos(neighbor_normal[i], nb_dir, two_sided);
                             float nb_cy = dot(c_lnorm, -nb_dir);
                             if (nb_cx > 0.0 && nb_cy > 0.0) {
-#if INFO <= 2
+#if INFO <= 3
                                 // RTXDI-style unshadowed canonical MIS weight on
-                                // lower presets: forward visibility at origin is
-                                // still traced strictly so no light ever leaks.
+                                // gameplay presets (Screenshot INFO == 4 keeps
+                                // full reverse traces): forward visibility at
+                                // origin is still traced strictly so no light leaks.
                                 p_i_of_c = restir_target_pdf_from_geom(
                                     c_emission, nb_cx, nb_cy, nb_dist_sq
                                 );
@@ -543,7 +557,9 @@ void main() {
         uint gi_valid_mask = 0u;
         float m_gi_neighbors = 0.0;
         for (int i = 0; i < valid_neighbors; ++i) {
-            uint n_cnt = (load_gi_reservoir(neighbor_tap[i], target_res, restir_gi_temporal_bank).w1.x >> 16u) & 4095u;
+            uint n_cnt = restir_gi_unpack_count(
+                load_gi_reservoir(neighbor_tap[i], target_res, restir_gi_temporal_bank)
+            );
             if (n_cnt > 0u) {
                 gi_valid_mask |= (1u << uint(i));
                 m_gi_neighbors += float(n_cnt);
@@ -601,6 +617,12 @@ void main() {
                     if (jac_ci > 0.0) {
                         float p_i_raw = center_gi_lum * (cos_r_dst * rcp_pi);
                         if (p_i_raw > 0.0) {
+#if INFO <= 3
+                            // RTXDI-style unshadowed canonical GI MIS on gameplay
+                            // tiers: forward visibility at origin is still strictly
+                            // traced; Screenshot (INFO == 4) keeps reverse traces.
+                            p_i_of_c = p_i_raw * jac_ci;
+#else
                             if (same_gi_geom) {
                                 // Neighbor already proved visibility of this exact hit/direction
                                 // from neighbor_origin[i] in deferred1_a.
@@ -612,6 +634,7 @@ void main() {
                                     p_i_of_c = p_i_raw * jac_ci;
                                 }
                             }
+#endif
                         }
                     }
                     float num = float(center_gi.count) * center_gi.target_pdf;
@@ -634,6 +657,7 @@ void main() {
                             vec3 trans = vec3(1.0);
                             if (same_gi_geom && !center_gi.tinted) {
                                 vis_ok = true;
+                                trans = center_gi.trans;
                             } else if (has_last_gi
                                        && nr.sample_data.kind == last_gi_kind
                                        && nr.sample_data.pos_or_dir == last_gi_pos) {
@@ -699,7 +723,7 @@ void main() {
                         voxel_sampler, origin, combined_gi.sample_data, gi_winning_trans
                     );
                 } else {
-                    gi_winning_trans = vec3(1.0);
+                    gi_winning_trans = center_gi.trans;
                 }
             }
             if (visible) {
@@ -717,7 +741,7 @@ void main() {
         // propagate across dim walls within a few frames.
         RestirGiReservoir feedback_gi = combined_gi;
         feedback_gi.count = min(feedback_gi.count, restir_gi_feedback_cap);
-        feedback_gi.tinted = any(lessThan(gi_winning_trans, vec3(0.999)));
+        restir_gi_set_trans(feedback_gi, gi_winning_trans);
         store_gi_reservoir(texel, target_res, restir_gi_history_bank, restir_gi_pack(feedback_gi));
         bool ok_gi = rtgi_finite(vec4(indirect_gi, 0.0))
             && all(greaterThanEqual(indirect_gi, vec3(0.0)));

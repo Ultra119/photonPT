@@ -40,7 +40,7 @@ const float restir_gi_temporal_min_cos = 0.08;
 // 32-byte std430 SSBO slot (2 banks = 64 bytes per GI pixel in bufferObject.0).
 //   w0.xyz: floatBitsToUint(pos_or_dir) (voxel-space hit pos or unit sky dir)
 //   w0.w  : packHalf2x16(rad.rg)
-//   w1.x  : rad.b (FP16 low 16b) | count (12b) | kind (2b) | tinted (1b) | reserved (1b)
+//   w1.x  : rad.b (FP16 low 16b) | count (6b) | trans_q (6b) | kind (2b) | tinted (1b) | reserved (1b)
 //   w1.y  : floatBitsToUint(W)
 //   w1.z  : floatBitsToUint(target_pdf)
 //   w1.w  : emitter_cell (10b x | 8b y | 10b z) | normal_face (3b) | has_emitter (1b)
@@ -64,6 +64,7 @@ struct RestirGiReservoir {
     float target_pdf;
     uint count;
     bool tinted;
+    vec3 trans;
 };
 
 RestirGiSample restir_gi_empty_sample() {
@@ -71,7 +72,30 @@ RestirGiSample restir_gi_empty_sample() {
 }
 
 RestirGiReservoir restir_gi_empty_reservoir() {
-    return RestirGiReservoir(restir_gi_empty_sample(), 0.0, 0.0, 0.0, 0u, false);
+    return RestirGiReservoir(restir_gi_empty_sample(), 0.0, 0.0, 0.0, 0u, false, vec3(1.0));
+}
+
+void restir_gi_set_trans(inout RestirGiReservoir r, vec3 trans) {
+    vec3 t = clamp01(trans);
+    float hi = max_of(t);
+    float lo = min_of(t);
+    if (lo >= 0.999) {
+        r.trans = vec3(1.0);
+        r.tinted = false;
+    } else if ((hi - lo) <= 0.18 * max(hi, 1e-4)) {
+        // Near-neutral canopy/leaf attenuation: keep scalar transmittance
+        // inline in w1.x so deferred1_b avoids redundant center re-traces
+        // while still re-tracing genuine chromatic stained glass.
+        r.trans = vec3(dot(t, luminance_weights));
+        r.tinted = false;
+    } else {
+        r.trans = t;
+        r.tinted = true;
+    }
+}
+
+uint restir_gi_unpack_count(RestirGiSlot slot) {
+    return (slot.w1.x >> 16u) & 63u;
 }
 
 uint restir_gi_encode_normal(vec3 n) {
@@ -94,7 +118,7 @@ vec3 restir_gi_decode_normal(uint face) {
 }
 
 RestirGiSlot restir_gi_pack(RestirGiReservoir r) {
-    uint count_packed = min(r.count, 4095u);
+    uint count_packed = min(r.count, 63u);
     uint kind = r.sample_data.kind;
     bool valid_kind = (kind == restir_gi_kind_surface && r.sample_data.normal_face < 6u
                        && all(greaterThanEqual(r.sample_data.pos_or_dir, vec3(0.0)))
@@ -114,7 +138,11 @@ RestirGiSlot restir_gi_pack(RestirGiReservoir r) {
         packHalf2x16(rad.rg)
     );
     uint rad_b_half = packHalf2x16(vec2(rad.b, 0.0)) & 0xFFFFu;
-    uint w1_x = rad_b_half | (count_packed << 16u) | ((kind & 3u) << 28u) | (r.tinted ? (1u << 30u) : 0u);
+    uint trans_q = r.tinted
+        ? 0u
+        : clamp(uint(round(clamp01(dot(r.trans, luminance_weights)) * 63.0)), 1u, 63u);
+    uint w1_x = rad_b_half | (count_packed << 16u) | (trans_q << 22u)
+        | ((kind & 3u) << 28u) | (r.tinted ? (1u << 30u) : 0u);
     uint w1_w = (r.sample_data.normal_face & 7u) << 28u;
     if (r.sample_data.emitter_cell.x >= 0 && is_inside_voxel_grid(r.sample_data.emitter_cell)) {
         uint cx = uint(r.sample_data.emitter_cell.x) & 1023u;
@@ -128,7 +156,7 @@ RestirGiSlot restir_gi_pack(RestirGiReservoir r) {
 
 RestirGiReservoir restir_gi_unpack(RestirGiSlot slot) {
     RestirGiReservoir r = restir_gi_empty_reservoir();
-    r.count = (slot.w1.x >> 16u) & 4095u;
+    r.count = restir_gi_unpack_count(slot);
     uint kind = (slot.w1.x >> 28u) & 3u;
     if (kind == restir_gi_kind_empty || kind > restir_gi_kind_env || r.count == 0u) {
         return r;
@@ -163,6 +191,8 @@ RestirGiReservoir restir_gi_unpack(RestirGiSlot slot) {
         r.weight = w;
         r.target_pdf = pdf;
         r.tinted = ((slot.w1.x >> 30u) & 1u) != 0u;
+        uint trans_q = (slot.w1.x >> 22u) & 63u;
+        r.trans = (r.tinted || trans_q == 0u) ? vec3(1.0) : vec3(float(trans_q) * (1.0 / 63.0));
     }
     return r;
 }

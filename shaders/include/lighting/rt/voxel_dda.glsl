@@ -275,7 +275,7 @@ VoxelHit trace_voxel_segment(
                 if (!voxel_empty_for_transport(block_id)) {
                     bool glass = 81u <= block_id && block_id <= 96u;
                     bool leaf = block_id == 5u && mode != voxel_ray_ao
-                        && max_of(result.transmittance) > 0.03;
+                        && max_of(result.transmittance) > 0.20;
                     if (glass) {
                         if (mode != voxel_ray_ao) {
                             result.transmittance *= max0(voxel_tint_color_table[block_id - 81u] * rec709_to_rec2020);
