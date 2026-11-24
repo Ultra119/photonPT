@@ -112,25 +112,60 @@ float texture_min_4x4(sampler2D s, vec2 coord) {
 
     vec4 samples_0 = textureGather(
         s,
-        coord + vec2(2.0 * pixel_size.x, 2.0 * pixel_size.y)
+        coord + vec2(1.0 * pixel_size.x, 1.0 * pixel_size.y)
     );
     vec4 samples_1 = textureGather(
         s,
-        coord + vec2(-2.0 * pixel_size.x, 2.0 * pixel_size.y)
+        coord + vec2(-1.0 * pixel_size.x, 1.0 * pixel_size.y)
     );
     vec4 samples_2 = textureGather(
         s,
-        coord + vec2(2.0 * pixel_size.x, -2.0 * pixel_size.y)
+        coord + vec2(1.0 * pixel_size.x, -1.0 * pixel_size.y)
     );
     vec4 samples_3 = textureGather(
         s,
-        coord + vec2(-2.0 * pixel_size.x, -2.0 * pixel_size.y)
+        coord + vec2(-1.0 * pixel_size.x, -1.0 * pixel_size.y)
     );
 
     return min(
         min(min_of(samples_0), min_of(samples_1)),
         min(min_of(samples_2), min_of(samples_3))
     );
+}
+
+// Validity-aware bilinear filter over low-res colortex9 that ignores
+// terrain-occluded tiles (marked colortex10.y < 0.0) so leaf/vine cutouts
+// never blend dummy (0,0,0,1) transmittance into real clouds.
+vec4 sample_valid_clouds_smooth(
+    vec2 coord,
+    ivec2 src_texel,
+    ivec2 src_max_texel,
+    out bool has_valid_tile
+) {
+    vec2 res = vec2(textureSize(colortex9, 0));
+    vec2 p = coord * res - 0.5;
+    ivec2 base = ivec2(floor(p));
+    vec2 f = clamp01(p - vec2(base));
+    f = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+
+    vec4 sum = vec4(0.0);
+    float w_sum = 0.0;
+    for (int y = 0; y <= 1; ++y) {
+        for (int x = 0; x <= 1; ++x) {
+            ivec2 tap = clamp(base + ivec2(x, y), ivec2(0), src_max_texel);
+            float w = (x == 0 ? (1.0 - f.x) : f.x)
+                * (y == 0 ? (1.0 - f.y) : f.y);
+            if (texelFetch(colortex10, tap, 0).y >= 0.0) {
+                sum += w * max0(texelFetch(colortex9, tap, 0));
+                w_sum += w;
+            }
+        }
+    }
+    has_valid_tile = w_sum > 1e-4;
+    if (has_valid_tile) {
+        return sum * rcp(w_sum);
+    }
+    return max0(texelFetch(colortex9, src_texel, 0));
 }
 
 vec3 reproject_clouds(vec2 uv, float distance_to_cloud) {
@@ -210,8 +245,17 @@ void main() {
         vec2(0.5) / src_size,
         (vec2(src_max_texel) + 0.5) / src_size
     );
-    vec4 current_smooth = max0(smooth_filter(colortex9, current_smooth_uv));
+    bool has_valid_cloud_tile;
+    vec4 current_smooth = sample_valid_clouds_smooth(
+        current_smooth_uv,
+        src_texel,
+        src_max_texel,
+        has_valid_cloud_tile
+    );
     vec2 current_data = texelFetch(colortex10, src_texel, 0).xy;
+    if (current_data.y < 0.0) {
+        current = current_smooth;
+    }
     RtgiOpaqueDepth surface = rtgi_opaque_depth(dst_texel);
     bool is_hand = surface.kind == rtgi_hand;
     bool is_sky = surface.kind == rtgi_sky;
@@ -251,7 +295,7 @@ void main() {
 #endif
 
     float apparent_distance = current_data.x;
-    float ambient_scattering = current_data.y;
+    float ambient_scattering = max0(current_data.y);
 
     // Find the closest cloud distance between the current frame and a 4x4 area
     // of the previous frame
@@ -308,15 +352,32 @@ void main() {
         true
     ));
 
+    // Also treat sky pixels whose reprojected 2x2 neighborhood touches
+    // previous-frame foreground terrain (age == 0) as disoccluded so
+    // Catmull-Rom never drags transparent leaf pixels into moving sky holes.
+    float prev_min_age = min_of(
+        textureGather(colortex12, previous_uv_clamped * taau_render_scale, 1)
+    );
+
     // Work out whether the history should be invalidated
     bool disocclusion = clamp01(previous_uv) != previous_uv;
     disocclusion = disocclusion
         || (history_depth < 1.0
             && distance_to_terrain_squared < sqr(closest_distance));
     disocclusion = disocclusion || history_depth == 0.0; // Signals hand
+    disocclusion = disocclusion || (is_sky && prev_min_age < 0.5);
     disocclusion = disocclusion || any(isnan(history)) || any(isinf(history))
         || any(isnan(history_data)) || any(isinf(history_data));
     disocclusion = disocclusion || world_age_changed;
+
+    // If a sky cutout hole has no valid low-res cloud tile in its 2x2
+    // neighborhood and no valid converged history, mark age = 0 so d4 uses
+    // the unobstructed colortex4 sky map instead of transparent (0,0,0,1).
+    if (is_sky && !has_valid_cloud_tile && disocclusion) {
+        clouds_history = vec4(0.0, 0.0, 0.0, 1.0);
+        clouds_data = vec3(60000.0, 0.0, 0.0);
+        return;
+    }
 
     // Replace history if a disocclusion was detected. Use smoothly filtered
     // low-res clouds instead of nearest-neighbor tiles so moving foreground

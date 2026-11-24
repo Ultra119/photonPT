@@ -290,7 +290,7 @@ vec4 get_clouds_and_aurora(
     return clouds_and_aurora;
 }
 
-vec3 draw_sky(vec3 ray_dir) {
+vec3 draw_sky(vec3 ray_dir, out float cloud_transmittance) {
     vec3 atmosphere = atmosphere_scattering(
         ray_dir,
         sun_color,
@@ -302,12 +302,18 @@ vec3 draw_sky(vec3 ray_dir) {
     float clouds_apparent_distance;
     vec4 clouds_and_aurora
         = get_clouds_and_aurora(ray_dir, atmosphere, clouds_apparent_distance);
+    cloud_transmittance = clamp01(clouds_and_aurora.a);
     return draw_sky(
         ray_dir,
         atmosphere,
         clouds_and_aurora,
         clouds_apparent_distance
     );
+}
+
+vec3 draw_sky(vec3 ray_dir) {
+    float unused_cloud_transmittance;
+    return draw_sky(ray_dir, unused_cloud_transmittance);
 }
 #endif
 

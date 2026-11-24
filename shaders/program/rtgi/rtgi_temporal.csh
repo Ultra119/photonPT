@@ -280,16 +280,55 @@ void main() {
     if (support <= 1e-4) {
 #ifdef RTGI_WORLD_CACHE
         // Hybrid disocclusion warm-start: seed newly revealed block faces with a
-        // light face-oriented WorldCache prior (age ~2.5-4.0) so turning or
-        // strafing behind pillars looks smooth immediately while still converging
-        // to exact per-pixel PT within ~0.2s.
+        // face-oriented WorldCache prior. Normal walls/pillars use a light prior
+        // (age 1.5-3.0) since SVGF has ample same-surface neighbors; isolated
+        // background peepholes seen through tiny foliage/vine/grass cutouts have
+        // almost no spatial SVGF support, so give them a stronger converged
+        // WorldCache prior (age 8-20) to eliminate flickering 1-spp RTGI blobs.
         if ((guide.w & rtgi_guide_emitter_changed) == 0u) {
             vec3 voxel_pos = scene_to_voxel_space(scene_pos);
             vec3 cached_rad;
             float cache_age;
             if (world_cache_query_bilinear(voxel_pos, world_normal, cached_rad, cache_age)
                 && rtgi_finite(vec4(cached_rad, cache_age))) {
-                float prior_age = clamp(cache_age * 0.4, 1.5, 3.0);
+                int same_surface_nbrs = 0;
+                int fg_nbrs = 0;
+                float center_depth = -view_pos.z;
+                float footprint = rtgi_view_footprint(center_depth, grid.gi_active, gbufferProjection);
+                vec3 view_n = transpose(mat3(gbufferModelViewInverse)) * world_normal;
+                float grazing = max(abs(dot(view_n, normalize(view_pos))), 0.02);
+                float max_chord = min(6.0, 0.15 + 2.5 * footprint / grazing);
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if (dx == 0 && dy == 0) {
+                            continue;
+                        }
+                        ivec2 nb = texel + ivec2(dx, dy);
+                        if (!rtgi_in_bounds(nb, grid.gi_active)) {
+                            continue;
+                        }
+                        uvec4 nb_guide = load_guide(nb, even);
+                        vec3 nb_view;
+                        if (!rtgi_view_from_guide(nb_guide, grid.full_size, jitter,
+                                                  gbufferProjection, nb_view)) {
+                            continue;
+                        }
+                        if (-nb_view.z < center_depth * 0.88) {
+                            ++fg_nbrs;
+                        } else if (rtgi_guide_matches(nb_guide, material)) {
+                            vec3 nb_n = transpose(mat3(gbufferModelViewInverse))
+                                * rtgi_guide_normal(nb_guide);
+                            if (rtgi_geometry_weight(nb_view - view_pos, view_n, nb_n,
+                                                     footprint, max_chord) > 0.05) {
+                                ++same_surface_nbrs;
+                            }
+                        }
+                    }
+                }
+                bool isolated_peephole = (same_surface_nbrs <= 1) && (fg_nbrs >= 4);
+                float prior_age = isolated_peephole
+                    ? clamp(cache_age * 2.0, 8.0, 20.0)
+                    : clamp(cache_age * 0.4, 1.5, 3.0);
                 float init_age = prior_age + 1.0;
                 float alpha_init = 1.0 / init_age;
                 vec3 init_mean = mix(cached_rad, raw.rgb, alpha_init);

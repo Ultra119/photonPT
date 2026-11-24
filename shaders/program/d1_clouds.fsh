@@ -129,21 +129,24 @@ const int checkerboard_area
     = CLOUDS_TEMPORAL_UPSCALING * CLOUDS_TEMPORAL_UPSCALING;
 
 float depth_max_4x4(sampler2D depth_sampler, float scale) {
+    // Cover all 16 pixels of the 4x4 tile around uv with zero center gap
+    // (+/-1.0 pixel gathers [0,1] and [2,3] in both axes; +/-2.0 skipped the
+    // center 2x2 pixels, letting 1-2px leaf/vine holes miss clouds completely).
     vec4 depth_samples_0 = textureGather(
         depth_sampler,
-        uv * scale + vec2(2.0 * view_pixel_size.x, 2.0 * view_pixel_size.y)
+        uv * scale + vec2(1.0 * view_pixel_size.x, 1.0 * view_pixel_size.y)
     );
     vec4 depth_samples_1 = textureGather(
         depth_sampler,
-        uv * scale + vec2(-2.0 * view_pixel_size.x, 2.0 * view_pixel_size.y)
+        uv * scale + vec2(-1.0 * view_pixel_size.x, 1.0 * view_pixel_size.y)
     );
     vec4 depth_samples_2 = textureGather(
         depth_sampler,
-        uv * scale + vec2(2.0 * view_pixel_size.x, -2.0 * view_pixel_size.y)
+        uv * scale + vec2(1.0 * view_pixel_size.x, -1.0 * view_pixel_size.y)
     );
     vec4 depth_samples_3 = textureGather(
         depth_sampler,
-        uv * scale + vec2(-2.0 * view_pixel_size.x, -2.0 * view_pixel_size.y)
+        uv * scale + vec2(-1.0 * view_pixel_size.x, -1.0 * view_pixel_size.y)
     );
 
     return max(
@@ -221,7 +224,11 @@ void main() {
     clouds.xyz = result.scattering.xyz;
     clouds.w = result.transmittance;
     clouds_data.x = min(result.apparent_distance * rcp(CLOUDS_SCALE), 60000.0);
-    clouds_data.y = result.scattering.w;
+    // Mark fully terrain-occluded tiles with negative y so d2_clouds_upscaling
+    // never blends transparent (0,0,0,1) skipped tiles into nearby leaf/sky holes.
+    bool terrain_occluded = (distance_to_terrain >= 0.0)
+        && (result.apparent_distance >= 9.9e4);
+    clouds_data.y = terrain_occluded ? -1.0 : max0(result.scattering.w);
 #else
     clouds = vec4(0.0, 0.0, 0.0, 1.0);
     clouds_data.x = 60000.0;

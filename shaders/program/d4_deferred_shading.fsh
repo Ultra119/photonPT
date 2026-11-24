@@ -257,8 +257,12 @@ void main() {
     // Read clouds/aurora/crepuscular rays
 
     float clouds_apparent_distance;
-    vec4 clouds_and_aurora
-        = read_clouds_and_aurora(uv, clouds_apparent_distance);
+    float clouds_confidence;
+    vec4 clouds_and_aurora = read_clouds_and_aurora(
+        uv,
+        clouds_apparent_distance,
+        clouds_confidence
+    );
 
     // Atmosphere is needed immediately for sky and blocky clouds, or lazily
     // for terrain pixels inside border fog.
@@ -321,6 +325,21 @@ void main() {
             moon_dir,
             /* use_klein_nishina_phase */ true
         );
+        if (clouds_confidence < 0.999) {
+            // Fall back smoothly to the unobstructed omnidirectional sky map
+            // (colortex4.rgb = sky+clouds, colortex4.a = cloud transmittance)
+            // when a sky pixel is freshly disoccluded behind moving foliage
+            // cutouts or missed by a terrain-occluded 4x4 cloud tile.
+            vec4 sky_map_sample
+                = texture(colortex4, project_sky(direction_world));
+            float sm_trans = clamp01(sky_map_sample.a);
+            vec4 sky_map_clouds = vec4(
+                max0(sky_map_sample.rgb - atmosphere * sm_trans),
+                sm_trans
+            );
+            clouds_and_aurora
+                = mix(sky_map_clouds, clouds_and_aurora, clouds_confidence);
+        }
 #endif
         fragment_color = draw_sky(
             direction_world,
