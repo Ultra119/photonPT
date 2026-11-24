@@ -7,18 +7,15 @@
 > Based on [Photon Shaders](https://github.com/sixthsurge/photon) by [SixthSurge](https://github.com/sixthsurge).  
 > This fork brings real-time voxel path-traced global illumination and ray-traced contact occlusion to Photon while preserving its sky, clouds, water, shadows, and post-processing.
 
-## Features
+## Features (Over stock Photon)
 
-- Real-time voxel path-traced global illumination with multi-bounce indirect lighting and colored block lights
-- Ray-traced contact ambient occlusion
-- Translucent foliage light transmission and subsurface scattering
-- Five quality presets (`Low`, `Medium`, `High`, `Ultra`, and `Screenshot`)
-- Revamped sky, weather, aurora, stars, rainbows, and multi-layer volumetric clouds
-- Volumetric fog with colored light shafts
-- Soft variable-penumbra colored shadows and screen-space reflections
-- Realistic water with waves, caustics, and refraction
-- Full **labPBR** and **OldPBR** resource pack support (normal/specular mapping and POM)
-- TAA, TAAU, FXAA, CAS sharpening, bloom, depth of field, motion blur, and customizable color grading
+- Real-time voxel path-traced global illumination with multi-bounce color bleeding and skylight propagation
+- Physically based colored block lighting and indirect shadows (replaces LPV floodfill)
+- Ray-traced contact ambient occlusion (replaces GTAO/SSAO)
+- Two-sided translucent foliage light transmission and refined subsurface scattering
+- Improved specular energy conservation on rough surfaces
+- Reworked TAA for cleaner image stability and less ground jitter
+- Rebalanced quality presets (`Low`, `Medium`, `High`, `Ultra`, and a dedicated `Screenshot` mode)
 
 ## Quality Presets
 
@@ -42,11 +39,12 @@
 - **Iris** with `CUSTOM_IMAGES`, `COMPUTE_SHADERS`, and `SSBO` support (**required**)
 - **OptiFine is not supported**
 
-### GPUs
-- NVIDIA
-- AMD
-- Intel
+#### Minimum GPU (Medium preset, 1080p @ 60 FPS)
+- **NVIDIA:** RTX 2060
+- **AMD:** RX 5600 XT
+- **Intel:** Arc A580
 - **_NOT_** macOS / Apple Metal (unsupported due to OpenGL compute, SSBO, and custom image limitations)
+- *Tip: Enable **TAAU** (TAA Upscaling) or use the **Low** preset on weaker GPUs or higher resolutions.*
 
 ### Mod Support
 - [Distant Horizons](https://modrinth.com/mod/distanthorizons)
