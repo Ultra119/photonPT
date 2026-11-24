@@ -281,8 +281,10 @@ RestirReservoir restir_temporal_reuse(
 
     if (initial.sample_data.valid && initial.weight > 0.0 && initial.target_pdf > 0.0) {
         float p0_of_0 = initial.target_pdf;
-        float p1_of_0 = restir_target_pdf(voxel_sampler, origin, best_prev_world_normal,
-                                          initial.sample_data, two_sided);
+        float p1_of_0 = dot(best_prev_world_normal, world_normal) > 0.9999
+            ? p0_of_0
+            : restir_target_pdf(voxel_sampler, origin, best_prev_world_normal,
+                                initial.sample_data, two_sided);
         float m0 = (m0_count * p0_of_0) / max(m0_count * p0_of_0 + m1_count * p1_of_0, 1e-20);
         float w0 = m0 * p0_of_0 * initial.weight;
         if (restir_update(combined, initial.sample_data, w0, p0_of_0, random_dimension(seed, 0))) {
@@ -368,10 +370,12 @@ RestirGiReservoir restir_gi_temporal_reuse(
     if (initial.sample_data.kind != restir_gi_kind_empty
         && initial.weight > 0.0 && initial.target_pdf > 0.0) {
         float p0_of_0 = initial.target_pdf;
-        float p1_of_0 = restir_gi_temporal_eligible(origin, best_prev_world_normal,
-                                                    initial.sample_data, two_sided)
-            ? restir_gi_target_pdf(origin, best_prev_world_normal, initial.sample_data, two_sided)
-            : 0.0;
+        float p1_of_0 = dot(best_prev_world_normal, world_normal) > 0.9999
+            ? p0_of_0
+            : (restir_gi_temporal_eligible(origin, best_prev_world_normal,
+                                           initial.sample_data, two_sided)
+                ? restir_gi_target_pdf(origin, best_prev_world_normal, initial.sample_data, two_sided)
+                : 0.0);
         float m0 = (m0_count * p0_of_0) / max(m0_count * p0_of_0 + m1_count * p1_of_0, 1e-20);
         float w0 = m0 * p0_of_0 * initial.weight;
         if (restir_gi_update(combined, initial.sample_data, w0, p0_of_0, random_dimension(seed, 0))) {
@@ -536,10 +540,15 @@ void main() {
     for (int r = 0; r < RTGI_RAY_COUNT && valid_batch; ++r) {
         uint ray_seed = lowbias32(seed + uint(r + 1) * 0x27d4eb2du);
         vec2 primary_u = sample_stbn_ray(texel, frameCounter, r, ray_seed);
+#if INFO <= 2 && defined RTGI_WORLD_CACHE
+        int ray_bounces = (r == 0) ? PT_BOUNCES : 1;
+#else
+        int ray_bounces = PT_BOUNCES;
+#endif
         PathTraceSample pt = evaluate_path_trace(
             voxel_pos, origin, world_normal, receiver_skylight,
             voxel_sampler, colortex4, direct_light_col, light_dir,
-            ray_seed, primary_u, has_emitters, two_sided
+            ray_seed, primary_u, has_emitters, two_sided, ray_bounces
         );
         vec3 indirect_tinted = pt.indirect_radiance * pt.primary_transmittance;
         if (pt.hit_source == rtgi_hit_invalid

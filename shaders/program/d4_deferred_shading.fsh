@@ -254,8 +254,15 @@ void main() {
         = normalize(position_scene - gbufferModelViewInverse[3].xyz);
 
 #if defined WORLD_OVERWORLD
-    // Atmosphere
+    // Read clouds/aurora/crepuscular rays
 
+    float clouds_apparent_distance;
+    vec4 clouds_and_aurora
+        = read_clouds_and_aurora(uv, clouds_apparent_distance);
+
+    // Atmosphere is needed immediately for sky and blocky clouds, or lazily
+    // for terrain pixels inside border fog.
+#ifdef BLOCKY_CLOUDS
     vec3 atmosphere = atmosphere_scattering(
         direction_world,
         sun_color,
@@ -264,12 +271,7 @@ void main() {
         moon_dir,
         /* use_klein_nishina_phase */ is_sky
     );
-
-    // Read clouds/aurora/crepuscular rays
-
-    float clouds_apparent_distance;
-    vec4 clouds_and_aurora
-        = read_clouds_and_aurora(uv, clouds_apparent_distance);
+#endif
 
     // Blocky clouds
 
@@ -310,6 +312,16 @@ void main() {
 
     if (is_sky) {
 #if defined WORLD_OVERWORLD
+#ifndef BLOCKY_CLOUDS
+        vec3 atmosphere = atmosphere_scattering(
+            direction_world,
+            sun_color,
+            sun_dir,
+            moon_color,
+            moon_dir,
+            /* use_klein_nishina_phase */ true
+        );
+#endif
         fragment_color = draw_sky(
             direction_world,
             atmosphere,
@@ -529,12 +541,14 @@ void main() {
         // Specular highlight
 
 #if defined WORLD_OVERWORLD || defined WORLD_END
-        vec3 direct_specular = get_specular_highlight(material, NoL, NoV, NoH, LoV, LoH)
-            * light_color * shadows * cloud_shadows;
+        if (NoL > eps && max_of(shadows) > eps) {
+            vec3 direct_specular = get_specular_highlight(material, NoL, NoV, NoH, LoV, LoH)
+                * light_color * shadows * cloud_shadows;
 #ifdef RT_AO_IN_DIRECT
-        direct_specular *= ao;
+            direct_specular *= ao;
 #endif
-        fragment_color += direct_specular;
+            fragment_color += direct_specular;
+        }
 #endif
 
         // Specular reflections
@@ -576,30 +590,42 @@ void main() {
         float view_distance = length(position_view);
 
 #ifdef BORDER_FOG
+        float border_fog = border_fog(position_scene, direction_world);
+        if (border_fog < 0.9999) {
 #if defined WORLD_OVERWORLD
-        vec3 horizon_dir = normalize(
-            vec3(direction_world.xz, min(direction_world.y, -0.1)).xzy
-        );
-        vec3 horizon_color = texture(colortex4, project_sky(horizon_dir)).rgb;
+#ifndef BLOCKY_CLOUDS
+            vec3 atmosphere = atmosphere_scattering(
+                direction_world,
+                sun_color,
+                sun_dir,
+                moon_color,
+                moon_dir,
+                /* use_klein_nishina_phase */ false
+            );
+#endif
+            vec3 horizon_dir = normalize(
+                vec3(direction_world.xz, min(direction_world.y, -0.1)).xzy
+            );
+            vec3 horizon_color = texture(colortex4, project_sky(horizon_dir)).rgb;
 
-        float horizon_factor
-            = linear_step(0.1, 1.0, exp(-75.0 * sqr(sun_dir.y + 0.0496)));
-        horizon_factor = clamp01(horizon_factor + step(0.01, rainStrength));
-        horizon_factor = max(
-            horizon_factor,
-            dampen(linear_step(0.15, 0.05, direction_world.y))
-        );
+            float horizon_factor
+                = linear_step(0.1, 1.0, exp(-75.0 * sqr(sun_dir.y + 0.0496)));
+            horizon_factor = clamp01(horizon_factor + step(0.01, rainStrength));
+            horizon_factor = max(
+                horizon_factor,
+                dampen(linear_step(0.15, 0.05, direction_world.y))
+            );
 
-        vec3 border_fog_color
-            = mix(atmosphere, horizon_color, sqr(horizon_factor))
-            * (1.0 - biome_cave);
+            vec3 border_fog_color
+                = mix(atmosphere, horizon_color, sqr(horizon_factor))
+                * (1.0 - biome_cave);
 #else
-        vec3 border_fog_color
-            = texture(colortex4, project_sky(direction_world)).rgb;
+            vec3 border_fog_color
+                = texture(colortex4, project_sky(direction_world)).rgb;
 #endif
 
-        float border_fog = border_fog(position_scene, direction_world);
-        fragment_color = mix(border_fog_color, fragment_color, border_fog);
+            fragment_color = mix(border_fog_color, fragment_color, border_fog);
+        }
 #endif
 
         vec4 fog = common_fog(view_distance, false);
@@ -620,14 +646,16 @@ void main() {
         // Apply rainbows in front of terrain
 
 #ifdef RAINBOWS
-        fragment_color = draw_rainbows(
-            fragment_color,
-            direction_world,
-            min(view_distance,
-                mix(clouds_apparent_distance,
-                    1e6,
-                    linear_step(1.0, 0.95, clouds_and_aurora.w)))
-        );
+        if (rainbow_amount > eps) {
+            fragment_color = draw_rainbows(
+                fragment_color,
+                direction_world,
+                min(view_distance,
+                    mix(clouds_apparent_distance,
+                        1e6,
+                        linear_step(1.0, 0.95, clouds_and_aurora.w)))
+            );
+        }
 #endif
 #endif
 

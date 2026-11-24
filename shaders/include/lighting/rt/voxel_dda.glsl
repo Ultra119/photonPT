@@ -215,129 +215,136 @@ VoxelHit trace_voxel_segment(
     float t = start;
     bool leaf_tinted = false;
 #ifdef VOXEL_DDA_USE_OCCUPANCY
+    ivec3 cached_sub = ivec3(-1);
     ivec3 cached_brick = ivec3(-1);
     uint cached_mark = 0u;
 #endif
     for (int step = 0; step < budget; ++step) {
 #ifdef VOXEL_DDA_USE_OCCUPANCY
-        ivec3 brick = cell >> 3;
-        if (brick != cached_brick) {
-            cached_brick = brick;
-            cached_mark = texelFetch(rtgi_emitter_marks_sampler, emitter_mark_texel(brick), 0).r >> 8u;
-        }
-        uint submask = cached_mark & 0xFFu;
-        ivec3 sub = (cell >> 2) & 1;
-        uint sub_bit = 1u << uint(sub.x | (sub.y << 1) | (sub.z << 2));
-        if (submask == 0u || (submask & sub_bit) == 0u) {
-            // Hierarchical empty-space skip: 32^3 (bit 9), 16^3 (bit 8), 8^3 (submask == 0), or 4^3.
-            int shift = (cached_mark & 0x200u) != 0u ? 5
-                      : ((cached_mark & 0x100u) != 0u ? 4 : (submask == 0u ? 3 : 2));
-            ivec3 c_coord = cell >> shift;
-            vec3 c_plane = vec3((c_coord + pos_step) << shift);
-            vec3 c_exit = mix((c_plane - ray.origin) * ray.inverse, vec3(voxel_infinity), ray.parallel);
-            float c_cross = min_of(c_exit);
-            if (c_cross >= end) {
-                return result;
+        ivec3 sub_coord = cell >> 2;
+        if (sub_coord != cached_sub) {
+            cached_sub = sub_coord;
+            ivec3 brick = sub_coord >> 1;
+            if (brick != cached_brick) {
+                cached_brick = brick;
+                cached_mark = texelFetch(rtgi_emitter_marks_sampler, emitter_mark_texel(brick), 0).r >> 8u;
             }
-            bvec3 c_axes = equal(c_exit, vec3(c_cross));
-            t = max(t, c_cross);
-            vec3 p_next = ray.origin + t * ray.direction;
-            vec3 p_floor = floor(p_next);
-            ivec3 next_cell = ivec3(p_floor) - neg_step * ivec3(equal(p_next, p_floor));
-            ivec3 exact_axis = ivec3(c_plane) - neg_step;
-            ivec3 c_lo = c_coord << shift;
-            ivec3 clamped_cell = clamp(next_cell, c_lo, c_lo + ((1 << shift) - 1));
-            cell = ivec3(
-                c_axes.x ? exact_axis.x : clamped_cell.x,
-                c_axes.y ? exact_axis.y : clamped_cell.y,
-                c_axes.z ? exact_axis.z : clamped_cell.z
-            );
-            if (!is_inside_voxel_grid(cell)) {
-                result.status = voxel_volume_exit;
-                result.distance = t;
-                return result;
+            uint sub_bit = 1u << uint((sub_coord.x & 1) | ((sub_coord.y & 1) << 1) | ((sub_coord.z & 1) << 2));
+            if ((cached_mark & sub_bit) == 0u) {
+                // Hierarchical empty-space skip: 32^3 (bit 9), 16^3 (bit 8), 8^3 (submask == 0), or 4^3.
+                uint submask = cached_mark & 0xFFu;
+                int shift = (cached_mark & 0x200u) != 0u ? 5
+                          : ((cached_mark & 0x100u) != 0u ? 4 : (submask == 0u ? 3 : 2));
+                ivec3 c_coord = cell >> shift;
+                vec3 c_plane = vec3((c_coord + pos_step) << shift);
+                vec3 c_exit = mix((c_plane - ray.origin) * ray.inverse, vec3(voxel_infinity), ray.parallel);
+                float c_cross = min_of(c_exit);
+                if (c_cross >= end) {
+                    return result;
+                }
+                bvec3 c_axes = equal(c_exit, vec3(c_cross));
+                t = max(t, c_cross);
+                vec3 p_next = ray.origin + t * ray.direction;
+                vec3 p_floor = floor(p_next);
+                ivec3 next_cell = ivec3(p_floor) - neg_step * ivec3(equal(p_next, p_floor));
+                ivec3 exact_axis = ivec3(c_plane) - neg_step;
+                ivec3 c_lo = c_coord << shift;
+                ivec3 clamped_cell = clamp(next_cell, c_lo, c_lo + ((1 << shift) - 1));
+                cell = ivec3(
+                    c_axes.x ? exact_axis.x : clamped_cell.x,
+                    c_axes.y ? exact_axis.y : clamped_cell.y,
+                    c_axes.z ? exact_axis.z : clamped_cell.z
+                );
+                if (!is_inside_voxel_grid(cell)) {
+                    result.status = voxel_volume_exit;
+                    result.distance = t;
+                    return result;
+                }
+                entry_normal = voxel_entry_normal(c_axes, step_dir);
+                boundary = voxel_boundary_times(ray, cell);
+                continue;
             }
-            entry_normal = voxel_entry_normal(c_axes, step_dir);
-            boundary = voxel_boundary_times(ray, cell);
-            continue;
         }
 #endif
         float crossing = min_of(boundary);
         float cell_end = min(crossing, end);
         if (cell_end > t) {
             uint payload = texelFetch(voxel_grid, cell, 0).r;
-            uint block_id = voxel_block_id(payload);
-            bool glass = 81u <= block_id && block_id <= 96u;
-            bool leaf = block_id == 5u && mode != voxel_ray_ao
-                && max_of(result.transmittance) > 0.03;
-            if (glass) {
-                if (mode != voxel_ray_ao) {
-                    result.transmittance *= max0(voxel_tint_color_table[block_id - 81u] * rec709_to_rec2020);
-                }
-            } else if (leaf) {
-                // Airy neutral Beer-Lambert canopy attenuation (0.76/voxel) with a
-                // subtle one-time foliage tint (14%) so light under dense trees stays
-                // soft and clean without compounding into green stains on stone/snow.
-                if (!leaf_tinted) {
-                    vec3 leaf_albedo = unpack_unorm_rgb555(payload & 0x7FFFu);
-                    float leaf_peak = max_of(leaf_albedo);
-                    vec3 leaf_hue = leaf_peak > 0.01
-                        ? mix(vec3(1.0), leaf_albedo / leaf_peak, 0.14)
-                        : vec3(0.92, 1.0, 0.90);
-                    result.transmittance *= max0((0.76 * leaf_hue) * rec709_to_rec2020);
-                    leaf_tinted = true;
-                } else {
-                    result.transmittance *= 0.76;
-                }
-            } else if (!voxel_empty_for_transport(block_id)
-                       && (mode != voxel_ray_ao || (payload & (1u << 23u)) == 0u)) {
-                uint shape = (payload >> 19u) & 15u;
-                bool thin = voxel_emitter_id(block_id) && !voxel_box_emitter(block_id)
-                    && shape != VOXEL_SHAPE_CUBE;
-                if (thin && mode != voxel_ray_ao) {
-                    if (mode == voxel_ray_path) {
-                        result.passed_emission += result.transmittance * get_voxel_emission(block_id);
-                    }
-                } else {
-                    float hit_distance;
-                    vec3 normal;
-                    if (voxel_shape_hit(ray, cell, block_id, shape, t, cell_end, entry_normal,
-                                        hit_distance, normal)) {
-                        if (normal == vec3(0.0) && step == 0 && mode != voxel_ray_ao) {
-                            // Visible receivers can start inside a coarse 1x1x1 voxel AABB
-                            // (e.g. exposed walls above flowing/still lava or cauldrons,
-                            // waving leaves, dirt path, farmland, cactus, or depth roundoff).
-                            if (block_id == 39u || block_id == voxel_lava_cauldron_id) {
-                                if (mode == voxel_ray_path) {
-                                    if (ray.direction.y < 0.0) {
-                                        float lava_drop = min(max(ray.origin.y - float(cell.y), 1e-4), 0.01);
-                                        float t_lava = lava_drop / (-ray.direction.y);
-                                        if (t_lava < cell_end) {
-                                            result.status = voxel_hit_surface;
-                                            result.distance = t_lava;
+            if (payload != 0u) {
+                uint block_id = voxel_block_id(payload);
+                if (!voxel_empty_for_transport(block_id)) {
+                    bool glass = 81u <= block_id && block_id <= 96u;
+                    bool leaf = block_id == 5u && mode != voxel_ray_ao
+                        && max_of(result.transmittance) > 0.03;
+                    if (glass) {
+                        if (mode != voxel_ray_ao) {
+                            result.transmittance *= max0(voxel_tint_color_table[block_id - 81u] * rec709_to_rec2020);
+                        }
+                    } else if (leaf) {
+                        // Airy neutral Beer-Lambert canopy attenuation (0.76/voxel) with a
+                        // subtle one-time foliage tint (14%) so light under dense trees stays
+                        // soft and clean without compounding into green stains on stone/snow.
+                        if (!leaf_tinted) {
+                            vec3 leaf_albedo = unpack_unorm_rgb555(payload & 0x7FFFu);
+                            float leaf_peak = max_of(leaf_albedo);
+                            vec3 leaf_hue = leaf_peak > 0.01
+                                ? mix(vec3(1.0), leaf_albedo / leaf_peak, 0.14)
+                                : vec3(0.92, 1.0, 0.90);
+                            result.transmittance *= max0((0.76 * leaf_hue) * rec709_to_rec2020);
+                            leaf_tinted = true;
+                        } else {
+                            result.transmittance *= 0.76;
+                        }
+                    } else if (mode != voxel_ray_ao || (payload & (1u << 23u)) == 0u) {
+                        uint shape = (payload >> 19u) & 15u;
+                        bool thin = voxel_emitter_id(block_id) && !voxel_box_emitter(block_id)
+                            && shape != VOXEL_SHAPE_CUBE;
+                        if (thin && mode != voxel_ray_ao) {
+                            if (mode == voxel_ray_path) {
+                                result.passed_emission += result.transmittance * get_voxel_emission(block_id);
+                            }
+                        } else {
+                            float hit_distance;
+                            vec3 normal;
+                            if (voxel_shape_hit(ray, cell, block_id, shape, t, cell_end, entry_normal,
+                                                hit_distance, normal)) {
+                                if (normal == vec3(0.0) && step == 0 && mode != voxel_ray_ao) {
+                                    // Visible receivers can start inside a coarse 1x1x1 voxel AABB
+                                    // (e.g. exposed walls above flowing/still lava or cauldrons,
+                                    // waving leaves, dirt path, farmland, cactus, or depth roundoff).
+                                    if (block_id == 39u || block_id == voxel_lava_cauldron_id) {
+                                        if (mode == voxel_ray_path) {
+                                            if (ray.direction.y < 0.0) {
+                                                float lava_drop = min(max(ray.origin.y - float(cell.y), 1e-4), 0.01);
+                                                float t_lava = lava_drop / (-ray.direction.y);
+                                                if (t_lava < cell_end) {
+                                                    result.status = voxel_hit_surface;
+                                                    result.distance = t_lava;
+                                                    result.cell = cell;
+                                                    result.payload = payload;
+                                                    result.normal = vec3(0.0, 1.0, 0.0);
+                                                    return result;
+                                                }
+                                            }
+                                        } else if (ray.direction.y < 0.0 && boundary.y <= crossing && crossing <= end) {
+                                            result.status = voxel_inside_solid;
+                                            result.distance = hit_distance;
                                             result.cell = cell;
                                             result.payload = payload;
-                                            result.normal = vec3(0.0, 1.0, 0.0);
+                                            result.normal = vec3(0.0);
                                             return result;
                                         }
                                     }
-                                } else if (ray.direction.y < 0.0 && boundary.y <= crossing && crossing <= end) {
-                                    result.status = voxel_inside_solid;
+                                    // Step out of the starting cell instead of dropping the ray as inside-solid.
+                                } else {
+                                    result.status = normal != vec3(0.0) ? voxel_hit_surface : voxel_inside_solid;
                                     result.distance = hit_distance;
                                     result.cell = cell;
                                     result.payload = payload;
-                                    result.normal = vec3(0.0);
+                                    result.normal = normal;
                                     return result;
                                 }
                             }
-                            // Step out of the starting cell instead of dropping the ray as inside-solid.
-                        } else {
-                            result.status = normal != vec3(0.0) ? voxel_hit_surface : voxel_inside_solid;
-                            result.distance = hit_distance;
-                            result.cell = cell;
-                            result.payload = payload;
-                            result.normal = normal;
-                            return result;
                         }
                     }
                 }

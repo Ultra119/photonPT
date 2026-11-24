@@ -27,15 +27,20 @@ const int shadow_map_res = int(float(shadowMapResolution) * MC_SHADOW_QUALITY);
 const float shadow_map_pixel_size = rcp(float(shadow_map_res));
 
 vec2 blocker_search(
-    vec3 scene_pos,
+    vec3 shadow_clip_pos,
     vec2 receiver_plane_slope,
     float dither,
     bool has_sss
 ) {
-    int step_count = has_sss ? SSS_STEPS : 8;
+#if INFO <= 1
+    const int base_blocker_steps = 5;
+#elif INFO == 2
+    const int base_blocker_steps = 6;
+#else
+    const int base_blocker_steps = 8;
+#endif
+    int step_count = has_sss ? SSS_STEPS : base_blocker_steps;
 
-    vec3 shadow_view_pos = transform(shadowModelView, scene_pos);
-    vec3 shadow_clip_pos = project_ortho(shadowProjection, shadow_view_pos);
     float ref_z = shadow_clip_pos.z * (SHADOW_DEPTH_SCALE * 0.5) + 0.5;
 
     float radius = SHADOW_BLOCKER_SEARCH_RADIUS * shadowProjection[0].x
@@ -117,10 +122,6 @@ vec3 shadow_basic(vec3 shadow_screen_pos) {
 vec3 shadow_pcf(
     vec3 shadow_screen_pos,
     vec3 shadow_clip_pos,
-#ifdef SHADOW_COLOR
-    vec3 shadow_screen_pos_translucent,
-    vec3 shadow_clip_pos_translucent,
-#endif
     vec2 receiver_plane_slope,
     float penumbra_size,
     float dither
@@ -153,33 +154,23 @@ vec3 shadow_pcf(
         uv /= get_distortion_factor(uv);
         uv = uv * 0.5 + 0.5;
 
-        float dz_tap = clamp(dot(receiver_plane_slope, offset), -0.015, 0.0);
-        float vis = (clamp01(uv) == uv)
-            ? texture(shadowtex1, vec3(uv, shadow_screen_pos.z + dz_tap))
-            : 1.0;
+        bool in_bounds = clamp01(uv) == uv;
+        float tap_z = shadow_screen_pos.z + clamp(dot(receiver_plane_slope, offset), -0.015, 0.0);
+        float vis = in_bounds ? texture(shadowtex1, vec3(uv, tap_z)) : 1.0;
         opaque_sum += vis;
 
 #ifdef SHADOW_COLOR
         vec3 color = vec3(1.0);
-        if (vis > eps) {
-            vec2 uv_t = shadow_clip_pos_translucent.xy + offset;
-            uv_t /= get_distortion_factor(uv_t);
-            uv_t = uv_t * 0.5 + 0.5;
+        if (vis > eps && in_bounds) {
+            ivec2 texel = clamp(
+                ivec2(uv * shadow_map_res),
+                ivec2(0),
+                ivec2(shadow_map_res - 1)
+            );
 
-            if (clamp01(uv_t) == uv_t) {
-                ivec2 texel = clamp(
-                    ivec2(uv_t * shadow_map_res),
-                    ivec2(0),
-                    ivec2(shadow_map_res - 1)
-                );
-
-                float depth = texelFetch(shadowtex0, texel, 0).x;
-                vec3 sample_color = texelFetch(shadowcolor0, texel, 0).rgb;
-                color = mix(
-                    vec3(1.0),
-                    4.0 * sample_color,
-                    step(depth, shadow_screen_pos_translucent.z + dz_tap)
-                );
+            float depth = texelFetch(shadowtex0, texel, 0).x;
+            if (depth < tap_z) {
+                color = 4.0 * texelFetch(shadowcolor0, texel, 0).rgb;
             }
         }
         shadow_sum += vis * color;
@@ -261,7 +252,7 @@ vec3 get_filtered_shadows(
     // Bias blocker search so grazing walls do not self-occlude into penumbra
     // strings along narrow skylight beams.
     vec2 blocker_search_result = blocker_search(
-        scene_pos + bias, receiver_plane_slope, dither, sss_amount > eps
+        shadow_clip_pos, receiver_plane_slope, dither, sss_amount > eps
     );
 
     sss_depth = blocker_search_result.y;
@@ -289,26 +280,10 @@ vec3 get_filtered_shadows(
     penumbra_size *= 1.0 + 7.0 * sss_amount;
 #endif
 
-#ifdef SHADOW_COLOR
-    // Calculate position without light leaking fix applied, for colored shadow
-    // Applying light leaking fix to translucent shadows causes artifacts on
-    // water caustics
-    vec3 shadow_view_pos_translucent
-        = transform(shadowModelView, scene_pos + bias);
-    vec3 shadow_clip_pos_translucent
-        = project_ortho(shadowProjection, shadow_view_pos_translucent);
-    vec3 shadow_screen_pos_translucent
-        = distort_shadow_space(shadow_clip_pos_translucent) * 0.5 + 0.5;
-#endif
-
 #ifdef SHADOW_PCF
     vec3 shadow = shadow_pcf(
         shadow_screen_pos,
         shadow_clip_pos,
-#ifdef SHADOW_COLOR
-        shadow_screen_pos_translucent,
-        shadow_clip_pos_translucent,
-#endif
         receiver_plane_slope,
         penumbra_size,
         dither

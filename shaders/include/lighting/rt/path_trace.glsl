@@ -35,14 +35,15 @@ vec3 voxel_sun_visibility(usampler3D grid, vec3 origin, vec3 direction) {
     vec3 shadow_clip = project_ortho(shadowProjection, transform(shadowModelView, near_scene));
     if (all(lessThan(abs(shadow_clip), vec3(0.99)))) {
         vec3 screen = distort_shadow_space(shadow_clip) * 0.5 + 0.5;
-        macro_visibility = texture(shadowtex1, vec3(screen.xy, screen.z - 0.0025));
+        float depth_bias = 0.5 * abs(shadowProjection[2].z) * (SHADOW_DEPTH_SCALE * 0.5);
+        macro_visibility = texture(shadowtex1, vec3(screen.xy, screen.z - depth_bias));
         if (macro_visibility < 0.01) {
             return vec3(0.0);
         }
 #ifdef SHADOW_COLOR
         ivec2 shadow_size = textureSize(shadowtex0, 0);
         ivec2 shadow_texel = clamp(ivec2(screen.xy * vec2(shadow_size)), ivec2(0), shadow_size - 1);
-        if (texelFetch(shadowtex0, shadow_texel, 0).x < screen.z - 0.0025) {
+        if (texelFetch(shadowtex0, shadow_texel, 0).x < screen.z - depth_bias) {
             vec3 sc = texelFetch(shadowcolor0, shadow_texel, 0).rgb * 4.0;
             if (max_of(sc) > eps) {
                 shadow_tint = clamp(sc, vec3(0.0), vec3(1.0));
@@ -126,7 +127,7 @@ vec3 clamp_bounce_radiance(vec3 rad, int bounce) {
 PathTraceSample evaluate_path_trace(
     vec3 receiver, vec3 receiver_origin, vec3 receiver_normal, float receiver_skylight,
     usampler3D grid, sampler2D sky_map, vec3 direct_sun_color, vec3 light_direction,
-    uint seed, vec2 primary_u, bool sample_emitters, bool receiver_two_sided
+    uint seed, vec2 primary_u, bool sample_emitters, bool receiver_two_sided, int max_bounces
 ) {
     PathTraceSample result = PathTraceSample(
         vec3(0.0), vec3(0.0), vec3(1.0), vec3(0.0), vec3(0.0), -1.0, rtgi_hit_none, ivec3(-1)
@@ -135,7 +136,7 @@ PathTraceSample evaluate_path_trace(
     vec3 origin = receiver_origin;
     vec3 normal = receiver_normal;
 
-    for (int b = 0; b < PT_BOUNCES; ++b) {
+    for (int b = 0; b < max_bounces; ++b) {
         vec2 u = b == 0 ? primary_u
                         : vec2(random_dimension(seed, 3 * b), random_dimension(seed, 3 * b + 1));
         vec3 hemi_normal = normal;
@@ -210,20 +211,24 @@ PathTraceSample evaluate_path_trace(
         vec3 safe_sun_color = max0(direct_sun_color);
         if (sun_cosine > 0.0 && max_of(safe_sun_color) > 0.0) {
             vec3 sun_ray_dir = light_direction;
-            float sun_half_angle = radians(SUN_ANGULAR_RADIUS) * max(SHADOW_PENUMBRA_SCALE, 0.0);
-            if (sun_half_angle > 1e-4) {
-                float r_u = sqrt(random_dimension(seed, 16 + 2 * b));
-                float phi_u = tau * random_dimension(seed, 17 + 2 * b);
-                mat3 sun_basis = build_orthonormal_basis(light_direction);
-                float tan_r = tan(min(sun_half_angle, 0.25)) * r_u;
-                vec3 cand_dir = normalize(
-                    light_direction
-                    + tan_r * (cos(phi_u) * sun_basis[0] + sin(phi_u) * sun_basis[1])
-                );
-                if (dot(hit.normal, cand_dir) > 0.0) {
-                    sun_ray_dir = cand_dir;
+#if INFO >= 3
+            if (b == 0) {
+                float sun_half_angle = radians(SUN_ANGULAR_RADIUS) * max(SHADOW_PENUMBRA_SCALE, 0.0);
+                if (sun_half_angle > 1e-4) {
+                    float r_u = sqrt(random_dimension(seed, 16 + 2 * b));
+                    float phi_u = tau * random_dimension(seed, 17 + 2 * b);
+                    mat3 sun_basis = build_orthonormal_basis(light_direction);
+                    float tan_r = tan(min(sun_half_angle, 0.25)) * r_u;
+                    vec3 cand_dir = normalize(
+                        light_direction
+                        + tan_r * (cos(phi_u) * sun_basis[0] + sin(phi_u) * sun_basis[1])
+                    );
+                    if (dot(hit.normal, cand_dir) > 0.0) {
+                        sun_ray_dir = cand_dir;
+                    }
                 }
             }
+#endif
             vec3 visibility = voxel_sun_visibility(grid, next_origin, sun_ray_dir);
             // Cap artistic sunlight bounce boost per hit so high-albedo surfaces
             // never exceed unit reflectance and create energy in 90-degree corners,
@@ -241,7 +246,7 @@ PathTraceSample evaluate_path_trace(
         // at PT_BOUNCES == 3 as well as PT_BOUNCES == 2).
         vec3 bounce_emitter = vec3(0.0);
 #ifdef RTGI_EMITTER_SAMPLING
-        if (b < PT_BOUNCES - 1 && sample_emitters && max_of(material.albedo) > 0.0) {
+        if (b < max_bounces - 1 && sample_emitters && max_of(material.albedo) > 0.0) {
             ivec3 b_cell;
             uint nee_seed = lowbias32(seed ^ (0x9e3779b9u + uint(b) * 0x85ebca6bu));
             vec4 b_sample = sample_direct_emitter_ex(
@@ -273,7 +278,7 @@ PathTraceSample evaluate_path_trace(
                 (emission + sun + bounce_emitter) * throughput, b
             );
         }
-        if (b == PT_BOUNCES - 1) {
+        if (b == max_bounces - 1) {
 #ifdef RTGI_WORLD_CACHE
             // Query face-oriented world-space residual radiance cache (D_block +
             // D_indirect, excluding direct sun which was already evaluated above)

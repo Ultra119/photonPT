@@ -64,9 +64,19 @@ ivec3 clamp_to_voxel_grid(ivec3 pos) {
 
 // Decouple voxel volume coverage radius from per-ray diffuse trace distance:
 // Distant surfaces inside the volume still trace local indirect lighting, without
-// sky-escaping rays marching across the full volume diagonal.
+// sky-escaping rays marching across the full volume diagonal. Lower presets use
+// tighter diffuse ray horizons (faster DDA + tighter emitter octree culling) while
+// Ultra/Screenshot keep the full 72/24 block trace reach.
+#if INFO <= 1
+const float rt_primary_max_distance = min(float(RT_CLIPMAP_SIZE) * 0.5, 36.0);
+const float rt_bounce_max_distance = min(float(RT_CLIPMAP_SIZE) * 0.25, 12.0);
+#elif INFO == 2
+const float rt_primary_max_distance = min(float(RT_CLIPMAP_SIZE) * 0.5, 48.0);
+const float rt_bounce_max_distance = min(float(RT_CLIPMAP_SIZE) * 0.25, 16.0);
+#else
 const float rt_primary_max_distance = min(float(RT_CLIPMAP_SIZE) * 0.5, 72.0);
 const float rt_bounce_max_distance = min(float(RT_CLIPMAP_SIZE) * 0.25, 24.0);
+#endif
 const float rt_scene_max_distance = rt_primary_max_distance;
 
 const int voxel_dda_max_steps = min(RT_CLIPMAP_SIZE + 16, 144);

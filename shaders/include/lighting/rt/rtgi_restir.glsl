@@ -5,7 +5,11 @@
 #include "rtgi_emitters.glsl"
 #include "rtgi_surface.glsl"
 
+#if INFO <= 2
+const int restir_initial_candidates = 2;
+#else
 const int restir_initial_candidates = 4;
+#endif
 const uint restir_temporal_cap = 16u;
 const int restir_spatial_neighbors = 3;
 

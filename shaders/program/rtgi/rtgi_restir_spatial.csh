@@ -83,10 +83,14 @@ void store_gi_reservoir(ivec2 texel, ivec2 target_res, int bank, RestirGiSlot sl
 
 #ifdef RTGI_RESTIR_GI
 const int restir_spatial_max_neighbors = 4;
+const int restir_di_spatial_max_neighbors = 3;
+#elif INFO <= 2
+const int restir_spatial_max_neighbors = 2;
+const int restir_di_spatial_max_neighbors = 2;
 #else
 const int restir_spatial_max_neighbors = 3;
-#endif
 const int restir_di_spatial_max_neighbors = 3;
+#endif
 
 uvec4 load_guide(ivec2 texel, bool even) {
     return even ? texelFetch(rtgi_guide_even_sampler, texel, 0)
@@ -253,9 +257,16 @@ void main() {
                 continue;
             }
             neighbor_tap[valid_neighbors] = tap;
+#if INFO <= 2 && !defined RTGI_RESTIR_GI
+            // Lower presets skip canonical reverse visibility traces from neighbor
+            // origins, so an un-nudged surface point suffices for nb_delta/PDF
+            // without 3D voxel fetches per neighbor.
+            neighbor_origin[valid_neighbors] = n_voxel + voxel_receiver_bias * n_world_normal;
+#else
             neighbor_origin[valid_neighbors] = rtgi_receiver_origin(
                 voxel_sampler, n_voxel, n_world_normal, material
             );
+#endif
             neighbor_normal[valid_neighbors] = n_world_normal;
             ++valid_neighbors;
         }
@@ -361,6 +372,14 @@ void main() {
                             float nb_cx = rtgi_receiver_cos(neighbor_normal[i], nb_dir, two_sided);
                             float nb_cy = dot(c_lnorm, -nb_dir);
                             if (nb_cx > 0.0 && nb_cy > 0.0) {
+#if INFO <= 2
+                                // RTXDI-style unshadowed canonical MIS weight on
+                                // lower presets: forward visibility at origin is
+                                // still traced strictly so no light ever leaks.
+                                p_i_of_c = restir_target_pdf_from_geom(
+                                    c_emission, nb_cx, nb_cy, nb_dist_sq
+                                );
+#else
                                 vec3 dummy_trans;
                                 if (restir_trace_visibility(voxel_sampler, neighbor_origin[i],
                                                             center.sample_data, c_lnorm, nb_delta,
@@ -369,6 +388,7 @@ void main() {
                                         c_emission, nb_cx, nb_cy, nb_dist_sq
                                     );
                                 }
+#endif
                             }
                         }
                     }

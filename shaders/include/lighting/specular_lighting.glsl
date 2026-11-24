@@ -97,6 +97,10 @@ vec3 get_specular_highlight(
     const float light_radius = SUN_ANGULAR_RADIUS * degree;
 #endif
 
+    if (NoL <= eps) {
+        return vec3(0.0);
+    }
+
     vec3 fresnel;
     if (material.is_hardcoded_metal) {
         fresnel = fresnel_lazanyi_2019(LoH, material.f0, material.f82);
@@ -106,9 +110,6 @@ vec3 get_specular_highlight(
         fresnel = fresnel_dielectric(LoH, material.f0.x);
     }
 
-    if (NoL <= eps) {
-        return vec3(0.0);
-    }
     if (all(lessThan(fresnel, vec3(1e-2)))) {
         return vec3(0.0);
     }
