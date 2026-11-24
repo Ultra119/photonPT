@@ -187,7 +187,7 @@ void main() {
 
     vec3 world_normal = rtgi_guide_normal(guide);
     uint material = rtgi_guide_material(guide);
-    bool two_sided = (material == 5u);
+    bool two_sided = rtgi_is_foliage(material);
     vec3 scene_pos = transform(gbufferModelViewInverse, center_view);
     vec3 voxel_pos = scene_to_voxel_space(scene_pos);
 #if defined RTGI_USE_RESTIR_DI || defined RTGI_RESTIR_GI
@@ -210,15 +210,18 @@ void main() {
         vec3 view_normal = mat3(gbufferModelView) * world_normal;
         float footprint = rtgi_view_footprint(-center_view.z, grid.gi_active, gbufferProjection);
         float grazing = max(abs(dot(view_normal, normalize(center_view))), 0.02);
-        float max_chord = min(4.5, 0.25 + 4.5 * footprint / grazing);
+        float max_chord = min(2.0, 0.25 + 3.0 * footprint / grazing);
 
 #if RTGI_RESOLUTION == 0
-        const float search_radius = 6.0;
+        const float max_search_radius = 6.0;
 #elif RTGI_RESOLUTION == 2
-        const float search_radius = 16.0;
+        const float max_search_radius = 16.0;
 #else
-        const float search_radius = 10.0;
+        const float max_search_radius = 10.0;
 #endif
+        // Bound spatial reuse in world space (~0.35 blocks) so distant 15-20m
+        // surfaces never clone correlated emitter reservoirs into 1-block blobs.
+        float search_radius = min(max_search_radius, max(2.5, 0.35 / max(footprint, 1e-4)));
 
         // Shared geometry-validated spatial neighbor search for ReSTIR DI and GI.
         // Offset STBN tile from deferred1_a so spatial disk rotation is decorrelated
@@ -247,8 +250,11 @@ void main() {
             }
             vec3 n_world_normal = rtgi_guide_normal(n_guide);
             vec3 n_view_normal = mat3(gbufferModelView) * n_world_normal;
-            if (rtgi_geometry_weight(n_view - center_view, view_normal, n_view_normal,
-                                     footprint, max_chord) <= 0.5) {
+            float gw = two_sided
+                ? rtgi_foliage_weight(n_view - center_view, view_normal, n_view_normal, material, 0.90)
+                : rtgi_geometry_weight(n_view - center_view, view_normal, n_view_normal,
+                                       footprint, max_chord);
+            if (gw <= 0.5) {
                 continue;
             }
             vec3 n_scene = transform(gbufferModelViewInverse, n_view);

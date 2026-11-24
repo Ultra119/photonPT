@@ -40,13 +40,10 @@ const float moon_luminance = 10.0
 
 vec3 draw_sun(vec3 ray_dir) {
     float nu = clamp(dot(ray_dir, sun_dir), -1.0, 1.0);
-    float angle = fast_acos(nu);
-    float aa = max(fwidth(angle), 1e-4);
-    float disc_mask
-        = 1.0 - smoothstep(sun_angular_radius - aa, sun_angular_radius + aa, angle);
-    if (disc_mask <= 0.0) {
+    if (nu < cos(sun_angular_radius)) {
         return vec3(0.0);
     }
+    float angle = fast_acos(nu);
 
     // Limb darkening model from
     // http://www.physics.hmc.edu/faculty/esin/a101/limbdarkening.pdf
@@ -61,7 +58,7 @@ vec3 draw_sun(vec3 ray_dir) {
     // Clamp below R11F_G11F_B10F max (64512) so tiny angular radii / blue hour
     // never overflow colortex0 to Inf.
     return min(
-        sun_luminance * sun_color * disc_mask * limb_darkening,
+        sun_luminance * sun_color * limb_darkening,
         vec3(48000.0)
     );
 }
@@ -72,18 +69,14 @@ vec4 draw_moon(vec3 ray_dir) {
     const vec3 glow_color
         = vec3(MOON_R <= 0.05 ? 0.0 : MOON_R - 0.05, MOON_G, MOON_B);
 
-    // Cut out the moon disc with smooth anti-aliased edge for small angular sizes.
+    // Cut out the moon disc.
     float MoV = clamp(dot(ray_dir, moon_dir), -1.0, 1.0);
-    float angle = fast_acos(MoV);
-    float aa = max(fwidth(angle), 1e-4);
-    float disc_mask
-        = 1.0 - smoothstep(moon_angular_radius - aa, moon_angular_radius + aa, angle);
-    if (disc_mask <= 0.0) {
+    if (MoV < cos(moon_angular_radius)) {
         return vec4(0.0);
     }
 
     // Find distance from center to edge.
-    float dist = clamp01(angle * rcp(moon_angular_radius));
+    float dist = clamp01(fast_acos(MoV) * rcp(moon_angular_radius));
 
     // Transform the coordinate space such that z is parallel to moon_dir
     vec3 tangent = moon_dir.y == 1.0
@@ -119,7 +112,7 @@ vec4 draw_moon(vec3 ray_dir) {
                      0.5 * glow_color * (0.1 + 0.1 * edge_glow))
         * (0.2 + 0.8 * moon_texture);
     color = moon_luminance * sqr(color);
-    return vec4(color * disc_mask, disc_mask);
+    return vec4(color, 1.0);
 }
 
 #ifdef GALAXY
@@ -290,7 +283,7 @@ vec4 get_clouds_and_aurora(
     return clouds_and_aurora;
 }
 
-vec3 draw_sky(vec3 ray_dir, out float cloud_transmittance) {
+vec3 draw_sky(vec3 ray_dir) {
     vec3 atmosphere = atmosphere_scattering(
         ray_dir,
         sun_color,
@@ -302,18 +295,12 @@ vec3 draw_sky(vec3 ray_dir, out float cloud_transmittance) {
     float clouds_apparent_distance;
     vec4 clouds_and_aurora
         = get_clouds_and_aurora(ray_dir, atmosphere, clouds_apparent_distance);
-    cloud_transmittance = clamp01(clouds_and_aurora.a);
     return draw_sky(
         ray_dir,
         atmosphere,
         clouds_and_aurora,
         clouds_apparent_distance
     );
-}
-
-vec3 draw_sky(vec3 ray_dir) {
-    float unused_cloud_transmittance;
-    return draw_sky(ray_dir, unused_cloud_transmittance);
 }
 #endif
 

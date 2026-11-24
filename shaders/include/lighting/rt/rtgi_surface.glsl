@@ -134,10 +134,27 @@ vec3 rtgi_guide_normal(uvec4 guide) {
     return decode_unit_vector(vec2(guide.z & 65535u, guide.z >> 16u) / 65535.0);
 }
 
+bool rtgi_is_emissive_plant(uint material) {
+    return material == 34u || material == 37u || material == 49u || material == 59u;
+}
+bool rtgi_is_plant(uint material) {
+    return (material >= 2u && material <= 4u) || material == 14u || material == 15u
+        || rtgi_is_emissive_plant(material);
+}
+bool rtgi_is_foliage(uint material) { return rtgi_is_plant(material) || material == 5u; }
+
+bool rtgi_material_matches(uint a, uint b) {
+    if (a == b) {
+        return true;
+    }
+    return rtgi_is_plant(a) && rtgi_is_plant(b)
+        && !rtgi_is_emissive_plant(a) && !rtgi_is_emissive_plant(b);
+}
+
 bool rtgi_guide_matches(uvec4 guide, uint material) {
     return rtgi_guide_kind(guide) == rtgi_world
         && (guide.w & rtgi_guide_covered) != 0u
-        && rtgi_guide_material(guide) == material;
+        && rtgi_material_matches(rtgi_guide_material(guide), material);
 }
 
 bool rtgi_finite(vec4 value) { return !any(isnan(value)) && !any(isinf(value)); }
@@ -160,6 +177,24 @@ float rtgi_geometry_weight(
     float tolerance = clamp(0.02 + 0.05 * footprint + 0.012 * length(delta), 0.02, 0.10);
     return (1.0 - smoothstep(tolerance, 2.0 * tolerance, plane))
         * smoothstep(0.9, 0.98, normal_dot);
+}
+
+// 3D proximity weight for volumetric/cross-quad foliage (leaves and grass).
+// Keeps inner canopy leaves and waving grass blades temporally/spatially
+// connected without bleeding across distinct trees or solid walls.
+float rtgi_foliage_weight(
+    vec3 delta, vec3 normal, vec3 tap_normal, uint material, float max_dist
+) {
+    float d2 = dot(delta, delta);
+    if (d2 > sqr(max_dist)) {
+        return 0.0;
+    }
+    float dist_w = 1.0 - smoothstep(0.45 * max_dist, max_dist, sqrt(d2));
+    float nd = dot(normal, tap_normal);
+    float norm_w = rtgi_is_plant(material)
+        ? (0.70 + 0.30 * abs(nd))
+        : (0.35 + 0.65 * max0(nd));
+    return dist_w * norm_w;
 }
 
 #endif

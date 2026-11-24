@@ -89,7 +89,8 @@ RtgiHistory gather_history(
     float footprint = rtgi_view_footprint(-predicted_view.z, grid.gi_active,
                                           gbufferPreviousProjection);
     float grazing = max(abs(dot(normal, normalize(predicted_view))), 0.02);
-    float max_chord = min(6.0, 0.1 + 2.5 * footprint / grazing);
+    float max_chord = min(6.0, 0.10 + 2.5 * footprint / grazing);
+    bool is_foliage = rtgi_is_foliage(material);
 
     for (int y = 0; y <= 1; ++y) {
         for (int x = 0; x <= 1; ++x) {
@@ -108,8 +109,10 @@ RtgiHistory gather_history(
                 continue;
             }
             vec3 tap_normal = mat3(gbufferPreviousModelView) * rtgi_guide_normal(guide);
-            weight *= rtgi_geometry_weight(view_pos - predicted_view, normal,
-                                           tap_normal, footprint, max_chord);
+            weight *= is_foliage
+                ? rtgi_foliage_weight(view_pos - predicted_view, normal, tap_normal, material, 0.65)
+                : rtgi_geometry_weight(view_pos - predicted_view, normal,
+                                       tap_normal, footprint, max_chord);
             if (weight <= 0.0) {
                 continue;
             }
@@ -138,6 +141,64 @@ RtgiHistory gather_history(
                 history.mean.a = mean.a;
             }
         }
+    }
+
+    // Cutout-barrier bypass: when a thin foreground leaf/vine/grass cutout
+    // briefly occluded the 2x2 footprint on the previous frame, reach 1 texel
+    // around it with the exact same geometry gate to preserve converged history.
+    if (history.weight < 0.15) {
+        ivec2 center_tap = ivec2(round(vec2(base) + fraction));
+        float fb_chord = is_foliage ? 0.85 : min(3.0, 0.20 + 3.0 * footprint / grazing);
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                ivec2 tap = center_tap + ivec2(dx, dy);
+                if (!rtgi_in_bounds(tap, grid.gi_active)) {
+                    continue;
+                }
+                ivec2 bo = tap - base;
+                if (all(greaterThanEqual(bo, ivec2(0))) && all(lessThanEqual(bo, ivec2(1)))) {
+                    continue;
+                }
+                uvec4 guide = load_guide(tap, previous_even);
+                vec3 view_pos;
+                if (!rtgi_guide_matches(guide, material)
+                    || !rtgi_view_from_guide(guide, grid.full_size, previous_jitter,
+                                             gbufferPreviousProjection, view_pos)) {
+                    continue;
+                }
+                vec3 tap_normal = mat3(gbufferPreviousModelView) * rtgi_guide_normal(guide);
+                float gw = is_foliage
+                    ? rtgi_foliage_weight(view_pos - predicted_view, normal, tap_normal, material, fb_chord)
+                    : rtgi_geometry_weight(view_pos - predicted_view, normal,
+                                           tap_normal, footprint, fb_chord);
+                if (gw <= 0.10) {
+                    continue;
+                }
+                vec4 mean = previous_even ? imageLoad(rtgi_accum_img, tap)
+                                          : imageLoad(rtgi_history_img, tap);
+                vec4 stats = previous_even ? imageLoad(rtgi_stats_even_img, tap)
+                                           : imageLoad(rtgi_stats_odd_img, tap);
+                if (!rtgi_finite(mean) || any(lessThan(mean.rgb, vec3(0.0)))
+                    || !rtgi_finite(stats) || stats.x < 0.0 || stats.y <= 0.0
+                    || stats.y > 1.0 || stats.z < 1.0) {
+                    continue;
+                }
+                vec2 d = vec2(tap) - (vec2(base) + fraction);
+                float weight = gw * (0.45 / (0.5 + dot(d, d)));
+                history.weight += weight;
+                float a = weight / history.weight;
+                float delta = dot(mean.rgb - history.mean.rgb, luminance_weights);
+                history.stats.x = mix(history.stats.x, stats.x, a) + a * (1.0 - a) * sqr(delta);
+                history.stats.yz = mix(history.stats.yz, stats.yz, a);
+                history.mean.rgb = mix(history.mean.rgb, mean.rgb, a);
+                if (weight > best_weight) {
+                    best_weight = weight;
+                    history.stats.w = stats.w;
+                    history.mean.a = mean.a;
+                }
+            }
+        }
+        history.weight = min(history.weight, 0.85);
     }
 
     return history;
@@ -313,26 +374,40 @@ void main() {
                                                   gbufferProjection, nb_view)) {
                             continue;
                         }
-                        if (-nb_view.z < center_depth * 0.88) {
-                            ++fg_nbrs;
-                        } else if (rtgi_guide_matches(nb_guide, material)) {
+                        bool same_surf = false;
+                        if (rtgi_guide_matches(nb_guide, material)) {
                             vec3 nb_n = transpose(mat3(gbufferModelViewInverse))
                                 * rtgi_guide_normal(nb_guide);
-                            if (rtgi_geometry_weight(nb_view - view_pos, view_n, nb_n,
-                                                     footprint, max_chord) > 0.05) {
-                                ++same_surface_nbrs;
-                            }
+                            float nb_gw = rtgi_is_foliage(material)
+                                ? rtgi_foliage_weight(nb_view - view_pos, view_n, nb_n, material, 0.85)
+                                : rtgi_geometry_weight(nb_view - view_pos, view_n, nb_n,
+                                                       footprint, max_chord);
+                            same_surf = nb_gw > 0.05;
+                        }
+                        if (same_surf) {
+                            ++same_surface_nbrs;
+                        } else if (-nb_view.z < center_depth - max(0.04, 0.015 * center_depth)) {
+                            ++fg_nbrs;
                         }
                     }
                 }
-                bool isolated_peephole = (same_surface_nbrs <= 1) && (fg_nbrs >= 4);
+                bool isolated_peephole = (same_surface_nbrs <= 1) && (fg_nbrs >= 3);
                 float prior_age = isolated_peephole
                     ? clamp(cache_age * 2.0, 8.0, 20.0)
                     : clamp(cache_age * 0.4, 1.5, 3.0);
                 float init_age = prior_age + 1.0;
                 float alpha_init = 1.0 / init_age;
-                vec3 init_mean = mix(cached_rad, raw.rgb, alpha_init);
-                float init_delta = dot(raw.rgb - cached_rad, luminance_weights);
+                vec3 safe_raw = raw.rgb;
+                if (cache_age >= 4.0) {
+                    float cache_y = dot(cached_rad, luminance_weights);
+                    float raw_y = dot(safe_raw, luminance_weights);
+                    float raw_cap = max(cache_y * 3.5, 0.15) + 0.25;
+                    if (raw_y > raw_cap) {
+                        safe_raw *= raw_cap / max(raw_y, 1e-5);
+                    }
+                }
+                vec3 init_mean = mix(cached_rad, safe_raw, alpha_init);
+                float init_delta = dot(safe_raw - cached_rad, luminance_weights);
                 float init_var = (1.0 - alpha_init) * alpha_init * sqr(init_delta);
                 float init_q = sqr(1.0 - alpha_init) / prior_age + sqr(alpha_init);
                 store_history(texel, even, vec4(init_mean, raw.a),
@@ -347,7 +422,13 @@ void main() {
     }
 
     const float age_cap = float(RTGI_SPP_CAP) / float(RTGI_RAY_COUNT);
-    float age = min(history.stats.z * support + 1.0, age_cap);
+    // Do not decay age by bilinear support on silhouette/cutout edges where
+    // 1-3 of the 4 bilinear taps cross onto another material (e.g. vines on
+    // wood, grass blades, leaf cutouts); history.mean is already normalized
+    // over strictly geometry-matched taps, whereas multiplying by support
+    // permanently trapped edge pixels at age 1.3-4.0 and fed raw fireflies in.
+    float age_retention = clamp01(support * 6.25);
+    float age = min(history.stats.z * age_retention + 1.0, age_cap);
     float alpha = max(1.0 / age, 0.01 * RTGI_MIN_ACCUM);
     float previous_luminance = dot(history.mean.rgb, luminance_weights);
     float luminance = dot(raw.rgb, luminance_weights);
@@ -384,20 +465,29 @@ void main() {
             float nbr_delta = nbr_raw - nbr_prev;
             float frame_sigma = sqrt(history.stats.x / max(1.0 - history.stats.y, 1e-5));
 #if (defined RTGI_EMITTER_SAMPLING && defined RTGI_RESTIR_DI) || defined RTGI_RESTIR_GI
-            float eff_nbr = min(float(nbr_count), 2.5);
-            const float evidence_limit = 5.0;
+            // Under ReSTIR temporal/spatial reuse, distant emitter reservoirs
+            // stay autocorrelated for ~8-16 frames; use a higher persistence
+            // gate, floor, and gentler alpha so distant 15-20m emitter variance
+            // never triggers pulsing false resets (broken emitters already reset
+            // deterministically on frame 1 via rtgi_guide_emitter_changed).
+            float eff_nbr = min(float(nbr_count), 2.0);
+            const float evidence_limit = 10.0;
+            float nbr_sigma = frame_sigma * inversesqrt(eff_nbr);
+            float threshold = max(0.015, max(0.42 * max(nbr_raw, nbr_prev), 4.0 * nbr_sigma));
+            float adapt_alpha = 0.35 * RTGI_ADAPT_STRENGTH;
 #else
             float eff_nbr = float(nbr_count);
             const float evidence_limit = 3.0;
-#endif
             float nbr_sigma = frame_sigma * inversesqrt(eff_nbr);
-            float threshold = max(0.001, max(0.2 * max(nbr_raw, nbr_prev), 3.0 * nbr_sigma));
+            float threshold = max(0.002, max(0.25 * max(nbr_raw, nbr_prev), 3.0 * nbr_sigma));
+            float adapt_alpha = 0.60 * RTGI_ADAPT_STRENGTH;
+#endif
             if (abs(nbr_delta) > threshold) {
                 float direction = sign(nbr_delta);
                 evidence = clamp(history.stats.w * direction + 1.0, 1.0, evidence_limit) * direction;
                 if (abs(evidence) >= evidence_limit) {
-                    alpha = max(alpha, 0.6 * RTGI_ADAPT_STRENGTH);
-                    age = min(age, max(1.0 / alpha, 6.0));
+                    alpha = max(alpha, adapt_alpha);
+                    age = min(age, max(1.0 / alpha, 8.0));
                     reason = rtgi_reset_adaptive;
                 }
             }

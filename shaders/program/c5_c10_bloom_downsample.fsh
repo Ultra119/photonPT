@@ -71,20 +71,28 @@ void main() {
     vec3 i = textureLod(SRC_SAMPLER, uv_src + vec2( 2.0, -2.0) * view_pixel_size, 0).rgb;
 
 #if BLOOM_TILE_INDEX == 0
-    vec3 g0 = 0.25 * (j + k + l + m);
-    vec3 g1 = 0.25 * (a + b + d + e);
-    vec3 g2 = 0.25 * (b + c + e + f);
-    vec3 g3 = 0.25 * (d + e + g + h);
-    vec3 g4 = 0.25 * (e + f + h + i);
+    // Per-tap Karis luma weighting across all 13 CoD:AW taps: cancels out
+    // identically across broad bright regions (sun, torches, lava) while
+    // suppressing isolated 1-pixel sky/sun cutout fireflies ~5.5x harder than
+    // 4-tap group weighting.
+    float we = 0.125   * rcp(1.0 + max0(dot(e, luminance_weights_rec2020)));
+    float wj = 0.125   * rcp(1.0 + max0(dot(j, luminance_weights_rec2020)));
+    float wk = 0.125   * rcp(1.0 + max0(dot(k, luminance_weights_rec2020)));
+    float wl = 0.125   * rcp(1.0 + max0(dot(l, luminance_weights_rec2020)));
+    float wm = 0.125   * rcp(1.0 + max0(dot(m, luminance_weights_rec2020)));
+    float wb = 0.0625  * rcp(1.0 + max0(dot(b, luminance_weights_rec2020)));
+    float wd = 0.0625  * rcp(1.0 + max0(dot(d, luminance_weights_rec2020)));
+    float wf = 0.0625  * rcp(1.0 + max0(dot(f, luminance_weights_rec2020)));
+    float wh = 0.0625  * rcp(1.0 + max0(dot(h, luminance_weights_rec2020)));
+    float wa = 0.03125 * rcp(1.0 + max0(dot(a, luminance_weights_rec2020)));
+    float wc = 0.03125 * rcp(1.0 + max0(dot(c, luminance_weights_rec2020)));
+    float wg = 0.03125 * rcp(1.0 + max0(dot(g, luminance_weights_rec2020)));
+    float wi = 0.03125 * rcp(1.0 + max0(dot(i, luminance_weights_rec2020)));
 
-    float w0 = 0.5   * rcp(1.0 + max0(dot(g0, luminance_weights_rec2020)));
-    float w1 = 0.125 * rcp(1.0 + max0(dot(g1, luminance_weights_rec2020)));
-    float w2 = 0.125 * rcp(1.0 + max0(dot(g2, luminance_weights_rec2020)));
-    float w3 = 0.125 * rcp(1.0 + max0(dot(g3, luminance_weights_rec2020)));
-    float w4 = 0.125 * rcp(1.0 + max0(dot(g4, luminance_weights_rec2020)));
-
-    bloom_tile = (w0 * g0 + w1 * g1 + w2 * g2 + w3 * g3 + w4 * g4)
-        * rcp(w0 + w1 + w2 + w3 + w4);
+    float w_sum = we + wj + wk + wl + wm + wb + wd + wf + wh + wa + wc + wg + wi;
+    bloom_tile = (we * e + wj * j + wk * k + wl * l + wm * m
+                + wb * b + wd * d + wf * f + wh * h
+                + wa * a + wc * c + wg * g + wi * i) * rcp(max(w_sum, eps));
 #else
     bloom_tile = e * 0.125
         + (j + k + l + m) * 0.125

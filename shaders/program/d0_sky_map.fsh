@@ -11,7 +11,7 @@
 
 #include "/include/global.glsl"
 
-layout(location = 0) out vec4 sky_map;
+layout(location = 0) out vec3 sky_map;
 
 /* RENDERTARGETS: 4 */
 
@@ -137,14 +137,14 @@ void main() {
     ivec2 texel = ivec2(gl_FragCoord.xy);
 
     if (texel.x == sky_map_res.x) { // Store lighting colors
-        sky_map = vec4(0.0, 0.0, 0.0, 1.0);
+        sky_map = vec3(0.0);
         switch (texel.y) {
             case 0:
-                sky_map.rgb = light_color;
+                sky_map = light_color;
                 break;
 
             case 1:
-                sky_map.rgb = ambient_color;
+                sky_map = ambient_color;
                 break;
 
             case 2: {
@@ -174,9 +174,9 @@ void main() {
                     avg = mix(avg, night_sky, night);
                 }
 #endif
-                sky_map.rgb = max_of(avg) > 1e-6 ? avg : ambient_color * rcp_pi;
+                sky_map = max_of(avg) > 1e-6 ? avg : ambient_color * rcp_pi;
 #else
-                sky_map.rgb = ambient_color;
+                sky_map = ambient_color;
 #endif
                 break;
             }
@@ -184,10 +184,9 @@ void main() {
     } else { // Draw sky map
         vec3 ray_dir = unproject_sky(uv);
 
-#if defined WORLD_OVERWORLD
-        float cloud_transmittance = 1.0;
-        vec3 sky_rgb = draw_sky(ray_dir, cloud_transmittance);
+        sky_map = draw_sky(ray_dir);
 
+#if defined WORLD_OVERWORLD
         // Apply analytic fog over sky
         mat2x3 fog = air_fog_analytic(
             cameraPosition,
@@ -196,9 +195,7 @@ void main() {
             eye_skylight,
             1.0
         );
-        sky_map = vec4(sky_rgb * fog[1] + fog[0], cloud_transmittance);
-#else
-        sky_map = vec4(draw_sky(ray_dir), 1.0);
+        sky_map = sky_map * fog[1] + fog[0];
 #endif
     }
 }

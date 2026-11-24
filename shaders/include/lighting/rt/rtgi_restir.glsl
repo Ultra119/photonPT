@@ -10,7 +10,7 @@ const int restir_initial_candidates = 2;
 #else
 const int restir_initial_candidates = 4;
 #endif
-const uint restir_temporal_cap = 16u;
+const uint restir_temporal_cap = 28u;
 const int restir_spatial_neighbors = 3;
 
 struct RestirSample {
@@ -120,25 +120,6 @@ bool restir_unpack_bounce_witness(uvec4 packed, out ivec3 cell) {
         int((packed.x >> 18u) & 1023u)
     );
     return true;
-}
-
-// Compute the bounded receiver trace origin shared between deferred1_a and deferred1_b.
-vec3 restir_receiver_origin(usampler3D grid, vec3 voxel_pos, vec3 world_normal, uint material) {
-    vec3 origin = voxel_pos + voxel_receiver_bias * world_normal;
-    ivec3 start_cell = clamp_to_voxel_grid(ivec3(floor(origin)));
-    uint start_id = voxel_block_id(texelFetch(grid, start_cell, 0).r);
-    if (!voxel_empty_for_transport(start_id) && !voxel_emitter_id(start_id)) {
-        float nudge_dist = (material >= 2u && material <= 5u) ? 0.22 : 0.06;
-        vec3 nudged = voxel_pos + nudge_dist * world_normal;
-        if (all(greaterThanEqual(nudged, vec3(0.0)))
-            && all(lessThan(nudged, rt_voxel_size_f))) {
-            uint nudged_id = voxel_block_id(texelFetch(grid, ivec3(floor(nudged)), 0).r);
-            if (voxel_empty_for_transport(nudged_id)) {
-                origin = nudged;
-            }
-        }
-    }
-    return origin;
 }
 
 bool restir_eval_geometry(

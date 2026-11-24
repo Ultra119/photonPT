@@ -175,14 +175,20 @@ vec3 animate_vertex(
 #endif
 
 #ifdef WAVING_LEAVES
-        case MATERIAL_LEAVES:
+        case MATERIAL_LEAVES: {
+            // Use a flat outdoor mask instead of per-face sqr(skylight) so all
+            // faces meeting at a shared leaf-block corner displace identically
+            // instead of ripping 1-3px sky cracks open along leaf block edges.
+            float leaf_wind = smoothstep(0.0, 0.25, skylight)
+                * (0.25 + 0.66 * rainStrength);
             return world_pos
                 + get_wind_displacement(
                        world_pos,
                        wind_speed,
-                       wind_strength * 0.5,
+                       leaf_wind * 0.5,
                        false
                 );
+        }
 #endif
 
         default:

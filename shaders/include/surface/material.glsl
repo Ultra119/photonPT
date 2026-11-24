@@ -586,6 +586,10 @@ Material material_from(
                                 * linear_step(0.78, 0.85, hsl.z);
 #endif
                         } else { // 37
+#ifdef HARDCODED_SSS
+                            // Glow berry vines (matches unlit cave_vines in 14u)
+                            material.sss_amount = 0.6;
+#endif
 #ifdef HARDCODED_EMISSION
                             // Weak golden light
                             float blue = isolate_hue(hsl, 200.0, 30.0);

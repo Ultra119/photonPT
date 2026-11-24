@@ -141,12 +141,16 @@ void main() {
         return;
     }
     uint material = rtgi_guide_material(guide);
+    bool is_foliage = rtgi_is_foliage(material);
     vec3 normal = mat3(gbufferModelView) * rtgi_guide_normal(guide);
     float footprint = rtgi_view_footprint(-center_view.z, grid.gi_active, gbufferProjection);
     float grazing = max(abs(dot(normal, normalize(center_view))), 0.02);
 
     int step_px = rtgi_atrous_step();
-    float max_chord = min(6.0, 0.25 + float(step_px) * 2.2 * footprint / grazing);
+    // Bound solid-surface à-trous chord so extreme grazing views at 10+ blocks
+    // keep 1-texel grazing support without smearing across 4-6 blocks into blobs.
+    float max_chord = min(2.0, 0.25 + float(step_px) * 1.5 * footprint / grazing);
+    float foliage_max_dist = min(1.5, 0.40 + 0.35 * float(step_px) * footprint);
 
 #if RTGI_FILTER_PASS == 1
     // Pass 1 estimates same-surface 3x3 spatial variance for ALL pixels (including
@@ -159,6 +163,9 @@ void main() {
     float mom_y = missing_center ? 0.0 : 0.25 * center_y;
     float mom_y2 = missing_center ? 0.0 : 0.25 * sqr(center_y);
     float nbr_se_sum = missing_center ? 0.0 : 0.25 * center.a;
+    float nbr_w_sum = 0.0;
+    float nbr_y_sum = 0.0;
+    float nbr_max_y = 0.0;
 
     for (int k = 0; k < 8; ++k) {
         tap_geom[k] = 0.0;
@@ -178,8 +185,10 @@ void main() {
             continue;
         }
         vec3 tap_normal = mat3(gbufferModelView) * rtgi_guide_normal(tap_guide);
-        float gw = gauss3_kernel[offset.x] * gauss3_kernel[offset.y]
-            * rtgi_geometry_weight(tap_view - center_view, normal, tap_normal, footprint, max_chord);
+        float geom_w = is_foliage
+            ? rtgi_foliage_weight(tap_view - center_view, normal, tap_normal, material, foliage_max_dist)
+            : rtgi_geometry_weight(tap_view - center_view, normal, tap_normal, footprint, max_chord);
+        float gw = gauss3_kernel[offset.x] * gauss3_kernel[offset.y] * geom_w;
         if (gw <= 0.0) {
             continue;
         }
@@ -192,6 +201,9 @@ void main() {
         tap_val[k] = sv;
         tap_geom[k] = gw;
         tap_y[k] = sy;
+        nbr_w_sum += gw;
+        nbr_y_sum += gw * sy;
+        nbr_max_y = max(nbr_max_y, sy);
         mom_w += gw;
         mom_y += gw * sy;
         mom_y2 += gw * sqr(sy);
@@ -201,6 +213,22 @@ void main() {
     if (mom_w <= 0.0) {
         imageStore(filter_output, texel, no_filter_sample);
         return;
+    }
+
+    // 3x3 same-surface firefly despeckle: an isolated 1-pixel outlier would
+    // otherwise reject all dark neighbors via exp(-delta / luma_scale) and
+    // survive Passes 1-4 as a bright glowworm or smear into a blob on edges.
+    // Real lighting edges have bright neighbors so center_y <= nbr_max_y.
+    float nbr_mean_y = nbr_w_sum > 1e-4 ? (nbr_y_sum / nbr_w_sum) : center_y;
+    if (!missing_center && nbr_w_sum > 0.10) {
+        float ff_cap = max(nbr_max_y * 1.35, nbr_mean_y * 2.2) + 0.06;
+        if (center_y > ff_cap) {
+            float old_y = center_y;
+            center.rgb *= ff_cap / max(old_y, 1e-5);
+            center_y = ff_cap;
+            mom_y += 0.25 * (center_y - old_y);
+            mom_y2 += 0.25 * (sqr(center_y) - sqr(old_y));
+        }
     }
 
     float local_mean = mom_y / mom_w;
@@ -218,18 +246,24 @@ void main() {
     float sum_w2_var = missing_center ? 0.0 : sqr(0.25) * sqr(smooth_center_se);
     float sum_w_var = missing_center ? 0.0 : 0.25 * sqr(smooth_center_se);
 
+    float tap_ff_cap = max(max(center_y, nbr_mean_y) * 2.5, 0.15) + 0.12;
     for (int k = 0; k < 8; ++k) {
         float gw = tap_geom[k];
         if (gw <= 0.0) {
             continue;
         }
         vec4 sv = tap_val[k];
+        float sy = tap_y[k];
+        if (!missing_center && nbr_w_sum > 0.20 && sy > tap_ff_cap) {
+            sv.rgb *= tap_ff_cap / max(sy, 1e-5);
+            sy = tap_ff_cap;
+        }
         float w = gw;
         if (!missing_center) {
-            float delta = abs(tap_y[k] - center_y);
+            float delta = abs(sy - center_y);
             float sym_se = 0.5 * (smooth_center_se + max(sv.a, 0.5 * spatial_se));
             float luma_scale = RTGI_FILTER_PHI * sym_se
-                + 0.002 + 0.05 * min(center_y, tap_y[k])
+                + 0.002 + 0.05 * min(center_y, sy)
                 + 1.5 * young_factor * spatial_se;
             w *= exp(-delta / max(luma_scale, 1e-5));
         }
@@ -274,8 +308,10 @@ void main() {
         }
         vec3 tap_normal = mat3(gbufferModelView) * rtgi_guide_normal(tap_guide);
         float kernel = gauss3_kernel[offset.x] * gauss3_kernel[offset.y];
-        float weight = kernel * rtgi_geometry_weight(tap_view - center_view, normal,
-                                                     tap_normal, footprint, max_chord);
+        float geom_w = is_foliage
+            ? rtgi_foliage_weight(tap_view - center_view, normal, tap_normal, material, foliage_max_dist)
+            : rtgi_geometry_weight(tap_view - center_view, normal, tap_normal, footprint, max_chord);
+        float weight = kernel * geom_w;
         if (weight <= 0.0) {
             continue;
         }

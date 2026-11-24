@@ -184,7 +184,8 @@ bool restir_find_previous_tap(
     vec3 prev_normal_view = mat3(gbufferPreviousModelView) * world_normal;
     float footprint = rtgi_view_footprint(-previous_view.z, grid.gi_active, gbufferPreviousProjection);
     float grazing = max(abs(dot(prev_normal_view, normalize(previous_view))), 0.02);
-    float max_chord = min(6.0, 0.1 + 2.5 * footprint / grazing);
+    float max_chord = min(6.0, 0.10 + 2.5 * footprint / grazing);
+    bool is_foliage = rtgi_is_foliage(material);
 
     bool previous_even = prev_bank == 0;
     float best_w = 0.0;
@@ -207,8 +208,11 @@ bool restir_find_previous_tap(
             }
             vec3 tap_world_normal = rtgi_guide_normal(p_guide);
             vec3 tap_view_normal = mat3(gbufferPreviousModelView) * tap_world_normal;
-            w *= rtgi_geometry_weight(p_view - previous_view, prev_normal_view,
-                                      tap_view_normal, footprint, max_chord);
+            w *= is_foliage
+                ? rtgi_foliage_weight(p_view - previous_view, prev_normal_view,
+                                      tap_view_normal, material, 0.65)
+                : rtgi_geometry_weight(p_view - previous_view, prev_normal_view,
+                                       tap_view_normal, footprint, max_chord);
             if (w > best_w) {
                 best_w = w;
                 best_tap = tap;
@@ -484,7 +488,7 @@ void main() {
 
     // Both techniques evaluate their PDFs at this exact biased point.
     vec3 origin = rtgi_receiver_origin(voxel_sampler, voxel_pos, world_normal, material);
-    bool two_sided = (material == 5u);
+    bool two_sided = rtgi_is_foliage(material);
 
 #ifdef RTGI_USE_RESTIR_ANY
     ivec2 prev_tap;

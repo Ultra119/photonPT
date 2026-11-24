@@ -43,10 +43,10 @@ void main() {
 
         float age = force_reset ? 1.0 : min(prev_age + 1.0, world_cache_max_age);
         float alpha = 1.0 / age;
-        if (!force_reset && prev_age >= 2.0) {
+        if (!force_reset && prev_age >= 2.0 && used_count >= 16u) {
             float lum_old = dot(prev_rad, luminance_weights);
             float lum_new = dot(frame_mean, luminance_weights);
-            if (abs(lum_new - lum_old) > max(0.01, 0.35 * max(lum_new, lum_old))) {
+            if (abs(lum_new - lum_old) > max(0.04, 0.55 * max(lum_new, lum_old))) {
                 alpha = max(alpha, 0.5);
                 age = min(age, 2.0);
             }

@@ -143,6 +143,9 @@ float rtgi_upsample_weight(
         return 0.0;
     }
     vec3 tap_normal = mat3(gbufferModelView) * rtgi_guide_normal(guide);
+    if (rtgi_is_foliage(material)) {
+        return rtgi_foliage_weight(tap_view - view_pos, normal, tap_normal, material, 0.75);
+    }
     return rtgi_geometry_weight(tap_view - view_pos, normal, tap_normal, footprint, max_chord);
 }
 

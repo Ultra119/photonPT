@@ -381,13 +381,19 @@ bool trace_any_hit(
     return hit.status == voxel_hit_surface;
 }
 
+bool voxel_is_foliage_id(uint material) {
+    return (material >= 2u && material <= 5u)
+        || material == 14u || material == 15u
+        || material == 34u || material == 37u || material == 49u || material == 59u;
+}
+
 // Compute the bounded receiver trace origin shared between deferred1_a and deferred1_b.
 vec3 rtgi_receiver_origin(usampler3D grid, vec3 voxel_pos, vec3 world_normal, uint material) {
     vec3 origin = voxel_pos + voxel_receiver_bias * world_normal;
     ivec3 start_cell = clamp_to_voxel_grid(ivec3(floor(origin)));
     uint start_id = voxel_block_id(texelFetch(grid, start_cell, 0).r);
     if (!voxel_empty_for_transport(start_id) && !voxel_emitter_id(start_id)) {
-        float nudge_dist = (material >= 2u && material <= 5u) ? 0.22 : 0.06;
+        float nudge_dist = voxel_is_foliage_id(material) ? 0.22 : 0.06;
         vec3 nudged = voxel_pos + nudge_dist * world_normal;
         if (all(greaterThanEqual(nudged, vec3(0.0)))
             && all(lessThan(nudged, rt_voxel_size_f))) {
