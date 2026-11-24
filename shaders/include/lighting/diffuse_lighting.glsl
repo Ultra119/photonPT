@@ -22,8 +22,8 @@ uniform usampler2D rtgi_guide_odd_sampler;
 #include "/include/lighting/voxel/voxel_constants.glsl"
 #endif
 
-const float sss_density = 14.0;
-const float sss_scale = 5.0 * SSS_INTENSITY;
+const float sss_density = 6.5;
+const float sss_scale = 3.2 * SSS_INTENSITY;
 const float night_vision_scale = 1.5;
 const float metal_diffuse_amount
     = 0.5; // Scales diffuse lighting on metals, ideally this would be zero but
@@ -45,25 +45,24 @@ vec3 sss_approx(
     }
 
     // Normalize by peak channel so dark green foliage and bright cherry petals
-    // share consistent multi-block canopy penetration instead of dying at 1 block.
+    // share smooth multi-block canopy penetration without an abrupt cliff.
     float albedo_peak = max(max_of(albedo), eps);
     vec3 coeff = 0.65 * clamp01(albedo / albedo_peak);
     coeff = (1.0 - coeff) * sss_density / sss_amount;
 
-    // Emphasize backlit forward-scattering when looking toward the sun and
-    // suppress body SSS on directly sunlit front faces to prevent neon blowout.
     float front_lit = clamp01(shadow * smoothstep(0.0, 0.35, NoL));
     float phase
-        = mix(isotropic_phase, henyey_greenstein_phase(-LoV, 0.60), 0.72);
+        = mix(isotropic_phase, henyey_greenstein_phase(-LoV, 0.28), 0.22);
 
     vec3 transmittance = exp2(-coeff * sss_depth);
     vec3 sss = sss_scale * phase * transmittance * dampen(sss_amount) * pi
-        * mix(1.0, 0.18, front_lit);
+        * mix(1.0, 0.20, front_lit);
 
 #ifdef SSS_SHEEN
-    vec3 sheen = (0.8 * SSS_INTENSITY) * rcp(albedo + eps) * transmittance
-        * henyey_greenstein_phase(-LoV, 0.5) * linear_step(-0.8, -0.2, -LoV);
-    sss += sheen * sheen_amount * mix(1.0, 0.5, front_lit * (1.0 - sheen_amount));
+    vec3 sheen = (0.22 * SSS_INTENSITY) * rcp(max(albedo, vec3(0.12)))
+        * transmittance * henyey_greenstein_phase(-LoV, 0.30)
+        * linear_step(-0.6, 0.4, -LoV);
+    sss += sheen * sheen_amount * mix(1.0, 0.4, front_lit * (1.0 - sheen_amount));
 #endif
 
     return sss;
