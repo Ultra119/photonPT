@@ -43,7 +43,7 @@ body:
     id: shader-mod-version
     attributes:
       label: Iris version
-      description: You can find your Iris version on the shaderpack selection screen (note: OptiFine is not supported).
+      description: You can find your Iris version on the shaderpack selection screen ( OptiFine is not supported).
     validations:
       required: true
   - type: textarea
