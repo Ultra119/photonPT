@@ -46,11 +46,8 @@ void restir_decode_face(uint face, out int axis, out float side) {
     side = ((face & 1u) != 0u) ? 1.0 : -1.0;
 }
 
-// Pack reservoir into RGBA32UI (128 bits):
-//   R: cell.x (10b) | cell.y (8b) | cell.z (10b) | face (3b) | valid (1b)
-//   G: u (10b) | v (10b) | M (11b) | tinted (1b)
-//   B: floatBitsToUint(W)
-//   A: floatBitsToUint(target_pdf)
+// Pack RGBA32UI: R = cell(10,8,10)|face(3)|valid(1), G = uv(10,10)|M(11)|tinted(1),
+// B = floatBitsToUint(W), A = floatBitsToUint(target_pdf).
 uvec4 restir_pack(RestirReservoir r) {
     uint count_packed = min(r.count, 2047u);
     bool ok = r.sample_data.valid && r.sample_data.face < 6u && count_packed > 0u
@@ -94,9 +91,8 @@ RestirReservoir restir_unpack(uvec4 packed) {
     return r;
 }
 
-// When a pixel has no direct emitter (bit 31 == 0), packed.x bits 0..30 are
-// unused by ReSTIR DI. Store a bounce-1 emitter witness cell (bit 30 == 1)
-// so bounced-light pixels also detect broken lights deterministically on frame 1.
+// When bit 31 == 0 (no direct emitter), pack a bounce-1 witness cell (bit 30 = 1)
+// in packed.x so bounced-light pixels detect broken lights on frame 1.
 const uint restir_bounce_witness_bit = 1u << 30u;
 
 uint restir_pack_bounce_witness(ivec3 cell) {
@@ -232,10 +228,21 @@ RestirReservoir restir_sample_initial(
     vec3 best_delta = vec3(0.0);
     float best_dist_sq = 0.0;
     vec3 tree_normal = two_sided ? vec3(0.0) : normal;
+    EmitterLocalCache lcache = build_emitter_local_cache(
+        origin, tree_normal, rt_primary_max_distance
+    );
+    ivec3 last_local_cell = ivec3(-1);
+    float last_local_pmf = 0.0;
+    float branch_u0 = random_dimension(seed, EMITTER_ROOT_LEVEL + 10);
+    float inv_candidates = 1.0 / float(num_candidates);
 
     for (int m = 0; m < num_candidates; ++m) {
         uint cseed = lowbias32(seed ^ (uint(m + 1) * 0x9e3779b9u));
-        EmitterSelection selected = select_voxel_emitter(origin, tree_normal, cseed, ivec3(-1));
+        float branch_u = (float(m) + branch_u0) * inv_candidates;
+        EmitterSelection selected = select_voxel_emitter_sampled(
+            origin, tree_normal, cseed, rt_primary_max_distance, lcache,
+            branch_u, last_local_cell, last_local_pmf
+        );
         if (selected.pmf <= 0.0) {
             // The octree traversal weights depend only on (origin, normal);
             // zero pmf means no reachable emitter exists in this hemisphere.
@@ -260,9 +267,8 @@ RestirReservoir restir_sample_initial(
         if (weights[axis] == 0.0) {
             axis = weights.y > 0.0 ? 1 : 0;
         }
-        // Pre-quantize strictly inside (0, 1) on the 10-bit packing lattice so
-        // deferred1_b evaluates the exact same face interior point with no
-        // pack/unpack drift or box-edge normal ties.
+        // Pre-quantize strictly inside (0, 1) on the 10-bit lattice so
+        // deferred1_b evaluates the exact same face point with no edge ties.
         uint uq = 1u + min(uint(random_dimension(cseed, EMITTER_ROOT_LEVEL + 2) * 1022.0), 1021u);
         uint vq = 1u + min(uint(random_dimension(cseed, EMITTER_ROOT_LEVEL + 3) * 1022.0), 1021u);
         vec2 suv = vec2(float(uq), float(vq)) * (1.0 / 1023.0);
@@ -334,9 +340,8 @@ RestirReservoir restir_sample_initial(
     return restir_sample_initial(grid, origin, normal, seed, two_sided, restir_initial_candidates);
 }
 
-// Shade a visibility-validated reservoir with power MIS against RTGI_RAY_COUNT BSDF rays,
-// reusing precomputed geometry when available.
-// RGB is direct emitter radiance; A encodes 0 (no candidate), 1 (rejected), or 2 (visible).
+// Shade a visible reservoir with power MIS against RTGI_RAY_COUNT BSDF rays.
+// RGB = direct radiance; A = 0 (none), 1 (rejected), or 2 (visible).
 vec4 restir_shade_sample_from_geom(
     usampler3D grid, vec3 origin, vec3 normal, RestirReservoir r, vec3 transmittance,
     bool two_sided, uint block_id, vec3 emission, float distance_sq, float cos_x, float cos_y
@@ -344,8 +349,8 @@ vec4 restir_shade_sample_from_geom(
     if (!r.sample_data.valid || r.weight <= 0.0) {
         return vec4(0.0, 0.0, 0.0, r.count > 0u ? 1.0 : 0.0);
     }
-    EmitterSelection selected = select_voxel_emitter(
-        origin, two_sided ? vec3(0.0) : normal, 0u, r.sample_data.cell
+    float pmf = query_voxel_emitter_pmf(
+        origin, two_sided ? vec3(0.0) : normal, r.sample_data.cell, rt_primary_max_distance
     );
     EmitterBox box = voxel_emitter_box_from_payload(texelFetch(grid, r.sample_data.cell, 0).r);
     vec3 sides = emitter_exposed_sides(grid, r.sample_data.cell, box, origin);
@@ -357,7 +362,7 @@ vec4 restir_shade_sample_from_geom(
         return vec4(0.0, 0.0, 0.0, 1.0);
     }
     float inv_p_area = areas[hit_axis] * (total_w / weights[hit_axis]);
-    float light_pdf = emitter_solid_angle_pdf(selected.pmf, inv_p_area, distance_sq, cos_y);
+    float light_pdf = emitter_solid_angle_pdf(pmf, inv_p_area, distance_sq, cos_y);
     float bsdf_pdf = cos_x * rcp_pi;
     if (light_pdf <= 0.0 || bsdf_pdf <= 0.0) {
         return vec4(0.0, 0.0, 0.0, 1.0);

@@ -15,37 +15,198 @@ bool has_voxel_emitters() {
     return load_emitter_word(emitter_level_offset(EMITTER_ROOT_LEVEL)) > 0u;
 }
 
-bool emitter_node_reachable(
-    ivec3 node, int level, vec3 origin, vec3 normal, float max_distance,
-    out float distance_sq, out float side
-) {
-    side = float(8 << level);
-    vec3 lo = vec3(node) * side;
-    vec3 hi = min(lo + side, rt_voxel_size_f);
-    vec3 delta = origin - clamp(origin, lo, hi);
-    distance_sq = dot(delta, delta);
-    float reach = max_distance + voxel_endpoint_epsilon;
-    vec3 furthest = mix(lo, hi, greaterThanEqual(normal, vec3(0.0)));
-    return distance_sq <= sqr(reach) && dot(furthest - origin, normal) >= -voxel_endpoint_epsilon;
-}
-
-float emitter_node_weight(uint count, float distance_sq, float side) {
-    if (count == 0u) {
-        return 0.0;
-    }
-    // A broad internal node gets a finite representative distance even when
-    // the receiver touches its bounds.
-    return float(count) / (1.0 + max(distance_sq, sqr(0.25 * side)));
-}
-
 struct EmitterSelection {
     ivec3 cell;
     float pmf;
 };
 
-// A target cell follows its known branch to compute the reverse probability.
-// A negative target draws from the same per-node categorical distribution.
-EmitterSelection select_voxel_emitter(
+struct EmitterLocalCache {
+    ivec3 l1_base;
+    float local_total;
+    float alpha;
+    uint active_mask; // 8-bit mask of reachable non-empty Level-1 (16^3) super-bricks
+};
+
+// Local 2x2x2 Level-1 (16^3) weight anchored to `origin`; super-bricks outside
+// are >= 8 blocks away so smoothstep(64, 0, dist_sq) hits exact C^1 zero (no seams).
+float emitter_local_l1_weight(
+    ivec3 p, ivec3 l1_size, int l1_offset, vec3 origin, vec3 normal, bvec3 pos_normal,
+    out uint count
+) {
+    count = load_emitter_word(l1_offset + emitter_flatten(p, l1_size));
+    if (count == 0u) {
+        return 0.0;
+    }
+    vec3 lo = vec3(p) * 16.0;
+    vec3 hi = min(lo + 16.0, rt_voxel_size_f);
+    vec3 delta = origin - clamp(origin, lo, hi);
+    float distance_sq = dot(delta, delta);
+    if (distance_sq >= 64.0) {
+        return 0.0;
+    }
+    vec3 furthest = mix(lo, hi, pos_normal);
+    if (dot(furthest - origin, normal) < -voxel_endpoint_epsilon) {
+        return 0.0;
+    }
+    float fade = smoothstep(64.0, 0.0, distance_sq);
+    return fade * float(count) / (1.0 + max(distance_sq, 16.0));
+}
+
+EmitterLocalCache build_emitter_local_cache(vec3 origin, vec3 normal, float max_distance) {
+    ivec3 l1_size = emitter_level_size(1);
+    ivec3 l1_base = clamp((ivec3(floor(origin)) - 8) >> 4, ivec3(0), max(l1_size - 2, ivec3(0)));
+    int l1_offset = emitter_level_offset(0) + emitter_leaf_count;
+    bvec3 pos_normal = greaterThanEqual(normal, vec3(0.0));
+
+    float local_total = 0.0;
+    uint active_mask = 0u;
+    for (int i = 0; i < 8; ++i) {
+        ivec3 p = l1_base + ivec3(i & 1, (i >> 1) & 1, i >> 2);
+        uint cnt;
+        float w = emitter_local_l1_weight(p, l1_size, l1_offset, origin, normal, pos_normal, cnt);
+        if (w > 0.0) {
+            local_total += w;
+            active_mask |= 1u << uint(i);
+        }
+    }
+
+    // Smoothly ramp local mixture share up to 0.75 when nearby emitters exist,
+    // collapsing C^1-continuously to 0.0 when the 2x2x2 super-brick window is empty.
+    float alpha = local_total > 0.0
+        ? 0.75 * (local_total / (local_total + 0.001))
+        : 0.0;
+    return EmitterLocalCache(l1_base, local_total, alpha, active_mask);
+}
+
+float emitter_local_cell_pmf(
+    ivec3 cell, EmitterLocalCache lcache, vec3 origin, vec3 normal, float max_distance
+) {
+    if (lcache.alpha <= 0.0) {
+        return 0.0;
+    }
+    ivec3 p = cell >> 4;
+    ivec3 d = p - lcache.l1_base;
+    if (any(lessThan(d, ivec3(0))) || any(greaterThan(d, ivec3(1)))) {
+        return 0.0;
+    }
+    uint bit_mask = 1u << uint(d.x | (d.y << 1) | (d.z << 2));
+    if ((lcache.active_mask & bit_mask) == 0u) {
+        return 0.0;
+    }
+    ivec3 l1_size = emitter_level_size(1);
+    int l1_offset = emitter_level_offset(0) + emitter_leaf_count;
+    if (lcache.active_mask == bit_mask) {
+        uint cnt = load_emitter_word(l1_offset + emitter_flatten(p, l1_size));
+        return cnt > 0u ? (1.0 / float(cnt)) : 0.0;
+    }
+    bvec3 pos_normal = greaterThanEqual(normal, vec3(0.0));
+    uint cnt;
+    float w = emitter_local_l1_weight(p, l1_size, l1_offset, origin, normal, pos_normal, cnt);
+    return (w > 0.0 && cnt > 0u) ? ((w / lcache.local_total) / float(cnt)) : 0.0;
+}
+
+ivec3 find_nth_emitter_in_leaf(ivec3 leaf, int leaf_index, uint rank) {
+    int first_word = leaf_index * emitter_mask_words;
+    for (int word = 0; word < emitter_mask_words; ++word) {
+        uint mask = load_emitter_word(first_word + word);
+        uint word_count = uint(bitCount(mask));
+        if (rank < word_count) {
+            for (uint skip = 0u; skip < rank; ++skip) {
+                mask &= mask - 1u;
+            }
+            int local = word * 32 + findLSB(mask);
+            return leaf * 8 + emitter_unflatten(local, ivec3(8));
+        }
+        rank -= word_count;
+    }
+    return ivec3(-1);
+}
+
+ivec3 sample_emitter_in_leaf(ivec3 leaf, uint count, uint seed, int dim) {
+    int leaf_index = emitter_flatten(leaf, emitter_leaf_size);
+    uint rank = min(uint(random_dimension(seed, dim) * float(count)), count - 1u);
+    return find_nth_emitter_in_leaf(leaf, leaf_index, rank);
+}
+
+// Draw uniformly from all `p_count` emitters inside Level-1 super-brick `p`
+// (exact 1 / p_count probability, matching emitter_local_cell_pmf identically).
+ivec3 sample_emitter_in_l1(ivec3 p, uint p_count, uint seed, int dim) {
+    int l0_offset = emitter_level_offset(0);
+    ivec3 first_leaf = p * 2;
+    uint rank = min(uint(random_dimension(seed, dim) * float(p_count)), p_count - 1u);
+    for (int i = 0; i < 8; ++i) {
+        ivec3 leaf = first_leaf + ivec3(i & 1, (i >> 1) & 1, i >> 2);
+        if (any(greaterThanEqual(leaf, emitter_leaf_size))) {
+            continue;
+        }
+        int leaf_index = emitter_flatten(leaf, emitter_leaf_size);
+        uint cnt = load_emitter_word(l0_offset + leaf_index);
+        if (rank < cnt) {
+            return find_nth_emitter_in_leaf(leaf, leaf_index, rank);
+        }
+        rank -= cnt;
+    }
+    return ivec3(-1);
+}
+
+// Scalar query-only global octree PMF (no weights[8] VGPR array or sampling code).
+float query_voxel_emitter_global(vec3 origin, vec3 normal, ivec3 target, float max_distance) {
+    ivec3 leaf = ivec3(0);
+    float probability = 1.0;
+    int offset = emitter_level_offset(EMITTER_ROOT_LEVEL);
+    float reach_sq = sqr(max_distance + voxel_endpoint_epsilon);
+    bvec3 pos_normal = greaterThanEqual(normal, vec3(0.0));
+    for (int level = EMITTER_ROOT_LEVEL - 1; level >= 0; --level) {
+        ivec3 size = emitter_level_size(level);
+        offset -= size.x * size.y * size.z;
+        ivec3 first = leaf * 2;
+        float side = float(8 << level);
+        float min_dist_sq = sqr(0.125 * side);
+        ivec3 bit = (target >> (level + 3)) & 1;
+        int chosen = bit.x + 2 * bit.y + 4 * bit.z;
+        float total = 0.0;
+        float chosen_w = 0.0;
+        for (int i = 0; i < 8; ++i) {
+            ivec3 child = first + ivec3(i & 1, (i >> 1) & 1, i >> 2);
+            if (all(lessThan(child, size))) {
+                uint count = load_emitter_word(offset + emitter_flatten(child, size));
+                if (count > 0u) {
+                    vec3 lo = vec3(child) * side;
+                    vec3 hi = min(lo + side, rt_voxel_size_f);
+                    vec3 delta = origin - clamp(origin, lo, hi);
+                    float distance_sq = dot(delta, delta);
+                    vec3 furthest = mix(lo, hi, pos_normal);
+                    if (distance_sq <= reach_sq && dot(furthest - origin, normal) >= -voxel_endpoint_epsilon) {
+                        float w = float(count) / (1.0 + max(distance_sq, min_dist_sq));
+                        total += w;
+                        if (i == chosen) {
+                            chosen_w = w;
+                        }
+                    }
+                }
+            }
+        }
+        if (total <= 0.0 || chosen_w <= 0.0) {
+            return 0.0;
+        }
+        probability *= chosen_w / total;
+        leaf = first + bit;
+    }
+
+    int leaf_index = emitter_flatten(leaf, emitter_leaf_size);
+    uint count = load_emitter_word(offset + leaf_index);
+    if (count == 0u) {
+        return 0.0;
+    }
+    int first_word = leaf_index * emitter_mask_words;
+    int b = emitter_flatten(target & 7, ivec3(8));
+    uint mask = load_emitter_word(first_word + (b >> 5));
+    return (mask & (1u << (b & 31))) != 0u ? (probability / float(count)) : 0.0;
+}
+
+// Single-pass zero-array global octree walk: target >= 0 queries p_global(target),
+// target < 0 samples via streaming selection so Wave32 lanes execute in lockstep.
+EmitterSelection select_voxel_emitter_global(
     vec3 origin, vec3 normal, uint seed, ivec3 target, float max_distance
 ) {
     EmitterSelection result = EmitterSelection(ivec3(-1), 0.0);
@@ -53,47 +214,64 @@ EmitterSelection select_voxel_emitter(
     ivec3 leaf = ivec3(0);
     float probability = 1.0;
     int offset = emitter_level_offset(EMITTER_ROOT_LEVEL);
+    float reach_sq = sqr(max_distance + voxel_endpoint_epsilon);
+    bvec3 pos_normal = greaterThanEqual(normal, vec3(0.0));
     for (int level = EMITTER_ROOT_LEVEL - 1; level >= 0; --level) {
         ivec3 size = emitter_level_size(level);
         offset -= size.x * size.y * size.z;
         ivec3 first = leaf * 2;
-        float weights[8];
-        float total = 0.0;
-        for (int i = 0; i < 8; ++i) {
-            ivec3 child = first + ivec3(i & 1, (i >> 1) & 1, i >> 2);
-            float weight = 0.0;
-            if (all(lessThan(child, size))) {
-                float distance_sq, side;
-                if (emitter_node_reachable(child, level, origin, normal, max_distance, distance_sq, side)) {
-                    uint count = load_emitter_word(offset + emitter_flatten(child, size));
-                    weight = emitter_node_weight(count, distance_sq, side);
-                }
-            }
-            weights[i] = weight;
-            total += weight;
-        }
-        if (total <= 0.0) {
-            return result;
-        }
-
-        int chosen = 0;
+        float side = float(8 << level);
+        float min_dist_sq = sqr(0.125 * side);
+        int target_child = -1;
+        float u = 0.0;
         if (query) {
             ivec3 bit = (target >> (level + 3)) & 1;
-            chosen = bit.x + 2 * bit.y + 4 * bit.z;
+            target_child = bit.x + 2 * bit.y + 4 * bit.z;
         } else {
-            float sample_value = random_dimension(seed, level) * total;
-            for (int i = 0; i < 8; ++i) {
-                if (weights[i] > 0.0) {
-                    chosen = i;
-                    if (sample_value < weights[i]) break;
-                    sample_value -= weights[i];
+            u = random_dimension(seed, level);
+        }
+        float total = 0.0;
+        float chosen_w = 0.0;
+        int chosen = -1;
+        for (int i = 0; i < 8; ++i) {
+            ivec3 child = first + ivec3(i & 1, (i >> 1) & 1, i >> 2);
+            if (all(lessThan(child, size))) {
+                uint count = load_emitter_word(offset + emitter_flatten(child, size));
+                if (count > 0u) {
+                    vec3 lo = vec3(child) * side;
+                    vec3 hi = min(lo + side, rt_voxel_size_f);
+                    vec3 delta = origin - clamp(origin, lo, hi);
+                    float distance_sq = dot(delta, delta);
+                    vec3 furthest = mix(lo, hi, pos_normal);
+                    if (distance_sq <= reach_sq && dot(furthest - origin, normal) >= -voxel_endpoint_epsilon) {
+                        float w = float(count) / (1.0 + max(distance_sq, min_dist_sq));
+                        total += w;
+                        if (query) {
+                            if (i == target_child) {
+                                chosen = i;
+                                chosen_w = w;
+                            }
+                        } else if (chosen < 0) {
+                            chosen = i;
+                            chosen_w = w;
+                        } else {
+                            float thresh = w / total;
+                            if (u < thresh) {
+                                chosen = i;
+                                chosen_w = w;
+                                u = min(u / thresh, 0.99999994);
+                            } else {
+                                u = min((u - thresh) / max(1.0 - thresh, 1e-30), 0.99999994);
+                            }
+                        }
+                    }
                 }
             }
         }
-        if (weights[chosen] <= 0.0) {
+        if (chosen < 0 || total <= 0.0 || chosen_w <= 0.0) {
             return result;
         }
-        probability *= weights[chosen] / total;
+        probability *= chosen_w / total;
         leaf = first + ivec3(chosen & 1, (chosen >> 1) & 1, chosen >> 2);
     }
 
@@ -113,34 +291,123 @@ EmitterSelection select_voxel_emitter(
         return result;
     }
 
-    uint rank = min(uint(random_dimension(seed, EMITTER_ROOT_LEVEL) * float(count)), count - 1u);
-    for (int word = 0; word < emitter_mask_words; ++word) {
-        uint mask = load_emitter_word(first_word + word);
-        uint word_count = uint(bitCount(mask));
-        if (rank < word_count) {
-            for (uint skip = 0u; skip < rank; ++skip) {
-                mask &= mask - 1u;
-            }
-            int local = word * 32 + findLSB(mask);
-            ivec3 cell = leaf * 8 + emitter_unflatten(local, ivec3(8));
-            return EmitterSelection(cell, probability / float(count));
-        }
-        rank -= word_count;
+    ivec3 cell = sample_emitter_in_leaf(leaf, count, seed, EMITTER_ROOT_LEVEL);
+    if (cell.x >= 0) {
+        result = EmitterSelection(cell, probability / float(count));
     }
     return result;
 }
 
-EmitterSelection select_voxel_emitter(vec3 origin, vec3 normal, uint seed, ivec3 target) {
-    return select_voxel_emitter(origin, normal, seed, target, rt_primary_max_distance);
+// Sample with a prebuilt EmitterLocalCache, pinning cached local p_global and
+// converging local-query + global-sample lanes into one lockstep octree walk.
+EmitterSelection select_voxel_emitter_sampled(
+    vec3 origin, vec3 normal, uint seed, float max_distance, EmitterLocalCache lcache,
+    float branch_u, inout ivec3 last_local_cell, inout float last_local_g_pmf
+) {
+    EmitterSelection result = EmitterSelection(ivec3(-1), 0.0);
+    bool take_local = lcache.alpha > 0.0 && branch_u < lcache.alpha;
+    ivec3 cell = ivec3(-1);
+    float p_local = 0.0;
+    float g_pmf = 0.0;
+    bool need_global = true;
+
+    if (take_local) {
+        ivec3 l1_size = emitter_level_size(1);
+        int l1_offset = emitter_level_offset(0) + emitter_leaf_count;
+        ivec3 chosen_p = ivec3(-1);
+        float chosen_prob = 0.0;
+        uint chosen_cnt = 0u;
+        uint mask = lcache.active_mask;
+        if ((mask & (mask - 1u)) == 0u) {
+            // Single active local super-brick: skip weight recomputation completely.
+            int bit = findLSB(mask);
+            chosen_p = lcache.l1_base + ivec3(bit & 1, (bit >> 1) & 1, bit >> 2);
+            chosen_cnt = load_emitter_word(l1_offset + emitter_flatten(chosen_p, l1_size));
+            chosen_prob = 1.0;
+        } else {
+            bvec3 pos_normal = greaterThanEqual(normal, vec3(0.0));
+            float pick = random_dimension(seed, EMITTER_ROOT_LEVEL + 11) * lcache.local_total;
+            while (mask != 0u) {
+                int bit = findLSB(mask);
+                mask &= mask - 1u;
+                ivec3 p = lcache.l1_base + ivec3(bit & 1, (bit >> 1) & 1, bit >> 2);
+                uint cnt;
+                float w = emitter_local_l1_weight(
+                    p, l1_size, l1_offset, origin, normal, pos_normal, cnt
+                );
+                if (w > 0.0) {
+                    chosen_p = p;
+                    chosen_prob = w / lcache.local_total;
+                    chosen_cnt = cnt;
+                    if (pick < w) {
+                        break;
+                    }
+                    pick -= w;
+                }
+            }
+        }
+        if (chosen_p.x < 0 || chosen_cnt == 0u) {
+            return result;
+        }
+        cell = sample_emitter_in_l1(chosen_p, chosen_cnt, seed, EMITTER_ROOT_LEVEL + 12);
+        if (cell.x < 0) {
+            return result;
+        }
+        p_local = chosen_prob / float(chosen_cnt);
+        if (cell == last_local_cell) {
+            g_pmf = last_local_g_pmf;
+            need_global = false;
+        }
+    }
+
+    if (need_global) {
+        EmitterSelection g = select_voxel_emitter_global(
+            origin, normal, take_local ? 0u : seed, cell, max_distance
+        );
+        if (take_local) {
+            g_pmf = g.pmf;
+            last_local_cell = cell;
+            last_local_g_pmf = g_pmf;
+        } else {
+            if (g.pmf <= 0.0) {
+                return result;
+            }
+            cell = g.cell;
+            g_pmf = g.pmf;
+            p_local = emitter_local_cell_pmf(cell, lcache, origin, normal, max_distance);
+        }
+    }
+
+    return EmitterSelection(cell, (1.0 - lcache.alpha) * g_pmf + lcache.alpha * p_local);
+}
+
+// Query exact defensive-mixture PMF p(target) = (1 - alpha) * p_global + alpha * p_local
+// without pulling sampling loops or weights[8] into query-only shaders.
+float query_voxel_emitter_pmf(vec3 origin, vec3 normal, ivec3 target, float max_distance) {
+    float g_pmf = query_voxel_emitter_global(origin, normal, target, max_distance);
+    if (g_pmf <= 0.0) {
+        return 0.0;
+    }
+    EmitterLocalCache lcache = build_emitter_local_cache(origin, normal, max_distance);
+    float p_local = emitter_local_cell_pmf(target, lcache, origin, normal, max_distance);
+    return (1.0 - lcache.alpha) * g_pmf + lcache.alpha * p_local;
+}
+
+EmitterSelection sample_voxel_emitter(vec3 origin, vec3 normal, uint seed, float max_distance) {
+    EmitterLocalCache lcache = build_emitter_local_cache(origin, normal, max_distance);
+    ivec3 dummy_cell = ivec3(-1);
+    float dummy_pmf = 0.0;
+    float branch_u = random_dimension(seed, EMITTER_ROOT_LEVEL + 10);
+    return select_voxel_emitter_sampled(
+        origin, normal, seed, max_distance, lcache, branch_u, dummy_cell, dummy_pmf
+    );
 }
 
 vec3 emitter_facing_sides(EmitterBox box, vec3 origin) {
     return vec3(greaterThan(origin, box.hi)) - vec3(lessThan(origin, box.lo));
 }
 
-// True when neighbor cell completely buries the emitter face on (axis, side).
-// Only faces flush with the cell boundary (lo == 0 for -side, hi == 1 for +side)
-// can be buried by an adjacent voxel.
+// True when neighbor buries an emitter face flush with the cell boundary.
 bool voxel_occludes_emitter_face(
     usampler3D grid, ivec3 neighbor, int axis, float side, EmitterBox box
 ) {
@@ -193,10 +460,8 @@ float emitter_solid_angle_pdf(float pmf, float area_pdf_inv, float distance_sq, 
     return cosine > 0.0 && area_pdf_inv > 0.0 ? pmf * distance_sq / (area_pdf_inv * cosine) : 0.0;
 }
 
-// Projected-area face weights for exposed emitter sides. Weighting each facing
-// side by (face_area * projected_cosine) eliminates step discontinuities across
-// block planes (x = cx, y = cy, z = cz) where a newly visible side face starts
-// at cos_y ~ 0, removing both grazing wasted samples and 1-block variance bands.
+// Projected-area face weights (area * cos) eliminate grazing steps and
+// 1-block variance bands when crossing emitter cell planes.
 vec3 emitter_face_weights(EmitterBox box, vec3 sides, vec3 rel_origin) {
     vec3 areas = emitter_face_areas(box) * abs(sides);
     vec3 center = 0.5 * (box.lo + box.hi);
@@ -216,10 +481,8 @@ vec3 emitter_face_weights(EmitterBox box, vec3 sides, vec3 rel_origin) {
     return weights;
 }
 
-// Prefer NEE/ReSTIR over cosine BSDF hits at normal distances so compact high-
-// radiance emitters (e.g. torches, nearby shroomlights) do not inject BSDF
-// sparkles, while preserving BSDF protection near 1/r^2 contact singularities.
-// Identical factor on both NEE and BSDF sides keeps w_nee + w_bsdf == 1 exactly.
+// Bias MIS toward NEE/ReSTIR to suppress compact-emitter BSDF sparkles while
+// preserving BSDF near contact; matched on both sides so w_nee + w_bsdf == 1.
 const float emitter_nee_mis_bias = 6.0;
 
 float power_mis(float a, float b) {
@@ -234,7 +497,7 @@ float primary_emitter_pdf(
     if (!emitter_index_member(hit.payload)) {
         return 0.0;
     }
-    EmitterSelection selected = select_voxel_emitter(origin, normal, 0u, hit.cell, max_distance);
+    float pmf = query_voxel_emitter_pmf(origin, normal, hit.cell, max_distance);
     EmitterBox box = voxel_emitter_box_from_payload(hit.payload);
     vec3 sides = emitter_exposed_sides(grid, hit.cell, box, origin);
     vec3 areas = emitter_face_areas(box) * abs(sides);
@@ -246,7 +509,7 @@ float primary_emitter_pdf(
     }
     // Effective 1 / p_A for the hit face: areas[axis] * total_w / weights[axis].
     float inv_p_area = areas[hit_axis] * (total_w / weights[hit_axis]);
-    return emitter_solid_angle_pdf(selected.pmf, inv_p_area, sqr(hit.distance), dot(hit.normal, -direction));
+    return emitter_solid_angle_pdf(pmf, inv_p_area, sqr(hit.distance), dot(hit.normal, -direction));
 }
 
 float primary_emitter_pdf(usampler3D grid, VoxelHit hit, vec3 origin, vec3 normal, vec3 direction) {
@@ -260,8 +523,8 @@ vec4 sample_direct_emitter_ex(
     float bsdf_ray_count, float max_distance, bool two_sided, out ivec3 sampled_cell
 ) {
     sampled_cell = ivec3(-1);
-    EmitterSelection selected = select_voxel_emitter(
-        origin, two_sided ? vec3(0.0) : normal, seed, ivec3(-1), max_distance
+    EmitterSelection selected = sample_voxel_emitter(
+        origin, two_sided ? vec3(0.0) : normal, seed, max_distance
     );
     if (selected.pmf <= 0.0) {
         return vec4(0.0);
