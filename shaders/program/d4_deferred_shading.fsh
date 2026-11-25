@@ -512,7 +512,8 @@ void main() {
 
         vec3 indirect_radiance = sample_rtgi_diffuse(
             texel, full_size, position_view, position_scene, flat_normal,
-            material_mask, surface.kind, light_levels, cloud_shadows
+            material_mask, surface.kind, light_levels, cloud_shadows,
+            max_of(shadows)
         ) * RTGI_INTENSITY;
         fragment_color = get_diffuse_lighting(
             material,

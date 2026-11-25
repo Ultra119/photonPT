@@ -87,7 +87,9 @@ vec3 sss_approx(
 }
 #endif
 
-vec3 rtgi_fallback_radiance(vec2 light_levels, vec3 flat_normal, float cloud_shadows) {
+vec3 rtgi_fallback_radiance(
+    vec2 light_levels, vec3 flat_normal, float cloud_shadows, float sun_visibility
+) {
     // Reuse the underlying lightmap falloff only where traced diffuse has no
     // compatible support (or for forward translucent callers). Keep the
     // fallback deterministic and in E/pi units.
@@ -95,16 +97,29 @@ vec3 rtgi_fallback_radiance(vec2 light_levels, vec3 flat_normal, float cloud_sha
     float falloff = pow8(blocklight) + 0.18 * sqr(blocklight) + 0.16 * dampen(blocklight);
     vec3 block = (rcp_pi * blocklight_scale * falloff) * blocklight_color;
 
+    float sl = clamp01(light_levels.y);
+    // Steeper skylight curve keeps open flat ground (sl = 1.0 -> 1.0) intact
+    // while darkening under-forest canopies and cavities to match traced PT.
+    float sky_vis = sl * sl * sl * sqrt(sl);
+
 #if defined PROGRAM_DEFERRED4
 #if defined WORLD_OVERWORLD
-    // Match path_trace.glsl's sky-map cosine-hemisphere integral on open
-    // surfaces and estimate warm sunlit ground bounce on vertical/underside
-    // faces so the RT coverage boundary has no brightness drop or blue shift.
-    float sky_vis = sqr(light_levels.y);
+    // Match path_trace.glsl's sky-map cosine-hemisphere integral on open flat
+    // surfaces while gating warm sunlit ground bounce by local shadow visibility
+    // and accounting for stepped-terrain horizon occlusion on shadowed sides.
     vec3 sky_up = sky_fallback_color * SKYLIGHT_I;
-    vec3 ground_bounce = 0.28 * (sky_up + max0(light_color) * (cloud_shadows * max0(light_dir.y) * rcp_pi));
-    float up_factor = 0.5 + 0.5 * clamp(flat_normal.y, -1.0, 1.0);
-    vec3 environment = mix(ground_bounce, sky_up, up_factor) * sky_vis;
+    float lit_bounce = mix(0.12, 1.0, clamp01(sun_visibility));
+    vec3 ground_bounce = 0.18 * (
+        sky_up * 0.65
+        + max0(light_color) * (lit_bounce * cloud_shadows * max0(light_dir.y) * rcp_pi)
+    );
+    float up_lin = clamp(0.5 + 0.5 * flat_normal.y, 0.0, 1.0);
+    float up_factor = mix(up_lin, sqr(up_lin), 0.55);
+    float side_mask = 1.0 - max0(flat_normal.y);
+    float anti_sun = clamp01(-dot(flat_normal, light_dir));
+    float shadow_side_dim = 1.0
+        - (1.0 - clamp01(sun_visibility)) * side_mask * (0.18 + 0.17 * anti_sun);
+    vec3 environment = mix(ground_bounce, sky_up, up_factor) * (sky_vis * shadow_side_dim);
 #elif defined WORLD_NETHER
     vec3 environment = ambient_color;
 #else
@@ -112,7 +127,11 @@ vec3 rtgi_fallback_radiance(vec2 light_levels, vec3 flat_normal, float cloud_sha
 #endif
 #else
 #if defined WORLD_OVERWORLD
-    vec3 environment = ambient_color * (rcp_pi * SKYLIGHT_I * sqr(light_levels.y));
+    float up_lin = clamp(0.5 + 0.5 * flat_normal.y, 0.0, 1.0);
+    float side_mask = 1.0 - max0(flat_normal.y);
+    float shadow_side_dim = 1.0 - (1.0 - clamp01(sun_visibility)) * side_mask * 0.25;
+    vec3 environment = ambient_color
+        * (rcp_pi * SKYLIGHT_I * sky_vis * mix(0.35, 1.0, up_lin) * shadow_side_dim);
 #elif defined WORLD_NETHER
     vec3 environment = ambient_color;
 #else
@@ -123,7 +142,7 @@ vec3 rtgi_fallback_radiance(vec2 light_levels, vec3 flat_normal, float cloud_sha
 }
 
 vec3 rtgi_fallback_radiance(vec2 light_levels) {
-    return rtgi_fallback_radiance(light_levels, vec3(0.0, 1.0, 0.0), 1.0);
+    return rtgi_fallback_radiance(light_levels, vec3(0.0, 1.0, 0.0), 1.0, 1.0);
 }
 
 #ifdef DIFFUSE_USE_RTGI
@@ -152,16 +171,18 @@ float rtgi_upsample_weight(
 vec3 sample_rtgi_diffuse(
     ivec2 pixel, ivec2 full_size, vec3 view_pos, vec3 scene_pos,
     vec3 flat_normal, uint material, uint kind, vec2 light_levels,
-    float cloud_shadows
+    float cloud_shadows, float sun_visibility
 ) {
-    vec3 fallback = rtgi_fallback_radiance(light_levels, flat_normal, cloud_shadows);
+    vec3 fallback = rtgi_fallback_radiance(light_levels, flat_normal, cloud_shadows, sun_visibility);
     if (kind != rtgi_world || !rtgi_finite(vec4(scene_pos, view_pos.z)) || view_pos.z >= 0.0) {
         return fallback;
     }
 
     vec3 local = scene_to_voxel_space(scene_pos);
     vec3 edge = min(local, rt_voxel_size_f - local);
-    float coverage = smoothstep(0.0, 8.0, min(edge.x, min(edge.y, edge.z)));
+    float fade_xz = min(12.0, 0.25 * rt_voxel_size_f.y);
+    float coverage = smoothstep(0.0, fade_xz, min(edge.x, edge.z))
+        * smoothstep(0.0, 8.0, edge.y);
     RtgiGrid grid = rtgi_grid(full_size, textureSize(rtgi_filtered_sampler, 0));
     if (coverage <= 0.0 || !rtgi_in_bounds(pixel, grid.full_active)
         || any(equal(grid.gi_active, ivec2(0)))) {
@@ -421,7 +442,16 @@ vec3 get_diffuse_lighting(
         NoV,
         NoH,
         LoV,
-        rtgi_fallback_radiance(light_levels)
+        rtgi_fallback_radiance(
+            light_levels,
+            flat_normal,
+#ifdef CLOUD_SHADOWS
+            cloud_shadows,
+#else
+            1.0,
+#endif
+            max_of(shadows)
+        )
     );
 }
 
