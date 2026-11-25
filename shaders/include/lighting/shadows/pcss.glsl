@@ -29,6 +29,9 @@ const float shadow_map_pixel_size = rcp(float(shadow_map_res));
 vec2 blocker_search(
     vec3 shadow_clip_pos,
     vec2 receiver_plane_slope,
+    vec2 slope_dir,
+    float slope_compress,
+    float max_slope_dz,
     float search_radius_world,
     float sss_radius_world,
     float dither,
@@ -54,6 +57,9 @@ vec2 blocker_search(
 
     for (int i = 0; i < step_count; ++i) {
         vec2 offset = vogel_disc_sample(i, step_count, dither * tau) * radius;
+        // Compress along the receiver's uphill gradient so grazing walls sample
+        // a world-isotropic disc instead of stretching 1/NoL across 1-block roofs.
+        offset -= slope_dir * (dot(offset, slope_dir) * (1.0 - slope_compress));
         vec2 uv = shadow_clip_pos.xy + offset;
         uv /= get_distortion_factor(uv);
         uv = uv * 0.5 + 0.5;
@@ -67,7 +73,7 @@ vec2 blocker_search(
             ivec2(shadow_map_res - 1)
         );
         float depth = texelFetch(shadowtex0, texel, 0).x;
-        float ref_z_tap = ref_z + clamp(dot(receiver_plane_slope, offset), -0.04, 0.0);
+        float ref_z_tap = ref_z + clamp(dot(receiver_plane_slope, offset), -max_slope_dz, 0.0);
         float weight = step(depth, ref_z_tap);
 
         depth_sum += weight * depth;
@@ -125,6 +131,9 @@ vec3 shadow_pcf(
     vec3 shadow_screen_pos,
     vec3 shadow_clip_pos,
     vec2 receiver_plane_slope,
+    vec2 slope_dir,
+    float slope_compress,
+    float max_slope_dz,
     float penumbra_size,
     float dither
 ) {
@@ -145,19 +154,20 @@ vec3 shadow_pcf(
 
     // Combine opaque visibility and translucent transmittance per tap so
     // colored penumbra edges evaluate avg(V * T) across the full kernel.
-    // Apply uphill receiver-plane depth bias (clamped <= 0) so wide PCF discs
-    // on grazing vertical walls follow the wall plane uphill instead of
-    // self-shadowing into horizontal shadow-map texel stripes.
+    // Compress the PCF kernel along the uphill receiver gradient by |shadow_normal.z|
+    // and cap uphill depth bias strictly below 1-block roof thickness so wide cloud
+    // penumbras never stretch or punch sunlight through ceilings at wall-ceiling joints.
     for (int i = 0; i < step_count; ++i) {
         vec2 offset
             = vogel_disc_sample(i, step_count, dither * tau) * filter_radius;
+        offset -= slope_dir * (dot(offset, slope_dir) * (1.0 - slope_compress));
 
         vec2 uv = shadow_clip_pos.xy + offset;
         uv /= get_distortion_factor(uv);
         uv = uv * 0.5 + 0.5;
 
         bool in_bounds = clamp01(uv) == uv;
-        float tap_z = shadow_screen_pos.z + clamp(dot(receiver_plane_slope, offset), -0.04, 0.0);
+        float tap_z = shadow_screen_pos.z + clamp(dot(receiver_plane_slope, offset), -max_slope_dz, 0.0);
         float vis = in_bounds ? texture(shadowtex1, vec3(uv, tap_z)) : 1.0;
         opaque_sum += vis;
 
@@ -249,16 +259,28 @@ vec3 get_filtered_shadows(
         = -(shadowProjection[2].z * (SHADOW_DEPTH_SCALE * 0.5) / nz_safe)
         * vec2(shadow_normal.x / shadowProjection[0].x,
                shadow_normal.y / shadowProjection[1].y);
+    float slope_len_sq = dot(receiver_plane_slope, receiver_plane_slope);
+    vec2 slope_dir = slope_len_sq > 1e-12
+        ? receiver_plane_slope * inversesqrt(slope_len_sq)
+        : vec2(0.0);
+    // Pre-compress PCF/blocker discs along the uphill gradient by |shadow_normal.z|
+    // so grazing walls project a world-isotropic disc instead of stretching by 1/NoL.
+    float slope_compress = clamp(abs(shadow_normal.z), 0.15, 1.0);
+    // Hard world-space cap on uphill depth bias (< 0.35 * light_dir.y blocks) so
+    // wide cloud penumbras can never push tap_z above a 1-block-thick solid roof.
+    float depth_to_world
+        = 2.0 * abs(shadowProjectionInverse[2].z) * rcp(SHADOW_DEPTH_SCALE);
+    float max_slope_dz = (0.35 * max(light_dir.y, 0.25)) / max(depth_to_world, 1.0);
 
     float cloud_scatter = clamp01(1.0 - cloud_shadows);
 
 #ifdef SHADOW_VPS
 #if INFO <= 1
-    const float cloud_search_mult = 2.4;
+    const float cloud_search_mult = 1.8;
 #elif INFO == 2
-    const float cloud_search_mult = 4.4;
+    const float cloud_search_mult = 2.6;
 #else
-    const float cloud_search_mult = 6.4;
+    const float cloud_search_mult = 3.2;
 #endif
     float elevation_scale = 0.5 + 0.5 * linear_step(0.2, 0.4, light_dir.y);
     float max_penumbra_world
@@ -271,6 +293,9 @@ vec3 get_filtered_shadows(
     vec2 blocker_search_result = blocker_search(
         shadow_clip_pos,
         receiver_plane_slope,
+        slope_dir,
+        slope_compress,
+        max_slope_dz,
         search_radius_world,
         sss_radius_world,
         dither,
@@ -288,8 +313,6 @@ vec3 get_filtered_shadows(
 
     // Exact orthographic world-space blocker distance and physical sun/moon
     // angular penumbra, widened by forward scattering through cloud droplets.
-    float depth_to_world
-        = 2.0 * abs(shadowProjectionInverse[2].z) * rcp(SHADOW_DEPTH_SCALE);
     float blocker_distance
         = max0(shadow_screen_pos.z - blocker_search_result.x) * depth_to_world;
 #if defined WORLD_OVERWORLD
@@ -317,6 +340,9 @@ vec3 get_filtered_shadows(
         shadow_screen_pos,
         shadow_clip_pos,
         receiver_plane_slope,
+        slope_dir,
+        slope_compress,
+        max_slope_dz,
         penumbra_size,
         dither
     );
