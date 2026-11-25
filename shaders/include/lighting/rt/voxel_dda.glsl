@@ -2,6 +2,7 @@
 #define INCLUDE_LIGHTING_RT_VOXEL_DDA
 
 #include "/include/lighting/voxel/voxel_storage.glsl"
+uniform usampler3D voxel_shape_sampler;
 #ifdef VOXEL_DDA_USE_OCCUPANCY
 #include "/include/lighting/voxel/emitter_index_layout.glsl"
 uniform usampler2D rtgi_emitter_marks_sampler;
@@ -126,6 +127,21 @@ bool voxel_stair_hit(
     return slab_hit || arm_hit;
 }
 
+bool voxel_custom_box_at(ivec3 cell, out EmitterBox box) {
+    uint sw = texelFetch(voxel_shape_sampler, cell, 0).r;
+    if ((sw & (3u << 30u)) != (3u << 30u)) {
+        box = EmitterBox(vec3(0.0), vec3(1.0));
+        return false;
+    }
+    uvec3 qlo = uvec3(sw & 15u, (sw >> 4u) & 15u, (sw >> 8u) & 15u);
+    uvec3 qhi = max(
+        uvec3((sw >> 12u) & 15u, (sw >> 16u) & 15u, (sw >> 20u) & 15u) + 1u,
+        qlo + 1u
+    );
+    box = EmitterBox(vec3(qlo) * (1.0 / 16.0), vec3(qhi) * (1.0 / 16.0));
+    return true;
+}
+
 bool voxel_shape_hit(
     VoxelRay ray, ivec3 cell, uint payload, uint block_id, uint shape, float start, float end,
     vec3 entry_normal, out float distance, out vec3 normal
@@ -144,6 +160,12 @@ bool voxel_shape_hit(
     if (shape == VOXEL_SHAPE_CUBE) {
         // The DDA has already intersected the entire cell.
         if (entry_normal != vec3(0.0)) {
+            distance = start;
+            normal = entry_normal;
+            return true;
+        }
+    } else if (shape == VOXEL_SHAPE_OTHER) {
+        if (!voxel_custom_box_at(cell, box) && entry_normal != vec3(0.0)) {
             distance = start;
             normal = entry_normal;
             return true;
@@ -283,7 +305,22 @@ VoxelHit trace_voxel_segment(
                         && max_of(result.transmittance) > 0.20;
                     if (glass) {
                         if (mode != voxel_ray_ao) {
-                            result.transmittance *= max0(voxel_tint_color_table[block_id - 81u] * rec709_to_rec2020);
+                            uint gshape = (payload >> 19u) & 15u;
+                            bool hits_glass = true;
+                            if (gshape == VOXEL_SHAPE_OTHER) {
+                                EmitterBox gbox;
+                                if (voxel_custom_box_at(cell, gbox)) {
+                                    float gd;
+                                    vec3 gn;
+                                    hits_glass = voxel_box_hit(
+                                        ray, vec3(cell) + gbox.lo, vec3(cell) + gbox.hi,
+                                        t, cell_end, gd, gn
+                                    );
+                                }
+                            }
+                            if (hits_glass) {
+                                result.transmittance *= max0(voxel_tint_color_table[block_id - 81u] * rec709_to_rec2020);
+                            }
                         }
                     } else if (leaf) {
                         // Neutral Beer-Lambert canopy attenuation (0.76/voxel) with a one-time

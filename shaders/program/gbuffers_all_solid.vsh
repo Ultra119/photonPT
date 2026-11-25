@@ -102,7 +102,7 @@ uniform int currentRenderedItemId;
 #include "/include/vertex/displacement.glsl"
 #include "/include/vertex/utility.glsl"
 
-#if defined PROGRAM_GBUFFERS_TERRAIN
+#if defined PROGRAM_GBUFFERS_TERRAIN || defined PROGRAM_GBUFFERS_BLOCK
 #include "/include/lighting/voxel/voxel_update.glsl"
 #endif
 
@@ -113,7 +113,7 @@ void main() {
     material_mask = get_material_mask();
     tbn = get_tbn_matrix();
 
-#if defined PROGRAM_GBUFFERS_TERRAIN
+#if defined PROGRAM_GBUFFERS_TERRAIN || defined PROGRAM_GBUFFERS_BLOCK
     update_rt_voxel_grid(material_mask, tint.rgb, at_midBlock, light_levels, mc_midTexCoord, uv);
 #endif
 
