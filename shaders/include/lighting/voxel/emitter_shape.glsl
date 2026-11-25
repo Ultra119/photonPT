@@ -55,7 +55,7 @@ EmitterBox voxel_emitter_box_from_payload(uint payload) {
     // torchflower): diagonal quad vertices span [0, 1] across the cell even
     // though the glowing volume sits inside the block. Pulling full-span axes
     // inward prevents a fake 1x1x1 cube from engulfing adjacent wall/ceiling
-    // receiver origins or blocking bounce/AO rays.
+    // torchflower)
     bool is_cross_emitter = block_id == 55u || block_id == 37u || block_id == 40u
         || ((block_id == 36u || block_id == 43u) && hi.y > 0.5);
     if (is_cross_emitter) {
@@ -72,9 +72,7 @@ EmitterBox voxel_emitter_box_from_payload(uint payload) {
         return EmitterBox(lo, hi);
     }
 
-    // Torches: trim the non-emissive wooden stick to the glowing flame head at
-    // the top-outer tip of the captured AABB so wall/floor torches do not stamp
-    // a dark stick footprint onto the mounting surface.
+    // Torches
     bool is_torch = block_id == voxel_torch_id || block_id == voxel_soul_torch_id
         || block_id == voxel_copper_torch_id || block_id == voxel_redstone_torch_id;
     if (is_torch) {
@@ -90,8 +88,7 @@ EmitterBox voxel_emitter_box_from_payload(uint payload) {
         }
     }
 
-    // Lanterns: trim the hanging iron chain so it does not project a dark
-    // footprint onto the ceiling above the lantern.
+    // Lanterns
     bool is_lantern = block_id == voxel_lantern_id || block_id == voxel_soul_lantern_id
         || block_id == voxel_copper_lantern_id;
     if (is_lantern) {
@@ -103,10 +100,16 @@ EmitterBox voxel_emitter_box_from_payload(uint payload) {
         }
     }
 
-    // Campfires (hi.y <= 0.5): keep the emitting core inside the log ring.
+    // Campfire
     if (block_id == 36u || block_id == 43u) {
         lo = max(lo, vec3(2.0 / 16.0, 1.0 / 16.0, 2.0 / 16.0));
         hi = min(hi, vec3(14.0 / 16.0, max(hi.y, 6.0 / 16.0), 14.0 / 16.0));
+    }
+
+    // Dragon egg
+    if (block_id == voxel_dragon_egg_id) {
+        lo = max(lo, vec3(2.0 / 16.0, 1.0 / 16.0, 2.0 / 16.0));
+        hi = min(hi, vec3(14.0 / 16.0, 13.0 / 16.0, 14.0 / 16.0));
     }
 
     // General safeguard for all non-full-cube emitters (end rods, candles, glow

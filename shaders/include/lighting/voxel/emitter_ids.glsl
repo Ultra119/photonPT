@@ -14,6 +14,7 @@ const uint voxel_lava_cauldron_id = 121u;
 const uint voxel_shroomlight_id = 122u;
 const uint voxel_furnace_id = 123u;
 const uint voxel_crying_obsidian_id = 124u;
+const uint voxel_dragon_egg_id = 125u;
 
 uint emitter_palette_id(uint block_id) {
     switch (block_id) {
@@ -28,13 +29,14 @@ uint emitter_palette_id(uint block_id) {
         case voxel_shroomlight_id: return 40u;
         case voxel_furnace_id: return 36u;
         case voxel_crying_obsidian_id: return 47u;
+        case voxel_dragon_egg_id: return 54u;
         default: return block_id;
     }
 }
 
 bool voxel_emitter_id(uint block_id) {
     return (32u <= block_id && block_id < 80u && block_id != 58u && block_id != 63u)
-        || (voxel_torch_id <= block_id && block_id <= voxel_crying_obsidian_id);
+        || (voxel_torch_id <= block_id && block_id <= voxel_dragon_egg_id);
 }
 
 // Wispy foliage emitters (Nether fungi, eyeblossoms) stay pass-through in DDA
