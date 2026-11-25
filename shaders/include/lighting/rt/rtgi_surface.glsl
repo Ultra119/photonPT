@@ -143,8 +143,19 @@ bool rtgi_is_plant(uint material) {
 }
 bool rtgi_is_foliage(uint material) { return rtgi_is_plant(material) || material == 5u; }
 
+bool rtgi_is_opaque_solid(uint material) {
+    return material == 0u
+        || (material >= 6u && material <= 13u)
+        || (material >= 16u && material <= 31u)
+        || material == 58u
+        || (material >= 97u && material <= 113u && material != 102u);
+}
+
 bool rtgi_material_matches(uint a, uint b) {
     if (a == b) {
+        return true;
+    }
+    if (rtgi_is_opaque_solid(a) && rtgi_is_opaque_solid(b)) {
         return true;
     }
     return rtgi_is_plant(a) && rtgi_is_plant(b)
