@@ -10,28 +10,33 @@ struct VoxelSample {
     float block_light;
     float sky_light;
     uint shape_class;
+    EmitterBox emitter_box;
     bool is_solid;
     bool is_translucent;
     bool is_emitter;
 };
 
-// Pack/unpack a full-RGB albedo into 15 bits (RGB555). The voxel image is a
-// single-channel R32UI 3D image, so each texel is one deterministic 32-bit
-// payload. imageAtomicMax() is used by the voxelization pass; the most
-// significant fields therefore win in a write race:
+// The voxel image is a single-channel R32UI 3D image with two deterministic
+// 32-bit layouts discriminated by bit 31 (emitter flag):
 //
+// Non-emitter (bit 31 == 0), merged with imageAtomicMax():
 //   bits  0..14 : albedo RGB555 (15 bits)
 //   bits 15..16 : block light (2 bits, 0..3)
 //   bits 17..18 : face priority (2 bits: 0=bottom, 1=side, 2=top)
 //   bits 19..22 : shape class (4 bits, 0..15)
 //   bit  23     : translucent flag (1 bit)
 //   bits 24..30 : block ID (7 bits, 0..127)
-//   bit  31     : emitter flag (1 bit)
+//   bit  31     : 0
+//
+// Emitter (bit 31 == 1), merged with imageAtomicCompSwap() per-axis min/max:
+//   bits  0..11 : quantized lo.xyz (3 x 4 bits, 0..15 -> 0/16 .. 15/16)
+//   bits 12..23 : quantized hi.xyz - 1 (3 x 4 bits, 0..15 -> 1/16 .. 16/16)
+//   bits 24..30 : block ID (7 bits, 0..127)
+//   bit  31     : 1
 //
 // Air is all-zero and always loses to any solid voxel. Emitter flag occupies
-// bit 31 so light-emitting blocks always beat non-emitting geometry in write
-// races, while face priority ensures upward-facing surfaces (such as biome
-// grass or nylium tops) win over dirt sides and bottoms on the same block.
+// bit 31 so emitters always beat non-emitting geometry in write races and
+// carry their live GPU-captured 3D mesh AABB with zero extra memory/fetches.
 uint pack_unorm_rgb555(vec3 color) {
     uvec3 quantized = uvec3(clamp(color, vec3(0.0), vec3(1.0)) * 31.0 + 0.5);
     return quantized.r | (quantized.g << 5u) | (quantized.b << 10u);
@@ -95,14 +100,23 @@ VoxelSample unpack_voxel_data(uint packed_val) {
     VoxelSample sample_data;
     sample_data.block_id = voxel_block_id(packed_val);
     sample_data.is_solid = sample_data.block_id != 0u;
-    sample_data.block_light = float((packed_val >> 15u) & 0x3u) * (1.0 / 3.0);
     sample_data.sky_light = 0.0;
-    sample_data.shape_class = (packed_val >> 19u) & 0xFu;
+    bool emit_bit = (packed_val >> 31u) != 0u;
+    sample_data.is_emitter = emit_bit || voxel_emitter_id(sample_data.block_id);
 
-    sample_data.is_translucent = ((packed_val >> 23u) & 1u) != 0u;
-    sample_data.is_emitter = ((packed_val >> 31u) != 0u) || voxel_emitter_id(sample_data.block_id);
-
-    sample_data.color = unpack_unorm_rgb555(packed_val & 0x7FFFu);
+    if (emit_bit) {
+        sample_data.block_light = 1.0;
+        sample_data.shape_class = VOXEL_SHAPE_CUBE;
+        sample_data.is_translucent = false;
+        sample_data.emitter_box = voxel_emitter_box_from_payload(packed_val);
+        sample_data.color = get_voxel_light_color(emitter_palette_id(sample_data.block_id)) * 0.5;
+    } else {
+        sample_data.block_light = float((packed_val >> 15u) & 0x3u) * (1.0 / 3.0);
+        sample_data.shape_class = (packed_val >> 19u) & 0xFu;
+        sample_data.is_translucent = ((packed_val >> 23u) & 1u) != 0u;
+        sample_data.emitter_box = EmitterBox(vec3(0.0), vec3(1.0));
+        sample_data.color = unpack_unorm_rgb555(packed_val & 0x7FFFu);
+    }
 
     return sample_data;
 }

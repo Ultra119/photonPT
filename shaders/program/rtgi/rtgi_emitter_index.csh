@@ -34,15 +34,22 @@ layout(r32ui) writeonly uniform uimage2D rtgi_emitter_index_img;
 shared uint membership[512];
 shared uint word_counts[16];
 
-// True when all 6 faces of a full-cube emitter are buried by opaque full cubes
-// (matching voxel_occludes_full_face), so it can never emit a photon.
-bool emitter_cell_buried(ivec3 cell) {
+// True when all 6 faces of an emitter box are flush with the cell boundary and
+// completely buried by adjacent opaque cubes or overlapping emitter boxes
+// (matching voxel_occludes_emitter_face in rtgi_emitters.glsl).
+bool emitter_cell_buried(ivec3 cell, EmitterBox box) {
     const ivec3 offs[6] = ivec3[6](
         ivec3(1, 0, 0), ivec3(-1, 0, 0),
         ivec3(0, 1, 0), ivec3(0, -1, 0),
         ivec3(0, 0, 1), ivec3(0, 0, -1)
     );
     for (int i = 0; i < 6; ++i) {
+        int axis = i >> 1;
+        float side = (i & 1) == 0 ? 1.0 : -1.0;
+        bool flush = side < 0.0 ? (box.lo[axis] <= 0.0) : (box.hi[axis] >= 1.0);
+        if (!flush) {
+            return false;
+        }
         ivec3 nb = cell + offs[i];
         if (!is_inside_voxel_grid(nb)) {
             return false;
@@ -51,12 +58,24 @@ bool emitter_cell_buried(ivec3 cell) {
         uint bid = voxel_block_id(p);
         if (bid <= 5u || bid == 14u || bid == 15u || bid == 58u || bid == 80u
             || (81u <= bid && bid <= 96u)
-            || voxel_torch_emitter(bid) || voxel_lantern_emitter(bid)) {
+            || voxel_thin_plant_emitter(bid)) {
             return false;
         }
-        uint shape = (p >> 19u) & 15u;
-        if (!voxel_box_emitter(bid) && shape != VOXEL_SHAPE_CUBE) {
-            return false;
+        if ((p >> 31u) != 0u) {
+            EmitterBox nbox = voxel_emitter_box_from_payload(p);
+            bool touches = side < 0.0 ? (nbox.hi[axis] >= 1.0) : (nbox.lo[axis] <= 0.0);
+            int u = (axis + 1) % 3;
+            int v = (axis + 2) % 3;
+            if (!touches
+                || nbox.lo[u] > box.lo[u] || nbox.hi[u] < box.hi[u]
+                || nbox.lo[v] > box.lo[v] || nbox.hi[v] < box.hi[v]) {
+                return false;
+            }
+        } else {
+            uint shape = (p >> 19u) & 15u;
+            if (shape != VOXEL_SHAPE_CUBE) {
+                return false;
+            }
         }
     }
     return true;
@@ -82,8 +101,8 @@ void main() {
         uint payload = texelFetch(voxel_sampler, cell, 0).r;
         bool member = emitter_index_member(payload);
         if (member) {
-            uint bid = voxel_block_id(payload);
-            if (!voxel_torch_emitter(bid) && !voxel_lantern_emitter(bid) && emitter_cell_buried(cell)) {
+            EmitterBox box = voxel_emitter_box_from_payload(payload);
+            if (emitter_cell_buried(cell, box)) {
                 member = false;
             }
         }

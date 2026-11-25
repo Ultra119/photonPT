@@ -138,40 +138,52 @@ vec3 emitter_facing_sides(EmitterBox box, vec3 origin) {
     return vec3(greaterThan(origin, box.hi)) - vec3(lessThan(origin, box.lo));
 }
 
-// True when a neighbor cell contains a full 1x1x1 opaque cube that completely
-// buries the shared face of an adjacent full-cube emitter (so neither NEE nor
-// BSDF rays can ever reach that face).
-bool voxel_occludes_full_face(usampler3D grid, ivec3 neighbor) {
-    if (!is_inside_voxel_grid(neighbor)) {
+// True when neighbor cell completely buries the emitter face on (axis, side).
+// Only faces flush with the cell boundary (lo == 0 for -side, hi == 1 for +side)
+// can be buried by an adjacent voxel.
+bool voxel_occludes_emitter_face(
+    usampler3D grid, ivec3 neighbor, int axis, float side, EmitterBox box
+) {
+    bool flush = side < 0.0 ? (box.lo[axis] <= 0.0) : (box.hi[axis] >= 1.0);
+    if (!flush || !is_inside_voxel_grid(neighbor)) {
         return false;
     }
     uint payload = texelFetch(grid, neighbor, 0).r;
     uint block_id = voxel_block_id(payload);
     if (voxel_empty_for_transport(block_id) || block_id == 5u
-        || (81u <= block_id && block_id <= 96u)) {
+        || (81u <= block_id && block_id <= 96u)
+        || voxel_thin_plant_emitter(block_id)) {
         return false;
     }
-    if (voxel_torch_emitter(block_id) || voxel_lantern_emitter(block_id)) {
-        return false;
+    if ((payload >> 31u) != 0u) {
+        EmitterBox nbox = voxel_emitter_box_from_payload(payload);
+        bool touches = side < 0.0 ? (nbox.hi[axis] >= 1.0) : (nbox.lo[axis] <= 0.0);
+        if (!touches) {
+            return false;
+        }
+        int u = (axis + 1) % 3;
+        int v = (axis + 2) % 3;
+        return nbox.lo[u] <= box.lo[u] && nbox.hi[u] >= box.hi[u]
+            && nbox.lo[v] <= box.lo[v] && nbox.hi[v] >= box.hi[v];
     }
     uint shape = (payload >> 19u) & 15u;
-    return voxel_box_emitter(block_id) || shape == VOXEL_SHAPE_CUBE;
+    return shape == VOXEL_SHAPE_CUBE;
 }
 
 vec3 emitter_exposed_sides(
-    usampler3D grid, ivec3 cell, uint block_id, EmitterBox box, vec3 origin
+    usampler3D grid, ivec3 cell, EmitterBox box, vec3 origin
 ) {
     vec3 sides = emitter_facing_sides(box, origin - vec3(cell));
-    if (voxel_torch_emitter(block_id) || voxel_lantern_emitter(block_id)) {
-        return sides;
-    }
-    if (sides.x != 0.0 && voxel_occludes_full_face(grid, cell + ivec3(int(sides.x), 0, 0))) {
+    if (sides.x != 0.0
+        && voxel_occludes_emitter_face(grid, cell + ivec3(int(sides.x), 0, 0), 0, sides.x, box)) {
         sides.x = 0.0;
     }
-    if (sides.y != 0.0 && voxel_occludes_full_face(grid, cell + ivec3(0, int(sides.y), 0))) {
+    if (sides.y != 0.0
+        && voxel_occludes_emitter_face(grid, cell + ivec3(0, int(sides.y), 0), 1, sides.y, box)) {
         sides.y = 0.0;
     }
-    if (sides.z != 0.0 && voxel_occludes_full_face(grid, cell + ivec3(0, 0, int(sides.z)))) {
+    if (sides.z != 0.0
+        && voxel_occludes_emitter_face(grid, cell + ivec3(0, 0, int(sides.z)), 2, sides.z, box)) {
         sides.z = 0.0;
     }
     return sides;
@@ -223,9 +235,8 @@ float primary_emitter_pdf(
         return 0.0;
     }
     EmitterSelection selected = select_voxel_emitter(origin, normal, 0u, hit.cell, max_distance);
-    uint block_id = voxel_block_id(hit.payload);
-    EmitterBox box = voxel_emitter_box(block_id);
-    vec3 sides = emitter_exposed_sides(grid, hit.cell, block_id, box, origin);
+    EmitterBox box = voxel_emitter_box_from_payload(hit.payload);
+    vec3 sides = emitter_exposed_sides(grid, hit.cell, box, origin);
     vec3 areas = emitter_face_areas(box) * abs(sides);
     vec3 weights = emitter_face_weights(box, sides, origin - vec3(hit.cell));
     float total_w = dot(weights, vec3(1.0));
@@ -256,9 +267,10 @@ vec4 sample_direct_emitter_ex(
         return vec4(0.0);
     }
     const vec4 rejected = vec4(0.0, 0.0, 0.0, 1.0);
-    uint block_id = voxel_block_id(texelFetch(grid, selected.cell, 0).r);
-    EmitterBox box = voxel_emitter_box(block_id);
-    vec3 sides = emitter_exposed_sides(grid, selected.cell, block_id, box, origin);
+    uint payload = texelFetch(grid, selected.cell, 0).r;
+    uint block_id = voxel_block_id(payload);
+    EmitterBox box = voxel_emitter_box_from_payload(payload);
+    vec3 sides = emitter_exposed_sides(grid, selected.cell, box, origin);
     vec3 areas = emitter_face_areas(box) * abs(sides);
     vec3 weights = emitter_face_weights(box, sides, origin - vec3(selected.cell));
     float total_w = dot(weights, vec3(1.0));
@@ -304,7 +316,7 @@ vec4 sample_direct_emitter_ex(
     }
 
     float mis = power_mis(emitter_nee_mis_bias * light_pdf, bsdf_ray_count * bsdf_pdf);
-    vec3 radiance = get_voxel_emission(block_id) * hit.transmittance * ((bsdf_pdf / light_pdf) * mis);
+    vec3 radiance = get_voxel_emission(block_id, box) * hit.transmittance * ((bsdf_pdf / light_pdf) * mis);
     sampled_cell = selected.cell;
     return vec4(radiance, 2.0);
 }

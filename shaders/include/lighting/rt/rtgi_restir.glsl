@@ -142,7 +142,7 @@ bool restir_eval_geometry(
         return false;
     }
     block_id = voxel_block_id(payload);
-    EmitterBox box = voxel_emitter_box(block_id);
+    EmitterBox box = voxel_emitter_box_from_payload(payload);
     int axis;
     float side;
     restir_decode_face(s.face, axis, side);
@@ -166,7 +166,7 @@ bool restir_eval_geometry(
     if (cos_x <= 0.0 || cos_y <= 0.0) {
         return false;
     }
-    emission = get_voxel_emission(block_id);
+    emission = get_voxel_emission(block_id, box);
     return max_of(emission) > 0.0;
 }
 
@@ -246,8 +246,8 @@ RestirReservoir restir_sample_initial(
             continue;
         }
         uint block_id = voxel_block_id(payload);
-        EmitterBox box = voxel_emitter_box(block_id);
-        vec3 sides = emitter_exposed_sides(grid, selected.cell, block_id, box, origin);
+        EmitterBox box = voxel_emitter_box_from_payload(payload);
+        vec3 sides = emitter_exposed_sides(grid, selected.cell, box, origin);
         vec3 areas = emitter_face_areas(box) * abs(sides);
         vec3 weights = emitter_face_weights(box, sides, origin - vec3(selected.cell));
         float total_w = dot(weights, vec3(1.0));
@@ -291,7 +291,7 @@ RestirReservoir restir_sample_initial(
         if (cos_x <= 0.0 || cos_y <= 0.0) {
             continue;
         }
-        vec3 emission = get_voxel_emission(block_id);
+        vec3 emission = get_voxel_emission(block_id, box);
         float p_hat = restir_target_pdf_from_geom(emission, cos_x, cos_y, dist_sq);
         float p_area = selected.pmf * (weights[axis] / total_w) / areas[axis];
         if (p_hat <= 0.0 || p_area <= 0.0) {
@@ -347,8 +347,8 @@ vec4 restir_shade_sample_from_geom(
     EmitterSelection selected = select_voxel_emitter(
         origin, two_sided ? vec3(0.0) : normal, 0u, r.sample_data.cell
     );
-    EmitterBox box = voxel_emitter_box(block_id);
-    vec3 sides = emitter_exposed_sides(grid, r.sample_data.cell, block_id, box, origin);
+    EmitterBox box = voxel_emitter_box_from_payload(texelFetch(grid, r.sample_data.cell, 0).r);
+    vec3 sides = emitter_exposed_sides(grid, r.sample_data.cell, box, origin);
     vec3 areas = emitter_face_areas(box) * abs(sides);
     vec3 weights = emitter_face_weights(box, sides, origin - vec3(r.sample_data.cell));
     float total_w = dot(weights, vec3(1.0));

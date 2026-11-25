@@ -23,22 +23,34 @@ vec3 get_voxel_light_color(uint block_id) {
     return peak > 0.0 ? color / peak : vec3(1.0);
 }
 
-vec3 get_voxel_emission(uint block_id) {
+vec3 get_voxel_emission(uint block_id, EmitterBox box) {
     if (!voxel_emitter_id(block_id)) {
         return vec3(0.0);
     }
     uint palette_id = emitter_palette_id(block_id);
     float level = voxel_light_level_table[palette_id - 32u];
     vec3 color = max0(get_voxel_light_color(palette_id) * rec709_to_rec2020);
-    vec3 areas = emitter_face_areas(voxel_emitter_box(block_id));
-    // Preserve the approximate total flux of the original whole-cell light
-    // when replacing it with a compact Lambertian surface.
-    float area_scale = 3.0 / dot(areas, vec3(1.0));
+    vec3 areas = emitter_face_areas(box);
+    // Full-face emitters (full cubes, Sodium-culled recessed cubes, flat lava
+    // lakes, glow lichen, nether portals) keep constant surface radiance (1.0x)
+    // so embedding blocks in walls/ceilings never artificially brightens them.
+    // Compact sub-voxel emitters conserve approximate total flux, capped at 24x
+    // to prevent fireflies on tiny custom resource-pack models.
+    float area_scale = max_of(areas) >= 0.99
+        ? 1.0
+        : clamp(3.0 / max(dot(areas, vec3(1.0)), 1e-4), 1.0, 24.0);
     return color * (EMISSION_ANCHOR * EMISSION_STRENGTH * voxel_light_response(level) * area_scale);
 }
 
+vec3 get_voxel_emission(uint payload) {
+    return get_voxel_emission(
+        (payload >> 24u) & 0x7Fu,
+        voxel_emitter_box_from_payload(payload)
+    );
+}
+
 // Physically calibrated block albedos & materials
-VoxelMaterial get_voxel_material(uint block_id, vec3 fallback_color) {
+VoxelMaterial get_voxel_material(uint block_id, vec3 fallback_color, EmitterBox emitter_box) {
     VoxelMaterial mat;
     mat.albedo = fallback_color;
     mat.emission = vec3(0.0);
@@ -54,7 +66,7 @@ VoxelMaterial get_voxel_material(uint block_id, vec3 fallback_color) {
     }
 
     if (voxel_emitter_id(block_id)) {
-        mat.emission = get_voxel_emission(block_id);
+        mat.emission = get_voxel_emission(block_id, emitter_box);
         mat.roughness = 0.5;
     }
 

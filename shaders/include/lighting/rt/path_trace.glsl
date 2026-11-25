@@ -184,7 +184,9 @@ PathTraceSample evaluate_path_trace(
         }
 
         VoxelSample sample_data = unpack_voxel_data(hit.payload);
-        VoxelMaterial material = get_voxel_material(sample_data.block_id, sample_data.color);
+        VoxelMaterial material = get_voxel_material(
+            sample_data.block_id, sample_data.color, sample_data.emitter_box
+        );
         vec3 emission = material.emission;
 #ifdef RTGI_EMITTER_SAMPLING
         if (sample_emitters && max_of(emission) > 0.0

@@ -66,7 +66,7 @@ vec3 gi_debug_voxel_id(uint packed_val) {
 vec3 gi_debug_voxel_light(uint packed_val) {
     VoxelSample voxel = unpack_voxel_data(packed_val);
     if (voxel.is_emitter) {
-        vec3 emission = get_voxel_emission(voxel.block_id);
+        vec3 emission = get_voxel_emission(packed_val);
         return srgb_eotf(emission / (1.0 + emission));
     }
     if (voxel.is_solid) {

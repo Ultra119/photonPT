@@ -129,14 +129,21 @@ bool voxel_stair_hit(
 }
 
 bool voxel_shape_hit(
-    VoxelRay ray, ivec3 cell, uint block_id, uint shape, float start, float end,
+    VoxelRay ray, ivec3 cell, uint payload, uint block_id, uint shape, float start, float end,
     vec3 entry_normal, out float distance, out vec3 normal
 ) {
     vec3 base = vec3(cell);
+    if ((payload >> 31u) != 0u) {
+        EmitterBox box = voxel_emitter_box_from_payload(payload);
+        if (emitter_box_is_full_cube(box) && entry_normal != vec3(0.0)) {
+            distance = start;
+            normal = entry_normal;
+            return true;
+        }
+        return voxel_box_hit(ray, base + box.lo, base + box.hi, start, end, distance, normal);
+    }
     EmitterBox box = EmitterBox(vec3(0.0), vec3(1.0));
-    if (voxel_torch_emitter(block_id) || voxel_lantern_emitter(block_id)) {
-        box = voxel_emitter_box(block_id);
-    } else if (voxel_box_emitter(block_id) || shape == VOXEL_SHAPE_CUBE) {
+    if (shape == VOXEL_SHAPE_CUBE) {
         // The DDA has already intersected the entire cell.
         if (entry_normal != vec3(0.0)) {
             distance = start;
@@ -295,18 +302,17 @@ VoxelHit trace_voxel_segment(
                         } else {
                             result.transmittance *= 0.76;
                         }
-                    } else if (mode != voxel_ray_ao || (payload & (1u << 23u)) == 0u) {
-                        uint shape = (payload >> 19u) & 15u;
-                        bool thin = voxel_emitter_id(block_id) && !voxel_box_emitter(block_id)
-                            && shape != VOXEL_SHAPE_CUBE;
+                    } else if (mode != voxel_ray_ao || (payload >> 31u) != 0u || (payload & (1u << 23u)) == 0u) {
+                        uint shape = (payload >> 31u) != 0u ? VOXEL_SHAPE_CUBE : ((payload >> 19u) & 15u);
+                        bool thin = voxel_thin_plant_emitter(block_id);
                         if (thin && mode != voxel_ray_ao) {
                             if (mode == voxel_ray_path) {
-                                result.passed_emission += result.transmittance * get_voxel_emission(block_id);
+                                result.passed_emission += result.transmittance * get_voxel_emission(payload);
                             }
                         } else {
                             float hit_distance;
                             vec3 normal;
-                            if (voxel_shape_hit(ray, cell, block_id, shape, t, cell_end, entry_normal,
+                            if (voxel_shape_hit(ray, cell, payload, block_id, shape, t, cell_end, entry_normal,
                                                 hit_distance, normal)) {
                                 if (normal == vec3(0.0) && step == 0 && mode != voxel_ray_ao) {
                                     // Visible receivers can start inside a coarse 1x1x1 voxel AABB

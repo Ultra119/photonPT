@@ -144,13 +144,6 @@ void update_rt_voxel_grid(
     vec2 mid_tex_coord,
     vec2 tex_coord
 ) {
-    // Each quad face emits 4 vertices sharing the exact same block center and
-    // face normal; write once per quad to cut atomic contention and vertex
-    // texture fetches by 4x.
-    if ((gl_VertexID & 3) != 0) {
-        return;
-    }
-
     // Remap 0u (default unassigned terrain like stone, dirt, deepslate) to
     // the generic solid ID 111
 #if !defined PROGRAM_GBUFFERS_WATER
@@ -164,12 +157,23 @@ void update_rt_voxel_grid(
         block_id = 111u;
     }
 
+    bool is_emitter = voxel_emitter_id(block_id);
+
+    // Non-emitters share block center and face normal across all 4 vertices of
+    // a quad; write once per quad to cut atomic contention and vertex texture
+    // fetches by 4x. Emitters inspect all 4 vertices to capture the true 3D
+    // mesh AABB (vanilla orientations and custom 3D resource packs alike).
+    if (!is_emitter && (gl_VertexID & 3) != 0) {
+        return;
+    }
+
     if (!should_voxelize(block_id)) {
         return;
     }
 
-    vec3 model_pos = gl_Vertex.xyz + mid_block_attr * (1.0 / 64.0);
-    vec3 view_pos = (gl_ModelViewMatrix * vec4(model_pos, 1.0)).xyz;
+    vec3 v_view = (gl_ModelViewMatrix * vec4(gl_Vertex.xyz, 1.0)).xyz;
+    vec3 c_offset_view = mat3(gl_ModelViewMatrix) * (mid_block_attr * (1.0 / 64.0));
+    vec3 view_pos = v_view + c_offset_view;
 #ifdef PROGRAM_SHADOW
     vec3 scene_pos = (shadowModelViewInverse * vec4(view_pos, 1.0)).xyz;
 #else
@@ -177,6 +181,69 @@ void update_rt_voxel_grid(
 #endif
     vec3 local = scene_to_voxel_space(scene_pos);
     if (any(lessThan(local, vec3(0.0))) || any(greaterThanEqual(local, rt_voxel_size_f))) {
+        return;
+    }
+
+    ivec3 cell = ivec3(local);
+
+    if (is_emitter) {
+#ifdef PROGRAM_SHADOW
+        vec3 v_offset = mat3(shadowModelViewInverse) * (-c_offset_view);
+#else
+        vec3 v_offset = mat3(gbufferModelViewInverse) * (-c_offset_view);
+#endif
+        vec3 local_v = clamp((local - vec3(cell)) + v_offset, vec3(0.0), vec3(1.0));
+        vec3 scaled = local_v * 16.0;
+        uvec3 v_lo = uvec3(clamp(floor(scaled + 0.02), vec3(0.0), vec3(15.0)));
+        uvec3 v_hi_m1 = uvec3(clamp(ceil(scaled - 0.02) - 1.0, vec3(0.0), vec3(15.0)));
+        uint hdr = (1u << 31u) | ((block_id & 0x7Fu) << 24u);
+
+        uint cur = imageLoad(voxel_img, cell).r;
+        uint previous = cur;
+        uint final_data = cur;
+        bool wrote = false;
+        for (int iter = 0; iter < 16; ++iter) {
+            uint desired;
+            if ((cur >> 31u) == 0u) {
+                desired = hdr | pack_emitter_aabb(v_lo, v_hi_m1);
+            } else {
+                uvec3 cur_lo = uvec3(cur & 15u, (cur >> 4u) & 15u, (cur >> 8u) & 15u);
+                uvec3 cur_hi = uvec3((cur >> 12u) & 15u, (cur >> 16u) & 15u, (cur >> 20u) & 15u);
+                uvec3 m_lo = min(cur_lo, v_lo);
+                uvec3 m_hi = max(cur_hi, v_hi_m1);
+                uint merged_hdr = max(cur & 0xFF000000u, hdr);
+                desired = merged_hdr | pack_emitter_aabb(m_lo, m_hi);
+            }
+            if (desired == cur) {
+                break;
+            }
+            uint observed = imageAtomicCompSwap(voxel_img, cell, cur, desired);
+            if (observed == cur) {
+                previous = cur;
+                final_data = desired;
+                wrote = true;
+                break;
+            }
+            cur = observed;
+        }
+#ifdef RTGI_EMITTER_SAMPLING
+        if (wrote) {
+            uint mark_bits = 0u;
+            if (previous == 0u) {
+                ivec3 sub = (cell >> 2) & 1;
+                mark_bits |= 1u << (8u + uint(sub.x | (sub.y << 1) | (sub.z << 2)));
+            }
+            if (emitter_index_member(final_data) && !emitter_index_member(previous)) {
+                mark_bits |= 1u;
+            }
+            if (mark_bits != 0u) {
+                ivec2 mark_texel = emitter_mark_texel(cell >> 3);
+                if ((imageLoad(rtgi_emitter_marks_img, mark_texel).r & mark_bits) != mark_bits) {
+                    imageAtomicOr(rtgi_emitter_marks_img, mark_texel, mark_bits);
+                }
+            }
+        }
+#endif
         return;
     }
 
@@ -188,7 +255,6 @@ void update_rt_voxel_grid(
 #endif
 
     bool is_translucent = (block_id == 5u || block_id == 14u || block_id == 15u || (80u <= block_id && block_id <= 96u));
-    bool is_emitter = voxel_emitter_id(block_id);
 
     vec2 sample_uv = (mid_tex_coord != vec2(0.0)) ? mid_tex_coord : tex_coord;
     vec4 tex_sample = textureLod(tex, sample_uv, 0.0);
@@ -198,8 +264,6 @@ void update_rt_voxel_grid(
     vec3 albedo_srgb = (tex_sample.a > 0.05) ? (tex_sample.rgb * vertex_tint) : vertex_tint;
     vec3 linear_albedo = srgb_eotf_inv(clamp01(albedo_srgb));
 
-    // Only actual light-emitting blocks (torches, lanterns, glowstone, lava)
-    float voxel_block_light = is_emitter ? 1.0 : 0.0;
     uint shape_class = get_voxel_shape_class(block_id, mid_block_attr, world_normal);
     uint face_priority = (world_normal.y > 0.5)
         ? 2u
@@ -207,28 +271,21 @@ void update_rt_voxel_grid(
 
     uint packed_data = pack_voxel_data(
         block_id,
-        voxel_block_light,
+        0.0,
         shape_class,
         linear_albedo,
         is_translucent,
-        is_emitter,
+        false,
         face_priority
     );
 
-    ivec3 cell = ivec3(local);
     uint previous = imageAtomicMax(voxel_img, cell, packed_data);
 #ifdef RTGI_EMITTER_SAMPLING
-    // Bit 0 marks 8x8x8 bricks containing emitters; bits 8..15 conservatively
-    // mark occupied 4x4x4 sub-bricks for 2-level empty-space DDA skipping.
-    uint mark_bits = 0u;
+    // Bits 8..15 conservatively mark occupied 4x4x4 sub-bricks for 2-level
+    // empty-space DDA skipping.
     if (previous == 0u) {
         ivec3 sub = (cell >> 2) & 1;
-        mark_bits |= 1u << (8u + uint(sub.x | (sub.y << 1) | (sub.z << 2)));
-    }
-    if (emitter_index_member(packed_data) && !emitter_index_member(previous)) {
-        mark_bits |= 1u;
-    }
-    if (mark_bits != 0u) {
+        uint mark_bits = 1u << (8u + uint(sub.x | (sub.y << 1) | (sub.z << 2)));
         ivec2 mark_texel = emitter_mark_texel(cell >> 3);
         if ((imageLoad(rtgi_emitter_marks_img, mark_texel).r & mark_bits) != mark_bits) {
             imageAtomicOr(rtgi_emitter_marks_img, mark_texel, mark_bits);

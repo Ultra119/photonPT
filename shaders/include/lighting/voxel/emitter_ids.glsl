@@ -37,22 +37,20 @@ bool voxel_emitter_id(uint block_id) {
         || (voxel_torch_id <= block_id && block_id <= voxel_crying_obsidian_id);
 }
 
-bool voxel_torch_emitter(uint block_id) {
-    return block_id == voxel_torch_id || block_id == voxel_soul_torch_id
-        || block_id == voxel_copper_torch_id || block_id == voxel_redstone_torch_id;
+// Wispy foliage emitters (Nether fungi, eyeblossoms) stay pass-through in DDA
+// rather than blocking rays as solid boxes.
+bool voxel_thin_plant_emitter(uint block_id) {
+    return block_id == 49u || block_id == 59u;
 }
 
-bool voxel_lantern_emitter(uint block_id) {
-    return block_id == voxel_lantern_id || block_id == voxel_soul_lantern_id
-        || block_id == voxel_copper_lantern_id;
-}
-
+// Emitters indexed in the octree for NEE / ReSTIR DI. Excludes ubiquitous L1
+// sculk family (46, 56, 57), non-emitting spawners/heads (47), and Nether flora
+// (49, 59) so dim decorative blocks do not dilute NEE/ReSTIR sampling budgets.
 bool voxel_box_emitter(uint block_id) {
-    return block_id == 32u || block_id == 35u || block_id == 38u || block_id == 39u
-        || block_id == 42u || block_id == 44u
-        || (51u <= block_id && block_id <= 53u) || block_id == 61u
-        || (64u <= block_id && block_id <= 79u)
-        || (voxel_torch_id <= block_id && block_id <= voxel_crying_obsidian_id);
+    return voxel_emitter_id(block_id)
+        && block_id != 46u && block_id != 47u
+        && block_id != 49u && block_id != 56u
+        && block_id != 57u && block_id != 59u;
 }
 
 #endif
