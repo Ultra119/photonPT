@@ -3,6 +3,41 @@
 
 #include "/include/global.glsl"
 
+#if defined RTGI_EMITTER_SAMPLING && defined RTGI_RESTIR_DI
+#define RTGI_USE_RESTIR_DI
+#endif
+
+// Split-pass macros allow deferred1_b (DI-only) and deferred1_c (GI + WorldCache)
+// to compile as separate low-VGPR kernels with zero cross-stage register bloat.
+#if defined RTGI_SPATIAL_STAGE_DI
+#define RTGI_SPATIAL_DO_DI
+#if !defined RTGI_RESTIR_GI && !defined RTGI_WORLD_CACHE
+#define RTGI_SPATIAL_FINALIZE
+#endif
+#elif defined RTGI_SPATIAL_STAGE_GI
+#ifdef RTGI_RESTIR_GI
+#define RTGI_SPATIAL_DO_GI
+#endif
+#ifdef RTGI_WORLD_CACHE
+#define RTGI_SPATIAL_DO_WC
+#endif
+#define RTGI_SPATIAL_FINALIZE
+#else
+// Monolithic fallback (if included without stage selector).
+#ifdef RTGI_USE_RESTIR_DI
+#define RTGI_SPATIAL_DO_DI
+#endif
+#ifdef RTGI_RESTIR_GI
+#define RTGI_SPATIAL_DO_GI
+#endif
+#ifdef RTGI_WORLD_CACHE
+#define RTGI_SPATIAL_DO_WC
+#endif
+#define RTGI_SPATIAL_FINALIZE
+#endif
+
+#if (defined RTGI_SPATIAL_DO_DI && defined RTGI_USE_RESTIR_DI) || defined RTGI_SPATIAL_DO_GI || defined RTGI_SPATIAL_DO_WC
+
 #if RTGI_RESOLUTION == 0
 const vec2 workGroupsRender = vec2(0.25, 0.25);
 #elif RTGI_RESOLUTION == 2
@@ -10,16 +45,10 @@ const vec2 workGroupsRender = vec2(1.0, 1.0);
 #else
 const vec2 workGroupsRender = vec2(0.5, 0.5);
 #endif
-layout(local_size_x = 8, local_size_y = 8) in;
-
-#if defined RTGI_EMITTER_SAMPLING && defined RTGI_RESTIR_DI
-#define RTGI_USE_RESTIR_DI
-#endif
-
-#if defined RTGI_USE_RESTIR_DI || defined RTGI_RESTIR_GI || defined RTGI_WORLD_CACHE
+layout(local_size_x = 8, local_size_y = 4) in;
 
 layout(rgba16f) uniform image2D rtgi_raw_img;
-#if GI_DEBUG == GI_DEBUG_EMITTER && defined RTGI_USE_RESTIR_DI
+#if GI_DEBUG == GI_DEBUG_EMITTER && defined RTGI_SPATIAL_DO_DI && defined RTGI_USE_RESTIR_DI
 layout(rgba16f) writeonly uniform image2D rtgi_emitter_debug_img;
 #endif
 
@@ -27,7 +56,7 @@ layout(rgba16f) writeonly uniform image2D rtgi_emitter_debug_img;
 uniform usampler2D rtgi_frame_state_sampler;
 uniform usampler2D rtgi_guide_even_sampler;
 uniform usampler2D rtgi_guide_odd_sampler;
-#ifdef RTGI_USE_RESTIR_DI
+#if defined RTGI_SPATIAL_DO_DI && defined RTGI_USE_RESTIR_DI
 uniform usampler2D rtgi_reservoir_even_sampler;
 uniform usampler2D rtgi_reservoir_odd_sampler;
 #endif
@@ -35,7 +64,7 @@ uniform usampler2D rtgi_reservoir_odd_sampler;
 uniform mat4 gbufferModelView;
 uniform mat4 gbufferModelViewInverse;
 uniform mat4 gbufferProjection;
-#ifdef RTGI_WORLD_CACHE
+#ifdef RTGI_SPATIAL_DO_WC
 #include "/include/utility/camera_motion.glsl"
 #else
 uniform vec3 cameraPosition;
@@ -46,17 +75,18 @@ uniform int frameCounter;
 #include "/include/utility/stbn.glsl"
 #include "/include/lighting/rt/pt_state.glsl"
 #include "/include/lighting/rt/rtgi_surface.glsl"
-#ifdef RTGI_EMITTER_SAMPLING
+#if defined RTGI_EMITTER_SAMPLING && INFO >= 4
+// See rtgi_trace.csh: keep 4-level occupancy skip on Screenshot only.
 #define VOXEL_DDA_USE_OCCUPANCY
 #endif
 #include "/include/lighting/rt/voxel_dda.glsl"
-#ifdef RTGI_WORLD_CACHE
+#ifdef RTGI_SPATIAL_DO_WC
 #include "/include/lighting/rt/rtgi_world_cache.glsl"
 #endif
-#ifdef RTGI_USE_RESTIR_DI
+#if defined RTGI_SPATIAL_DO_DI && defined RTGI_USE_RESTIR_DI
 #include "/include/lighting/rt/rtgi_restir.glsl"
 #endif
-#ifdef RTGI_RESTIR_GI
+#ifdef RTGI_SPATIAL_DO_GI
 #include "/include/lighting/rt/rtgi_restir_gi.glsl"
 
 layout(std430, binding = 0) buffer RtgiRestirGiBuffer {
@@ -72,6 +102,15 @@ RestirGiSlot load_gi_reservoir(ivec2 texel, ivec2 target_res, int bank) {
     return RestirGiSlot(uvec4(0u), uvec4(0u));
 }
 
+uint load_gi_reservoir_count(ivec2 texel, ivec2 target_res, int bank) {
+    uint stride = uint(target_res.x) * uint(target_res.y);
+    uint idx = uint(bank) * stride + uint(texel.y) * uint(target_res.x) + uint(texel.x);
+    if (idx < gi_reservoirs.length()) {
+        return (gi_reservoirs[idx].w1.x >> 16u) & 63u;
+    }
+    return 0u;
+}
+
 void store_gi_reservoir(ivec2 texel, ivec2 target_res, int bank, RestirGiSlot slot) {
     uint stride = uint(target_res.x) * uint(target_res.y);
     uint idx = uint(bank) * stride + uint(texel.y) * uint(target_res.x) + uint(texel.x);
@@ -81,7 +120,7 @@ void store_gi_reservoir(ivec2 texel, ivec2 target_res, int bank, RestirGiSlot sl
 }
 #endif
 
-#ifdef RTGI_RESTIR_GI
+#ifdef RTGI_SPATIAL_DO_GI
 const int restir_spatial_max_neighbors = 4;
 const int restir_di_spatial_max_neighbors = 3;
 #elif INFO <= 2
@@ -97,7 +136,7 @@ uvec4 load_guide(ivec2 texel, bool even) {
                 : texelFetch(rtgi_guide_odd_sampler, texel, 0);
 }
 
-#ifdef RTGI_USE_RESTIR_DI
+#if defined RTGI_SPATIAL_DO_DI && defined RTGI_USE_RESTIR_DI
 uvec4 load_reservoir(ivec2 texel, bool even) {
     return even ? texelFetch(rtgi_reservoir_even_sampler, texel, 0)
                 : texelFetch(rtgi_reservoir_odd_sampler, texel, 0);
@@ -105,7 +144,7 @@ uvec4 load_reservoir(ivec2 texel, bool even) {
 #endif
 
 void store_debug_emitter(ivec2 texel, vec4 emitter) {
-#if GI_DEBUG == GI_DEBUG_EMITTER && defined RTGI_USE_RESTIR_DI
+#if GI_DEBUG == GI_DEBUG_EMITTER && defined RTGI_SPATIAL_DO_DI && defined RTGI_USE_RESTIR_DI
     if (!rtgi_finite(emitter)) {
         emitter = vec4(0.0);
     }
@@ -125,11 +164,16 @@ vec3 finalize_raw(ivec2 texel, vec4 raw, vec3 added_rgb, bool valid_added, out b
         imageStore(rtgi_raw_img, texel, vec4(0.0, 0.0, 0.0, -2.0));
         return vec3(0.0);
     }
+#ifdef RTGI_SPATIAL_FINALIZE
     float scale = min(1.0, 65504.0 / max(max_of(combined), eps));
     if (RTGI_MAX_RADIANCE > 0.0) {
         scale = min(scale, RTGI_MAX_RADIANCE / max(lum, eps));
     }
     vec3 final_rgb = combined * scale;
+#else
+    float scale = min(1.0, 65504.0 / max(max_of(combined), eps));
+    vec3 final_rgb = combined * scale;
+#endif
     imageStore(rtgi_raw_img, texel, vec4(final_rgb, raw.a));
     ok_final = true;
     return final_rgb;
@@ -144,9 +188,25 @@ void main() {
 
     int bank = frameCounter & 1;
     bool even = bank == 0;
+#if defined RTGI_SPATIAL_DO_DI && defined RTGI_USE_RESTIR_DI
+    uvec4 di_stamp = texelFetch(rtgi_frame_state_sampler, ivec2(3, bank), 0);
+    bool run_di = has_voxel_emitters()
+        && di_stamp.x == uint(frameCounter) && di_stamp.y == rtgi_frame_tag;
+#if !defined RTGI_SPATIAL_DO_GI && !defined RTGI_SPATIAL_DO_WC && !defined RTGI_SPATIAL_FINALIZE
+    // Split DI-only stage: when zero pixels saw a visible emitter in deferred1_a,
+    // exit uniformly before loading guides or rtgi_raw_img.
+    if (!run_di) {
+        store_debug_emitter(texel, vec4(0.0));
+        return;
+    }
+#endif
+#else
+    const bool run_di = false;
+#endif
+
     uvec4 guide = load_guide(texel, even);
     if ((guide.w & rtgi_guide_covered) == 0u || (guide.w & rtgi_guide_raw_valid) == 0u) {
-#ifdef RTGI_RESTIR_GI
+#ifdef RTGI_SPATIAL_DO_GI
         store_gi_reservoir(texel, target_res, restir_gi_history_bank, RestirGiSlot(uvec4(0u), uvec4(0u)));
 #endif
         store_debug_emitter(texel, vec4(0.0));
@@ -154,12 +214,7 @@ void main() {
     }
 
     vec4 raw = imageLoad(rtgi_raw_img, texel);
-#ifdef RTGI_USE_RESTIR_DI
-    bool run_di = has_voxel_emitters();
-#else
-    const bool run_di = false;
-#endif
-#if !defined RTGI_RESTIR_GI && !defined RTGI_WORLD_CACHE
+#if !defined RTGI_SPATIAL_DO_GI && !defined RTGI_SPATIAL_DO_WC
     if (!run_di) {
         bool dummy_ok;
         finalize_raw(texel, raw, vec3(0.0), true, dummy_ok);
@@ -176,7 +231,7 @@ void main() {
 
     vec3 center_view;
     if (!rtgi_view_from_guide(guide, grid.full_size, jitter, gbufferProjection, center_view)) {
-#ifdef RTGI_RESTIR_GI
+#ifdef RTGI_SPATIAL_DO_GI
         store_gi_reservoir(texel, target_res, restir_gi_history_bank, RestirGiSlot(uvec4(0u), uvec4(0u)));
 #endif
         bool dummy_ok;
@@ -190,7 +245,7 @@ void main() {
     bool two_sided = rtgi_is_foliage(material);
     vec3 scene_pos = transform(gbufferModelViewInverse, center_view);
     vec3 voxel_pos = scene_to_voxel_space(scene_pos);
-#if defined RTGI_USE_RESTIR_DI || defined RTGI_RESTIR_GI
+#if (defined RTGI_SPATIAL_DO_DI && defined RTGI_USE_RESTIR_DI) || defined RTGI_SPATIAL_DO_GI
     vec3 origin = vec3(0.0);
     ivec2 neighbor_tap[restir_spatial_max_neighbors];
     vec3 neighbor_origin[restir_spatial_max_neighbors];
@@ -199,7 +254,7 @@ void main() {
     uint pixel_key = uint(texel.x) | (uint(texel.y) << 16u);
     uint seed = lowbias32(pixel_key ^ 0x517cc1b7u) ^ lowbias32(uint(frameCounter) + 0x94d049bbu);
 
-#ifdef RTGI_RESTIR_GI
+#ifdef RTGI_SPATIAL_DO_GI
     const bool run_spatial = true;
 #else
     bool run_spatial = run_di;
@@ -273,7 +328,7 @@ void main() {
                 continue;
             }
             neighbor_tap[valid_neighbors] = tap;
-#if INFO <= 2 && !defined RTGI_RESTIR_GI
+#if INFO <= 2 && !defined RTGI_SPATIAL_DO_GI
             // Lower presets without ReSTIR GI skip canonical reverse visibility
             // traces from neighbor origins and do not run spatial->temporal
             // Jacobian reconnection, so an un-nudged surface point suffices.
@@ -296,7 +351,7 @@ void main() {
     bool valid_added = true;
     vec4 direct_emitter = vec4(0.0);
 
-#ifdef RTGI_USE_RESTIR_DI
+#if defined RTGI_SPATIAL_DO_DI && defined RTGI_USE_RESTIR_DI
     if (run_di) {
         RestirReservoir center = restir_unpack(load_reservoir(texel, even));
         uint c_block_id = 0u;
@@ -537,7 +592,7 @@ void main() {
     }
 #endif
 
-#ifdef RTGI_RESTIR_GI
+#ifdef RTGI_SPATIAL_DO_GI
     {
         RestirGiReservoir center_gi = restir_gi_unpack(
             load_gi_reservoir(texel, target_res, restir_gi_temporal_bank)
@@ -557,8 +612,8 @@ void main() {
         uint gi_valid_mask = 0u;
         float m_gi_neighbors = 0.0;
         for (int i = 0; i < valid_neighbors; ++i) {
-            uint n_cnt = restir_gi_unpack_count(
-                load_gi_reservoir(neighbor_tap[i], target_res, restir_gi_temporal_bank)
+            uint n_cnt = load_gi_reservoir_count(
+                neighbor_tap[i], target_res, restir_gi_temporal_bank
             );
             if (n_cnt > 0u) {
                 gi_valid_mask |= (1u << uint(i));
@@ -606,7 +661,6 @@ void main() {
                     && (nr.sample_data.kind == restir_gi_kind_env
                         || nr.sample_data.normal_face == center_gi.sample_data.normal_face);
 
-                // Canonical MIS weight for center sample shifted to neighbor i.
                 if (center_valid) {
                     float p_i_of_c = 0.0;
                     float cos_r_dst = 0.0;
@@ -618,14 +672,9 @@ void main() {
                         float p_i_raw = center_gi_lum * (cos_r_dst * rcp_pi);
                         if (p_i_raw > 0.0) {
 #if INFO <= 3
-                            // RTXDI-style unshadowed canonical GI MIS on gameplay
-                            // tiers: forward visibility at origin is still strictly
-                            // traced; Screenshot (INFO == 4) keeps reverse traces.
                             p_i_of_c = p_i_raw * jac_ci;
 #else
                             if (same_gi_geom) {
-                                // Neighbor already proved visibility of this exact hit/direction
-                                // from neighbor_origin[i] in deferred1_a.
                                 p_i_of_c = p_i_raw * jac_ci;
                             } else {
                                 vec3 dummy_trans;
@@ -641,7 +690,6 @@ void main() {
                     m_c += alpha_i * (num / max(num + m_gi_neighbors * p_i_of_c, 1e-20));
                 }
 
-                // Neighbor i's sample shifted to center receiver.
                 if (nr_active) {
                     float cos_r_dst = 0.0;
                     float jac_ic = restir_gi_shift_jacobian_ex(
@@ -681,7 +729,6 @@ void main() {
                                     / max(denom, 1e-20);
                                 float w_i = m_i * p_c_of_i * nr.weight;
                                 float u_pick = random_dimension(gi_seed, i);
-                                // Store target PDF in center's solid-angle measure (p_c_raw).
                                 if (restir_gi_update(combined_gi, nr.sample_data, w_i, p_c_raw, u_pick)) {
                                     gi_winning_trans = trans;
                                     gi_from_center = false;
@@ -716,8 +763,6 @@ void main() {
         if (combined_gi.sample_data.kind != restir_gi_kind_empty && combined_gi.weight > 0.0) {
             bool visible = true;
             if (gi_from_center) {
-                // Center was already visibility-validated at origin in deferred1_a;
-                // only re-trace when the sample passed through stained glass to recover tint.
                 if (center_gi.tinted) {
                     visible = restir_gi_trace_visibility(
                         voxel_sampler, origin, combined_gi.sample_data, gi_winning_trans
@@ -756,7 +801,7 @@ void main() {
     vec3 final_rgb = finalize_raw(
         texel, raw, valid_added ? total_added : vec3(0.0), valid_added, ok_final
     );
-#ifdef RTGI_WORLD_CACHE
+#ifdef RTGI_SPATIAL_DO_WC
     if (ok_final) {
         ivec3 surface_voxel = ivec3(floor(voxel_pos - 0.02 * world_normal));
         if (is_inside_voxel_grid(surface_voxel)) {
@@ -772,5 +817,7 @@ void main() {
 }
 
 #else
+const ivec3 workGroups = ivec3(1, 1, 1);
+layout(local_size_x = 1, local_size_y = 1) in;
 void main() {}
 #endif

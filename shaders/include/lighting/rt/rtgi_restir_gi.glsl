@@ -353,32 +353,31 @@ bool restir_gi_trace_visibility(
     usampler3D grid, vec3 origin, RestirGiSample s, out vec3 transmittance
 ) {
     transmittance = vec3(1.0);
-    if (s.kind == restir_gi_kind_env) {
-        VoxelHit hit = trace_voxel_segment(
-            grid, origin, s.pos_or_dir, rt_primary_max_distance, voxel_ray_visibility
-        );
-        if (hit.status == voxel_volume_exit || hit.status == voxel_distance_limit) {
-            transmittance = hit.transmittance;
+    bool is_env = (s.kind == restir_gi_kind_env);
+    vec3 dir;
+    float seg_end;
+    if (is_env) {
+        dir = s.pos_or_dir;
+        seg_end = rt_primary_max_distance;
+    } else if (s.kind == restir_gi_kind_surface) {
+        vec3 delta = s.pos_or_dir - origin;
+        float dist_sq = dot(delta, delta);
+        if (!(dist_sq > 1e-5) || dist_sq >= sqr(rt_primary_max_distance)) {
+            return false;
+        }
+        float dist = sqrt(dist_sq);
+        if (dist <= 0.02) {
             return true;
         }
+        dir = delta / dist;
+        seg_end = max(dist - 0.015, 0.001);
+    } else {
         return false;
     }
-    if (s.kind != restir_gi_kind_surface) {
-        return false;
-    }
-    vec3 delta = s.pos_or_dir - origin;
-    float dist_sq = dot(delta, delta);
-    if (!(dist_sq > 1e-5) || dist_sq >= sqr(rt_primary_max_distance)) {
-        return false;
-    }
-    float dist = sqrt(dist_sq);
-    if (dist <= 0.02) {
-        return true;
-    }
-    vec3 dir = delta / dist;
-    float seg_end = max(dist - 0.015, 0.001);
+    // Single unified DDA call so env (sky) and surface lanes inside a mixed
+    // Wave32 march in lockstep instead of serializing two inlined DDA loops.
     VoxelHit hit = trace_voxel_segment(grid, origin, dir, seg_end, voxel_ray_visibility);
-    if (hit.status == voxel_distance_limit) {
+    if (hit.status == voxel_distance_limit || (is_env && hit.status == voxel_volume_exit)) {
         transmittance = hit.transmittance;
         return true;
     }

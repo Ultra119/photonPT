@@ -1,4 +1,6 @@
 // Trace one diffuse frame estimate at each registered opaque raster anchor.
+// ReSTIR GI temporal reuse (deferred1_b) and ReSTIR DI initial+temporal reuse
+// (deferred1_c) run in dedicated follow-up passes to keep static VGPR count low.
 
 #include "/include/global.glsl"
 #if RTGI_RESOLUTION == 0
@@ -8,7 +10,7 @@ const vec2 workGroupsRender = vec2(1.0, 1.0);
 #else
 const vec2 workGroupsRender = vec2(0.5, 0.5);
 #endif
-layout(local_size_x = 8, local_size_y = 8) in;
+layout(local_size_x = 8, local_size_y = 4) in;
 
 #if defined RTGI_EMITTER_SAMPLING && defined RTGI_RESTIR_DI
 #define RTGI_USE_RESTIR_DI
@@ -18,18 +20,14 @@ layout(local_size_x = 8, local_size_y = 8) in;
 #endif
 
 layout(rgba16f) writeonly uniform image2D rtgi_raw_img;
-#ifdef RTGI_USE_RESTIR_ANY
-layout(rgba32ui) uniform uimage2D rtgi_guide_even_img;
-layout(rgba32ui) uniform uimage2D rtgi_guide_odd_img;
-layout(rgba32ui) uniform uimage2D rtgi_frame_state_img;
-#else
 layout(rgba32ui) writeonly uniform uimage2D rtgi_guide_even_img;
 layout(rgba32ui) writeonly uniform uimage2D rtgi_guide_odd_img;
-layout(rgba32ui) writeonly uniform uimage2D rtgi_frame_state_img;
-#endif
 #ifdef RTGI_USE_RESTIR_DI
-layout(rgba32ui) uniform uimage2D rtgi_reservoir_even_img;
-layout(rgba32ui) uniform uimage2D rtgi_reservoir_odd_img;
+layout(rgba32ui) uniform uimage2D rtgi_frame_state_img;
+layout(rgba32ui) writeonly uniform uimage2D rtgi_reservoir_even_img;
+layout(rgba32ui) writeonly uniform uimage2D rtgi_reservoir_odd_img;
+#else
+layout(rgba32ui) writeonly uniform uimage2D rtgi_frame_state_img;
 #endif
 
 #if GI_DEBUG == GI_DEBUG_HIT
@@ -57,15 +55,11 @@ uniform sampler2D colortex8; // cloud shadow map
 uniform mat4 gbufferModelViewInverse;
 uniform mat4 gbufferProjection;
 uniform mat4 gbufferProjectionInverse;
-#ifdef RTGI_USE_RESTIR_ANY
-uniform mat4 gbufferPreviousModelView;
-uniform mat4 gbufferPreviousProjection;
-#endif
 
 uniform mat4 shadowModelView;
 uniform mat4 shadowProjection;
 
-#if defined RTGI_USE_RESTIR_ANY || defined RTGI_WORLD_CACHE
+#ifdef RTGI_WORLD_CACHE
 #include "/include/utility/camera_motion.glsl"
 #else
 uniform vec3 cameraPosition;
@@ -87,7 +81,10 @@ uniform float eyeAltitude;
 
 #include "/include/utility/stbn.glsl"
 #include "/include/lighting/rt/rtgi_opaque_depth.glsl"
-#ifdef RTGI_EMITTER_SAMPLING
+#if defined RTGI_EMITTER_SAMPLING && INFO >= 4
+// Empty-space occupancy skipping speeds up very long open-sky rays on Screenshot
+// (72-block reach), while on gameplay tiers (<=56 blocks) its 7 live VGPRs and
+// 2D mark-texture stalls cost +0.56 ms in dense forests.
 #define VOXEL_DDA_USE_OCCUPANCY
 #endif
 #ifdef RTGI_WORLD_CACHE
@@ -96,9 +93,6 @@ uniform float eyeAltitude;
 #endif
 #include "/include/lighting/rt/path_trace.glsl"
 #include "/include/lighting/rt/pt_state.glsl"
-#ifdef RTGI_USE_RESTIR_DI
-#include "/include/lighting/rt/rtgi_restir.glsl"
-#endif
 #ifdef RTGI_RESTIR_GI
 #include "/include/lighting/rt/rtgi_restir_gi.glsl"
 
@@ -113,14 +107,17 @@ void store_gi_reservoir(ivec2 texel, ivec2 target_res, int bank, RestirGiSlot sl
         gi_reservoirs[idx] = slot;
     }
 }
+#endif
 
-RestirGiSlot load_gi_reservoir(ivec2 texel, ivec2 target_res, int bank) {
-    uint stride = uint(target_res.x) * uint(target_res.y);
-    uint idx = uint(bank) * stride + uint(texel.y) * uint(target_res.x) + uint(texel.x);
-    if (idx < gi_reservoirs.length()) {
-        return gi_reservoirs[idx];
+#ifdef RTGI_USE_RESTIR_DI
+// Matches restir_pack_bounce_witness in rtgi_restir.glsl without pulling all of
+// rtgi_restir.glsl into the primary path-trace kernel.
+uint rtgi_pack_bounce_witness_cell(ivec3 cell) {
+    if (!is_inside_voxel_grid(cell)) {
+        return 0u;
     }
-    return RestirGiSlot(uvec4(0u), uvec4(0u));
+    return (uint(cell.x) & 1023u) | ((uint(cell.y) & 255u) << 10u)
+        | ((uint(cell.z) & 1023u) << 18u) | (1u << 30u);
 }
 #endif
 
@@ -146,275 +143,6 @@ void store_trace(ivec2 texel, vec4 raw, uvec4 guide, vec4 hits, vec4 emitter, uv
     imageStore(rtgi_emitter_debug_img, texel, min(emitter, vec4(65504.0)));
 #endif
 }
-
-#ifdef RTGI_USE_RESTIR_ANY
-bool restir_find_previous_tap(
-    RtgiGrid grid, int bank, vec3 scene_pos, vec3 world_normal, uint material,
-    out ivec2 best_tap, out vec3 best_prev_world_normal
-) {
-    best_tap = ivec2(-1);
-    best_prev_world_normal = world_normal;
-    int prev_bank = 1 - bank;
-    uvec4 previous = imageLoad(rtgi_frame_state_img, ivec2(0, prev_bank));
-    vec3 displacement = camera_delta();
-    bool compatible = previous.y == rtgi_frame_tag
-        && rtgi_previous_frame(previous.x, uint(frameCounter))
-        && dot(displacement, displacement) < 256.0
-        && uvec4(grid.full_size, grid.full_active) == imageLoad(rtgi_frame_state_img, ivec2(1, prev_bank))
-        && uvec4(imageSize(rtgi_raw_img), grid.gi_active) == imageLoad(rtgi_frame_state_img, ivec2(2, prev_bank));
-    if (!compatible) {
-        return false;
-    }
-
-    vec3 previous_view = transform(gbufferPreviousModelView, scene_pos + displacement);
-    vec4 clip = gbufferPreviousProjection * vec4(previous_view, 1.0);
-    if (!rtgi_finite(clip) || clip.w <= 0.0 || abs(clip.z) > clip.w || previous_view.z >= 0.0) {
-        return false;
-    }
-    vec2 previous_jitter = uintBitsToFloat(previous.zw);
-    vec2 previous_pixel = rtgi_raster_position(clip.xy / clip.w, grid.full_size, previous_jitter);
-    if (any(lessThan(previous_pixel, vec2(0.0)))
-        || any(greaterThanEqual(previous_pixel, vec2(grid.full_active)))) {
-        return false;
-    }
-
-    ivec2 base;
-    vec2 fraction;
-    rtgi_footprint(previous_pixel, grid, base, fraction);
-    vec3 prev_normal_view = mat3(gbufferPreviousModelView) * world_normal;
-    float footprint = rtgi_view_footprint(-previous_view.z, grid.gi_active, gbufferPreviousProjection);
-    float grazing = max(abs(dot(prev_normal_view, normalize(previous_view))), 0.02);
-    float max_chord = min(6.0, 0.10 + 2.5 * footprint / grazing);
-    bool is_foliage = rtgi_is_foliage(material);
-
-    bool previous_even = prev_bank == 0;
-    float best_w = 0.0;
-
-    for (int y = 0; y <= 1; ++y) {
-        for (int x = 0; x <= 1; ++x) {
-            ivec2 offset = ivec2(x, y);
-            ivec2 tap = base + offset;
-            float w = rtgi_bilinear_weight(offset, fraction);
-            if (w <= 0.0 || !rtgi_in_bounds(tap, grid.gi_active)) {
-                continue;
-            }
-            uvec4 p_guide = previous_even ? imageLoad(rtgi_guide_even_img, tap)
-                                          : imageLoad(rtgi_guide_odd_img, tap);
-            vec3 p_view;
-            if (!rtgi_guide_matches(p_guide, material)
-                || !rtgi_view_from_guide(p_guide, grid.full_size, previous_jitter,
-                                         gbufferPreviousProjection, p_view)) {
-                continue;
-            }
-            vec3 tap_world_normal = rtgi_guide_normal(p_guide);
-            vec3 tap_view_normal = mat3(gbufferPreviousModelView) * tap_world_normal;
-            w *= is_foliage
-                ? rtgi_foliage_weight(p_view - previous_view, prev_normal_view,
-                                      tap_view_normal, material, 0.65)
-                : rtgi_geometry_weight(p_view - previous_view, prev_normal_view,
-                                       tap_view_normal, footprint, max_chord);
-            if (w > best_w) {
-                best_w = w;
-                best_tap = tap;
-                best_prev_world_normal = tap_world_normal;
-            }
-        }
-    }
-
-    return best_tap.x >= 0 && best_w > 0.05;
-}
-#endif
-
-#ifdef RTGI_USE_RESTIR_DI
-RestirReservoir restir_temporal_reuse(
-    bool prev_found, ivec2 best_tap, vec3 best_prev_world_normal, int prev_bank,
-    vec3 origin, vec3 world_normal, RestirReservoir initial, uint seed, bool two_sided,
-    inout bool emitter_removed, out ivec3 prev_bounce_witness
-) {
-    prev_bounce_witness = ivec3(-1);
-    if (!prev_found) {
-        return initial;
-    }
-
-    bool previous_even = prev_bank == 0;
-    uvec4 packed_prev = previous_even ? imageLoad(rtgi_reservoir_even_img, best_tap)
-                                      : imageLoad(rtgi_reservoir_odd_img, best_tap);
-    ivec3 grid_shift = camera_grid_shift();
-    // Validate indirect bounce-emitter witness even when direct reservoir is empty.
-    ivec3 witness_cell;
-    if (restir_unpack_bounce_witness(packed_prev, witness_cell)) {
-        witness_cell -= grid_shift;
-        if (is_inside_voxel_grid(witness_cell)) {
-            if (!emitter_index_member(texelFetch(voxel_sampler, witness_cell, 0).r)) {
-                emitter_removed = true;
-            } else {
-                prev_bounce_witness = witness_cell;
-            }
-        }
-    }
-    RestirReservoir prev = restir_unpack(packed_prev);
-    if (prev.count == 0u) {
-        return initial;
-    }
-    prev.count = min(prev.count, restir_temporal_cap);
-
-    // Recenter previous cell into the current frame's snapped voxel grid and
-    // validate live emitter membership + current visibility.
-    float p0_of_1 = 0.0;
-    bool prev_valid = false;
-    bool prev_tinted = false;
-    if (prev.sample_data.valid && prev.weight > 0.0 && prev.target_pdf > 0.0) {
-        prev.sample_data.cell -= grid_shift;
-        if (is_inside_voxel_grid(prev.sample_data.cell)
-            && !emitter_index_member(texelFetch(voxel_sampler, prev.sample_data.cell, 0).r)) {
-            // The emitter that lit this receiver last frame was broken/removed
-            // inside the active volume; notify temporal accumulation directly.
-            emitter_removed = true;
-        }
-        uint b_id;
-        vec3 em, lnorm, delta;
-        float dist_sq, cx, cy;
-        if (restir_eval_geometry(voxel_sampler, origin, world_normal, prev.sample_data,
-                                 two_sided, b_id, em, lnorm, delta, dist_sq, cx, cy)) {
-            vec3 trans;
-            if (restir_trace_visibility(voxel_sampler, origin, prev.sample_data,
-                                        lnorm, delta, dist_sq, trans)) {
-                p0_of_1 = restir_target_pdf_from_geom(em, cx, cy, dist_sq);
-                prev_valid = p0_of_1 > 0.0;
-                prev_tinted = any(lessThan(trans, vec3(0.999)));
-            }
-        }
-    }
-
-    // Two-domain Pairwise MIS combination (m0 + m1 == 1 identically).
-    RestirReservoir combined = restir_empty_reservoir();
-    float m0_count = float(initial.count);
-    float m1_count = float(prev.count);
-
-    if (initial.sample_data.valid && initial.weight > 0.0 && initial.target_pdf > 0.0) {
-        float p0_of_0 = initial.target_pdf;
-        float p1_of_0 = dot(best_prev_world_normal, world_normal) > 0.9999
-            ? p0_of_0
-            : restir_target_pdf(voxel_sampler, origin, best_prev_world_normal,
-                                initial.sample_data, two_sided);
-        float m0 = (m0_count * p0_of_0) / max(m0_count * p0_of_0 + m1_count * p1_of_0, 1e-20);
-        float w0 = m0 * p0_of_0 * initial.weight;
-        if (restir_update(combined, initial.sample_data, w0, p0_of_0, random_dimension(seed, 0))) {
-            combined.tinted = initial.tinted;
-        }
-    }
-
-    if (prev_valid) {
-        float p1_of_1 = prev.target_pdf;
-        float m1 = (m1_count * p1_of_1) / max(m1_count * p1_of_1 + m0_count * p0_of_1, 1e-20);
-        float w1 = m1 * p0_of_1 * prev.weight;
-        if (restir_update(combined, prev.sample_data, w1, p0_of_1, random_dimension(seed, 1))) {
-            combined.tinted = prev_tinted;
-        }
-    }
-
-    combined.count = min(initial.count + prev.count, restir_temporal_cap);
-    if (combined.sample_data.valid && combined.target_pdf > 0.0 && combined.w_sum > 0.0) {
-        combined.weight = combined.w_sum / combined.target_pdf;
-    } else {
-        combined.sample_data = restir_empty_sample();
-        combined.weight = 0.0;
-        combined.target_pdf = 0.0;
-    }
-    return combined;
-}
-#endif
-
-#ifdef RTGI_RESTIR_GI
-RestirGiReservoir restir_gi_temporal_reuse(
-    bool prev_found, ivec2 best_tap, vec3 best_prev_world_normal,
-    int prev_bank, ivec2 target_res, vec3 origin, vec3 world_normal,
-    RestirGiReservoir initial, uint seed, bool two_sided, inout bool emitter_removed
-) {
-    if (!prev_found) {
-        return initial;
-    }
-    RestirGiReservoir prev = restir_gi_unpack(load_gi_reservoir(best_tap, target_res, prev_bank));
-    if (prev.count == 0u) {
-        return initial;
-    }
-    prev.count = min(prev.count, restir_gi_temporal_cap);
-
-    ivec3 grid_shift = camera_grid_shift();
-    float p0_of_1 = 0.0;
-    bool prev_valid = false;
-    vec3 prev_trans = vec3(1.0);
-    if (prev.sample_data.kind != restir_gi_kind_empty && prev.weight > 0.0 && prev.target_pdf > 0.0) {
-        if (prev.sample_data.emitter_cell.x >= 0) {
-            prev.sample_data.emitter_cell -= grid_shift;
-            if (is_inside_voxel_grid(prev.sample_data.emitter_cell)) {
-                uint em_payload = texelFetch(voxel_sampler, prev.sample_data.emitter_cell, 0).r;
-                if (!voxel_emitter_id(voxel_block_id(em_payload))) {
-                    // The light illuminating this bounced sample vanished inside the
-                    // active volume: drop cached L_o(x1) and flush history on frame 1.
-                    emitter_removed = true;
-                    return initial;
-                }
-            } else {
-                prev.sample_data.emitter_cell = ivec3(-1);
-            }
-        }
-        if (prev.sample_data.kind == restir_gi_kind_surface) {
-            prev.sample_data.pos_or_dir -= vec3(grid_shift);
-        }
-        if (restir_gi_surface_exists(voxel_sampler, prev.sample_data)
-            && restir_gi_temporal_eligible(origin, world_normal, prev.sample_data, two_sided)) {
-            p0_of_1 = restir_gi_target_pdf(origin, world_normal, prev.sample_data, two_sided);
-            if (p0_of_1 > 0.0) {
-                prev_valid = restir_gi_trace_visibility(
-                    voxel_sampler, origin, prev.sample_data, prev_trans
-                );
-            }
-        }
-    }
-
-    RestirGiReservoir combined = restir_gi_empty_reservoir();
-    float m0_count = float(initial.count);
-    float m1_count = float(prev.count);
-
-    if (initial.sample_data.kind != restir_gi_kind_empty
-        && initial.weight > 0.0 && initial.target_pdf > 0.0) {
-        float p0_of_0 = initial.target_pdf;
-        float p1_of_0 = dot(best_prev_world_normal, world_normal) > 0.9999
-            ? p0_of_0
-            : (restir_gi_temporal_eligible(origin, best_prev_world_normal,
-                                           initial.sample_data, two_sided)
-                ? restir_gi_target_pdf(origin, best_prev_world_normal, initial.sample_data, two_sided)
-                : 0.0);
-        float m0 = (m0_count * p0_of_0) / max(m0_count * p0_of_0 + m1_count * p1_of_0, 1e-20);
-        float w0 = m0 * p0_of_0 * initial.weight;
-        if (restir_gi_update(combined, initial.sample_data, w0, p0_of_0, random_dimension(seed, 0))) {
-            combined.tinted = initial.tinted;
-            combined.trans = initial.trans;
-        }
-    }
-
-    if (prev_valid) {
-        float p1_of_1 = prev.target_pdf;
-        float m1 = (m1_count * p1_of_1) / max(m1_count * p1_of_1 + m0_count * p0_of_1, 1e-20);
-        float w1 = m1 * p0_of_1 * prev.weight;
-        if (restir_gi_update(combined, prev.sample_data, w1, p0_of_1, random_dimension(seed, 1))) {
-            restir_gi_set_trans(combined, prev_trans);
-        }
-    }
-
-    combined.count = min(initial.count + prev.count, restir_gi_temporal_cap);
-    if (combined.sample_data.kind != restir_gi_kind_empty
-        && combined.target_pdf > 0.0 && combined.w_sum > 0.0) {
-        combined.weight = combined.w_sum / combined.target_pdf;
-    } else {
-        combined.sample_data = restir_gi_empty_sample();
-        combined.weight = 0.0;
-        combined.target_pdf = 0.0;
-    }
-    return combined;
-}
-#endif
 
 void main() {
     ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
@@ -489,43 +217,27 @@ void main() {
     vec3 origin = rtgi_receiver_origin(voxel_sampler, voxel_pos, world_normal, material);
     bool two_sided = rtgi_is_foliage(material);
 
-#ifdef RTGI_USE_RESTIR_ANY
-    ivec2 prev_tap;
-    vec3 prev_world_normal;
-    bool prev_found = restir_find_previous_tap(
-        grid, bank, scene_pos, world_normal, material, prev_tap, prev_world_normal
-    );
-    int prev_bank = 1 - bank;
-#endif
-
     vec4 direct_emitter = vec4(0.0);
     uvec4 packed_reservoir = uvec4(0u);
-    bool emitter_removed = false;
-    ivec3 prev_bounce_witness = ivec3(-1);
 #ifdef RTGI_EMITTER_SAMPLING
     bool has_emitters = has_voxel_emitters();
+    bool sample_emitters_this_pixel = has_emitters;
 #ifdef RTGI_USE_RESTIR_DI
-    if (has_emitters) {
-        RestirReservoir initial_res = restir_sample_initial(
-            voxel_sampler, origin, world_normal, lowbias32(seed ^ 0x85ebca77u), two_sided
-        );
-        RestirReservoir temporal_res = restir_temporal_reuse(
-            prev_found, prev_tap, prev_world_normal, prev_bank,
-            origin, world_normal, initial_res, lowbias32(seed ^ 0xc2b2ae3du), two_sided,
-            emitter_removed, prev_bounce_witness
-        );
-        packed_reservoir = restir_pack(temporal_res);
-    } else {
-        // Even if the last emitter in the entire volume was just broken
-        // (so has_emitters flipped false), still inspect the previous
-        // reservoir so temporal history flushes immediately on frame 1.
-        RestirReservoir temporal_res = restir_temporal_reuse(
-            prev_found, prev_tap, prev_world_normal, prev_bank,
-            origin, world_normal, restir_empty_reservoir(), lowbias32(seed ^ 0xc2b2ae3du), two_sided,
-            emitter_removed, prev_bounce_witness
-        );
-        packed_reservoir = uvec4(0u);
-    }
+#if INFO <= 3
+    int prev_bank = 1 - bank;
+    uvec4 prev_hdr = imageLoad(rtgi_frame_state_img, ivec2(0, prev_bank));
+    bool prev_state_ok = prev_hdr.y == rtgi_frame_tag
+        && rtgi_previous_frame(prev_hdr.x, uint(frameCounter));
+    uvec4 prev_di_stamp = prev_state_ok ? imageLoad(rtgi_frame_state_img, ivec2(3, prev_bank)) : uvec4(0u);
+    uvec4 prev_bw_stamp = prev_state_ok ? imageLoad(rtgi_frame_state_img, ivec2(4, prev_bank)) : uvec4(0u);
+    bool prev_any_emitter_seen = prev_state_ok
+        && ((prev_di_stamp.x == prev_hdr.x && prev_di_stamp.y == rtgi_frame_tag)
+            || (prev_bw_stamp.x == prev_hdr.x && prev_bw_stamp.y == rtgi_frame_tag));
+    bool full_di = !prev_state_ok || prev_any_emitter_seen;
+    int probe_slot = (texel.x & 3) | ((texel.y & 3) << 2);
+    sample_emitters_this_pixel = has_emitters
+        && (full_di || (probe_slot == (frameCounter & 15)));
+#endif
 #else
     if (has_emitters) {
         direct_emitter = sample_direct_emitter(
@@ -535,6 +247,7 @@ void main() {
 #endif
 #else
     const bool has_emitters = false;
+    const bool sample_emitters_this_pixel = false;
 #endif
 
     vec3 accum_radiance = vec3(0.0);
@@ -559,7 +272,7 @@ void main() {
         PathTraceSample pt = evaluate_path_trace(
             voxel_pos, origin, world_normal, receiver_skylight,
             voxel_sampler, colortex4, direct_light_col, light_dir,
-            ray_seed, primary_u, has_emitters, two_sided, ray_bounces
+            ray_seed, primary_u, sample_emitters_this_pixel, two_sided, ray_bounces
         );
         vec3 indirect_tinted = pt.indirect_radiance * pt.primary_transmittance;
         if (pt.hit_source == rtgi_hit_invalid
@@ -626,24 +339,19 @@ void main() {
             initial_gi.weight = 0.0;
             initial_gi.target_pdf = 0.0;
         }
-        RestirGiReservoir temporal_gi = restir_gi_temporal_reuse(
-            prev_found, prev_tap, prev_world_normal, restir_gi_history_bank, target_res,
-            origin, world_normal, initial_gi, lowbias32(seed ^ 0x165667b1u), two_sided,
-            emitter_removed
-        );
-        store_gi_reservoir(texel, target_res, restir_gi_temporal_bank, restir_gi_pack(temporal_gi));
+        store_gi_reservoir(texel, target_res, restir_gi_temporal_bank, restir_gi_pack(initial_gi));
     } else {
         store_gi_reservoir(texel, target_res, restir_gi_temporal_bank, RestirGiSlot(uvec4(0u), uvec4(0u)));
     }
 #endif
 
 #ifdef RTGI_USE_RESTIR_DI
-    if (has_emitters && (packed_reservoir.x >> 31u) == 0u) {
-        ivec3 witness = bounce_emitter_cell.x >= 0 ? bounce_emitter_cell : prev_bounce_witness;
-        if (witness.x >= 0 && is_inside_voxel_grid(witness)
-            && emitter_index_member(texelFetch(voxel_sampler, witness, 0).r)) {
-            packed_reservoir.x = restir_pack_bounce_witness(witness);
-        }
+    if (has_emitters && bounce_emitter_cell.x >= 0
+        && is_inside_voxel_grid(bounce_emitter_cell)
+        && emitter_index_member(texelFetch(voxel_sampler, bounce_emitter_cell, 0).r)) {
+        packed_reservoir.x = rtgi_pack_bounce_witness_cell(bounce_emitter_cell);
+        imageStore(rtgi_frame_state_img, ivec2(4, bank),
+                   uvec4(uint(frameCounter), rtgi_frame_tag, 0u, 0u));
     }
 #endif
 
@@ -654,8 +362,8 @@ void main() {
     if (valid_batch) {
         float scale = min(1.0, 65504.0 / max(max_of(accum_radiance), eps));
 #ifndef RTGI_USE_RESTIR_ANY
-        // Under ReSTIR DI/GI, deferred1_b adds resampled direct/indirect radiance
-        // and applies RTGI_MAX_RADIANCE to the combined estimator once.
+        // Under ReSTIR DI/GI, spatial passes add resampled direct/indirect radiance
+        // and apply RTGI_MAX_RADIANCE to the combined estimator once.
         if (RTGI_MAX_RADIANCE > 0.0) {
             scale = min(scale, RTGI_MAX_RADIANCE / max(lum, eps));
         }
@@ -663,8 +371,7 @@ void main() {
         accum_radiance *= scale;
     }
     uint flags = rtgi_guide_covered
-        | (valid_batch ? rtgi_guide_raw_valid : 0u)
-        | (emitter_removed ? rtgi_guide_emitter_changed : 0u);
+        | (valid_batch ? rtgi_guide_raw_valid : 0u);
     uvec4 guide = rtgi_pack_guide(full_texel, -view_pos.z, normal_oct, material,
                                  rtgi_world, flags);
     vec4 raw = valid_batch ? vec4(accum_radiance, hit_distance)

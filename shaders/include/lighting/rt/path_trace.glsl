@@ -199,7 +199,7 @@ PathTraceSample evaluate_path_trace(
                 emission *= power_mis(mis_rays * bsdf_pdf, emitter_nee_mis_bias * light_pdf);
             }
         }
-        if (b >= 1 && max_of(emission) > 0.0 && emitter_index_member(hit.payload)
+        if ((b >= 1 || !sample_emitters) && max_of(emission) > 0.0 && emitter_index_member(hit.payload)
             && result.bounce_emitter_cell.x < 0) {
             result.bounce_emitter_cell = hit.cell;
         }

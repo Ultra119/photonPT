@@ -1,3 +1,3 @@
 #version 430 compatibility
 #define WORLD_END
-#include "/program/rtgi/rtgi_world_cache_resolve.csh"
+#include "/program/rtgi/rtgi_restir_di_temporal.csh"

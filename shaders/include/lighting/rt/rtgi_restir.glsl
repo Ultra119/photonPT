@@ -222,10 +222,10 @@ bool restir_update(
     return false;
 }
 
-// Initial RIS pass: draw restir_initial_candidates proposals from the emitter
+// Initial RIS pass: draw num_candidates proposals from the emitter
 // tree, pick one winner by area-measure target PDF, and test visibility once.
 RestirReservoir restir_sample_initial(
-    usampler3D grid, vec3 origin, vec3 normal, uint seed, bool two_sided
+    usampler3D grid, vec3 origin, vec3 normal, uint seed, bool two_sided, int num_candidates
 ) {
     RestirReservoir r = restir_empty_reservoir();
     vec3 best_light_normal = vec3(0.0);
@@ -233,7 +233,7 @@ RestirReservoir restir_sample_initial(
     float best_dist_sq = 0.0;
     vec3 tree_normal = two_sided ? vec3(0.0) : normal;
 
-    for (int m = 0; m < restir_initial_candidates; ++m) {
+    for (int m = 0; m < num_candidates; ++m) {
         uint cseed = lowbias32(seed ^ (uint(m + 1) * 0x9e3779b9u));
         EmitterSelection selected = select_voxel_emitter(origin, tree_normal, cseed, ivec3(-1));
         if (selected.pmf <= 0.0) {
@@ -306,7 +306,7 @@ RestirReservoir restir_sample_initial(
         }
     }
 
-    r.count = uint(restir_initial_candidates);
+    r.count = uint(num_candidates);
     if (r.sample_data.valid && r.target_pdf > 0.0 && r.w_sum > 0.0) {
         vec3 trans;
         if (restir_trace_visibility(grid, origin, r.sample_data, best_light_normal,
@@ -326,6 +326,12 @@ RestirReservoir restir_sample_initial(
         r.tinted = false;
     }
     return r;
+}
+
+RestirReservoir restir_sample_initial(
+    usampler3D grid, vec3 origin, vec3 normal, uint seed, bool two_sided
+) {
+    return restir_sample_initial(grid, origin, normal, seed, two_sided, restir_initial_candidates);
 }
 
 // Shade a visibility-validated reservoir with power MIS against RTGI_RAY_COUNT BSDF rays,

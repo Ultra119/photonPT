@@ -34,6 +34,34 @@ layout(r32ui) writeonly uniform uimage2D rtgi_emitter_index_img;
 shared uint membership[512];
 shared uint word_counts[16];
 
+// True when all 6 faces of a full-cube emitter are buried by opaque full cubes
+// (matching voxel_occludes_full_face), so it can never emit a photon.
+bool emitter_cell_buried(ivec3 cell) {
+    const ivec3 offs[6] = ivec3[6](
+        ivec3(1, 0, 0), ivec3(-1, 0, 0),
+        ivec3(0, 1, 0), ivec3(0, -1, 0),
+        ivec3(0, 0, 1), ivec3(0, 0, -1)
+    );
+    for (int i = 0; i < 6; ++i) {
+        ivec3 nb = cell + offs[i];
+        if (!is_inside_voxel_grid(nb)) {
+            return false;
+        }
+        uint p = texelFetch(voxel_sampler, nb, 0).r;
+        uint bid = voxel_block_id(p);
+        if (bid <= 5u || bid == 14u || bid == 15u || bid == 58u || bid == 80u
+            || (81u <= bid && bid <= 96u)
+            || voxel_torch_emitter(bid) || voxel_lantern_emitter(bid)) {
+            return false;
+        }
+        uint shape = (p >> 19u) & 15u;
+        if (!voxel_box_emitter(bid) && shape != VOXEL_SHAPE_CUBE) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void main() {
     ivec3 leaf = ivec3(gl_WorkGroupID);
     int lane = int(gl_LocalInvocationIndex);
@@ -52,7 +80,14 @@ void main() {
     for (int z = 0; z < 8; ++z) {
         ivec3 cell = first + ivec3(lane & 7, lane >> 3, z);
         uint payload = texelFetch(voxel_sampler, cell, 0).r;
-        membership[z * 64 + lane] = uint(emitter_index_member(payload));
+        bool member = emitter_index_member(payload);
+        if (member) {
+            uint bid = voxel_block_id(payload);
+            if (!voxel_torch_emitter(bid) && !voxel_lantern_emitter(bid) && emitter_cell_buried(cell)) {
+                member = false;
+            }
+        }
+        membership[z * 64 + lane] = uint(member);
     }
     barrier();
 
