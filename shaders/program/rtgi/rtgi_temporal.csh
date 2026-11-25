@@ -331,6 +331,7 @@ void main() {
 
     RtgiHistory history = RtgiHistory(vec4(0.0), vec4(0.0), 0.0);
     ivec2 prev_shift = ivec2(0);
+    bool exact_static = false;
     float reason = rtgi_reset_first;
     vec3 scene_pos = transform(gbufferModelViewInverse, view_pos);
     if (compatible) {
@@ -344,7 +345,7 @@ void main() {
                 && all(lessThan(previous_pixel, vec2(grid.full_active)))) {
                 vec2 current_pixel = vec2(guide.x & 65535u, guide.x >> 16u) + 0.5;
                 vec2 motion_px = (previous_pixel - previous_jitter) - (current_pixel - jitter);
-                bool exact_static = dot(motion_px, motion_px) < sqr(0.08);
+                exact_static = dot(motion_px, motion_px) < sqr(0.08);
                 ivec2 p_base;
                 vec2 p_frac;
                 rtgi_footprint(previous_pixel, grid, p_base, p_frac);
@@ -458,7 +459,11 @@ void main() {
     // permanently trapped edge pixels at age 1.3-4.0 and fed raw fireflies in.
     float age_retention = clamp01(support * 6.25);
     float age = min(history.stats.z * age_retention + 1.0, age_cap);
-    float alpha = max(1.0 / age, 0.01 * RTGI_MIN_ACCUM);
+    // Let stationary exact_static pixels converge down to 1 / RTGI_SPP_CAP
+    // (halving the RTGI_MIN_ACCUM floor) while moving pixels keep the full
+    // responsiveness floor and adaptive resets still catch lighting changes.
+    float min_alpha = (exact_static ? 0.005 : 0.01) * RTGI_MIN_ACCUM;
+    float alpha = max(1.0 / age, min_alpha);
     float previous_luminance = dot(history.mean.rgb, luminance_weights);
     float luminance = dot(raw.rgb, luminance_weights);
     float delta = luminance - previous_luminance;
@@ -473,57 +478,79 @@ void main() {
 
     float evidence = 0.0;
     reason = rtgi_reset_none;
-    if (RTGI_ADAPT_STRENGTH > 0.0 && support >= 0.65 && history.stats.z >= 6.0) {
-        float nbr_raw, nbr_prev;
-        int nbr_count, changed_count;
+    float nbr_raw = luminance;
+    float nbr_prev = previous_luminance;
+    int nbr_count = 1;
+    int changed_count = 0;
+    if (support >= 0.65 && history.stats.z >= 2.0) {
         rtgi_neighborhood_change(
             texel, prev_shift, grid, jitter, even, material, view_pos, world_normal,
             luminance, previous_luminance, nbr_raw, nbr_prev, nbr_count, changed_count
         );
-        if (changed_count >= 2) {
-            store_history(texel, even, raw, vec4(0.0, 1.0, 1.0, 0.0),
-                          rtgi_reset_adaptive, support, true, 1.0);
-            return;
-        }
-        if (nbr_count >= 4) {
-            // Compare matched 3x3 same-surface raw vs previous means so steep
-            // 1/r^2 peaks have zero curvature bias. Under ReSTIR spatial/temporal
-            // reuse, neighboring pixels share correlated reservoirs, so use a
-            // conservative effective spatial count and 5-frame persistence gate
-            // to prevent stationary false adaptive resets (yellow dots in Reset).
-            float nbr_delta = nbr_raw - nbr_prev;
-            float frame_sigma = sqrt(history.stats.x / max(1.0 - history.stats.y, 1e-5));
+        if (RTGI_ADAPT_STRENGTH > 0.0 && history.stats.z >= 6.0) {
+            if (changed_count >= 2) {
+                store_history(texel, even, raw, vec4(0.0, 1.0, 1.0, 0.0),
+                              rtgi_reset_adaptive, support, true, 1.0);
+                return;
+            }
+            if (nbr_count >= 4) {
+                // Compare matched 3x3 same-surface raw vs previous means so steep
+                // 1/r^2 peaks have zero curvature bias. Under ReSTIR spatial/temporal
+                // reuse, neighboring pixels share correlated reservoirs, so use a
+                // conservative effective spatial count and 5-frame persistence gate
+                // to prevent stationary false adaptive resets (yellow dots in Reset).
+                float nbr_delta = nbr_raw - nbr_prev;
+                float frame_sigma = sqrt(history.stats.x / max(1.0 - history.stats.y, 1e-5));
 #if (defined RTGI_EMITTER_SAMPLING && defined RTGI_RESTIR_DI) || defined RTGI_RESTIR_GI
-            // Under ReSTIR temporal/spatial reuse, distant emitter reservoirs
-            // stay autocorrelated for ~8-16 frames; use a higher persistence
-            // gate, floor, and gentler alpha so distant 15-20m emitter variance
-            // never triggers pulsing false resets (broken emitters already reset
-            // deterministically on frame 1 via rtgi_guide_emitter_changed).
-            float eff_nbr = min(float(nbr_count), 2.0);
-            const float evidence_limit = 10.0;
-            float nbr_sigma = frame_sigma * inversesqrt(eff_nbr);
-            float threshold = max(0.015, max(0.42 * max(nbr_raw, nbr_prev), 4.0 * nbr_sigma));
-            float adapt_alpha = 0.35 * RTGI_ADAPT_STRENGTH;
+                // Under ReSTIR temporal/spatial reuse, distant emitter reservoirs
+                // stay autocorrelated for ~8-16 frames; use a higher persistence
+                // gate, floor, and gentler alpha so distant 15-20m emitter variance
+                // never triggers pulsing false resets (broken emitters already reset
+                // deterministically on frame 1 via rtgi_guide_emitter_changed).
+                float eff_nbr = min(float(nbr_count), 2.0);
+                const float evidence_limit = 10.0;
+                float nbr_sigma = frame_sigma * inversesqrt(eff_nbr);
+                float threshold = max(0.015, max(0.42 * max(nbr_raw, nbr_prev), 4.0 * nbr_sigma));
+                float adapt_alpha = 0.35 * RTGI_ADAPT_STRENGTH;
 #else
-            float eff_nbr = float(nbr_count);
-            const float evidence_limit = 3.0;
-            float nbr_sigma = frame_sigma * inversesqrt(eff_nbr);
-            float threshold = max(0.002, max(0.25 * max(nbr_raw, nbr_prev), 3.0 * nbr_sigma));
-            float adapt_alpha = 0.60 * RTGI_ADAPT_STRENGTH;
+                float eff_nbr = float(nbr_count);
+                const float evidence_limit = 3.0;
+                float nbr_sigma = frame_sigma * inversesqrt(eff_nbr);
+                float threshold = max(0.002, max(0.25 * max(nbr_raw, nbr_prev), 3.0 * nbr_sigma));
+                float adapt_alpha = 0.60 * RTGI_ADAPT_STRENGTH;
 #endif
-            if (abs(nbr_delta) > threshold) {
-                float direction = sign(nbr_delta);
-                evidence = clamp(history.stats.w * direction + 1.0, 1.0, evidence_limit) * direction;
-                if (abs(evidence) >= evidence_limit) {
-                    alpha = max(alpha, adapt_alpha);
-                    age = min(age, max(1.0 / alpha, 8.0));
-                    reason = rtgi_reset_adaptive;
+                if (abs(nbr_delta) > threshold) {
+                    float direction = sign(nbr_delta);
+                    evidence = clamp(history.stats.w * direction + 1.0, 1.0, evidence_limit) * direction;
+                    if (abs(evidence) >= evidence_limit) {
+                        alpha = max(alpha, adapt_alpha);
+                        age = min(age, max(1.0 / alpha, 8.0));
+                        reason = rtgi_reset_adaptive;
+                    }
                 }
             }
         }
     }
 
-    vec3 mean = mix(history.mean.rgb, raw.rgb, alpha);
+    // Soft Winsorization for isolated single-pixel raw fireflies before
+    // temporal blending: prevents one 50x-150x rare ray or ReSTIR weight burst
+    // from burning a persistent white dot into exact_static history while
+    // leaving normal rays and corroborated lighting changes untouched.
+    vec3 blend_raw = raw.rgb;
+    if (reason != rtgi_reset_adaptive && history.stats.z >= 2.0) {
+        float ref_y = nbr_count >= 3 ? max(previous_luminance, nbr_prev) : previous_luminance;
+        float frame_sigma = sqrt(history.stats.x / max(1.0 - history.stats.y, 1e-5));
+        float spike_knee = max(ref_y * 3.5 + 2.5 * frame_sigma, ref_y * 2.5 + 0.12);
+        bool isolated_spike = (nbr_count < 3) || (luminance > max(nbr_raw * 2.5, 0.18));
+        if (isolated_spike && luminance > spike_knee) {
+            float excess = luminance - spike_knee;
+            float safe_y = spike_knee + excess / (1.0 + excess / max(spike_knee, 0.05));
+            blend_raw *= safe_y / max(luminance, 1e-5);
+            delta = safe_y - previous_luminance;
+        }
+    }
+
+    vec3 mean = mix(history.mean.rgb, blend_raw, alpha);
     // Decay stale pre-step variance by (1 - alpha)^2 (matching luminance^2
     // scaling and q decay) so frame_sigma shrinks in step with mean instead of
     // locking the detector shut halfway through a torch removal.

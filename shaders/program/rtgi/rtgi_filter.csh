@@ -150,26 +150,28 @@ void main() {
     float grazing = max(abs(dot(normal, normalize(center_view))), 0.02);
 
     int base_step = rtgi_atrous_step();
-    // Bound wide solid-surface à-trous strides in world blocks so filter reach
-    // stays consistent with camera distance while keeping dense local polish.
+    // Bound wide solid-surface à-trous strides in world blocks so close corners
+    // stay sharp while scaling gently with distance so far walls (15-40m) do
+    // not collapse all 4 passes to 1-texel kernels and leave distant speckles.
+    float depth_m = max(-center_view.z, 0.0);
 #if RTGI_FILTER_PASS == 1
     float young_hint = missing_center ? 1.0 : (1.0 - smoothstep(2.0, 12.0, age));
-    float max_world_step = mix(0.22, 0.35, young_hint);
+    float max_world_step = min(mix(0.22, 0.35, young_hint) + 0.012 * depth_m, 0.75);
     int step_px = is_foliage
         ? base_step
         : clamp(int(round(max_world_step / max(footprint, 1e-4))), 1, base_step);
 #elif RTGI_FILTER_PASS == 2
-    const float max_world_step = 0.12;
+    float max_world_step = min(0.12 + 0.006 * depth_m, 0.42);
     int step_px = is_foliage
         ? base_step
         : clamp(int(round(max_world_step / max(footprint, 1e-4))), 1, base_step);
 #elif RTGI_FILTER_PASS == 3
-    const float max_world_step = 0.06;
+    float max_world_step = min(0.06 + 0.003 * depth_m, 0.22);
     int step_px = is_foliage
         ? base_step
         : clamp(int(round(max_world_step / max(footprint, 1e-4))), 1, base_step);
 #else
-    const float max_world_step = 0.04;
+    float max_world_step = min(0.04 + 0.002 * depth_m, 0.14);
     int step_px = 1;
 #endif
     float world_sigma = max(0.24, 1.8 * max_world_step);
@@ -192,7 +194,9 @@ void main() {
     float nbr_se_sum = missing_center ? 0.0 : 0.25 * center.a;
     float nbr_w_sum = 0.0;
     float nbr_y_sum = 0.0;
-    float nbr_max_y = 0.0;
+    float nbr_max1_y = 0.0;
+    float nbr_max2_y = 0.0;
+    int nbr_valid_cnt = 0;
 
     for (int k = 0; k < 8; ++k) {
         tap_geom[k] = 0.0;
@@ -232,7 +236,13 @@ void main() {
         tap_y[k] = sy;
         nbr_w_sum += gw;
         nbr_y_sum += gw * sy;
-        nbr_max_y = max(nbr_max_y, sy);
+        ++nbr_valid_cnt;
+        if (sy > nbr_max1_y) {
+            nbr_max2_y = nbr_max1_y;
+            nbr_max1_y = sy;
+        } else if (sy > nbr_max2_y) {
+            nbr_max2_y = sy;
+        }
         mom_w += gw;
         mom_y += gw * sy;
         mom_y2 += gw * sqr(sy);
@@ -244,13 +254,13 @@ void main() {
         return;
     }
 
-    // 3x3 same-surface firefly despeckle: an isolated 1-pixel outlier would
-    // otherwise reject all dark neighbors via exp(-delta / luma_scale) and
-    // survive Passes 1-4 as a bright glowworm or smear into a blob on edges.
-    // Real lighting edges have bright neighbors so center_y <= nbr_max_y.
+    // 3x3 same-surface firefly despeckle using the 2nd-largest neighbor (when
+    // >= 3 coplanar neighbors exist) so paired speckles cannot protect each
+    // other, while genuine lighting edges always have >= 2 bright neighbors.
     float nbr_mean_y = nbr_w_sum > 1e-4 ? (nbr_y_sum / nbr_w_sum) : center_y;
+    float ref_max_y = nbr_valid_cnt >= 3 ? nbr_max2_y : nbr_max1_y;
     if (!missing_center && nbr_w_sum > 0.10) {
-        float ff_cap = max(nbr_max_y * 1.35, nbr_mean_y * 2.2) + 0.006;
+        float ff_cap = max(ref_max_y * 1.25, nbr_mean_y * 1.85) + 0.004;
         if (center_y > ff_cap) {
             float old_y = center_y;
             center.rgb *= ff_cap / max(old_y, 1e-5);
@@ -280,7 +290,7 @@ void main() {
     float sum_w2_var = missing_center ? 0.0 : sqr(0.25) * sqr(smooth_center_se);
     float sum_w_var = missing_center ? 0.0 : 0.25 * sqr(smooth_center_se);
 
-    float tap_ff_cap = max(max(center_y, nbr_mean_y) * 2.5, 0.02) + 0.015;
+    float tap_ff_cap = max(max(center_y, ref_max_y) * 1.65, nbr_mean_y * 2.0) + 0.010;
     for (int k = 0; k < 8; ++k) {
         float gw = tap_geom[k];
         if (gw <= 0.0) {
@@ -329,7 +339,9 @@ void main() {
     float tap_y[8];
     float nbr_w_sum = 0.0;
     float nbr_y_sum = 0.0;
-    float nbr_max_y = 0.0;
+    float nbr_max1_y = 0.0;
+    float nbr_max2_y = 0.0;
+    int nbr_valid_cnt = 0;
 
     for (int k = 0; k < 8; ++k) {
         tap_geom[k] = 0.0;
@@ -370,12 +382,19 @@ void main() {
         tap_y[k] = sy;
         nbr_w_sum += gw;
         nbr_y_sum += gw * sy;
-        nbr_max_y = max(nbr_max_y, sy);
+        ++nbr_valid_cnt;
+        if (sy > nbr_max1_y) {
+            nbr_max2_y = nbr_max1_y;
+            nbr_max1_y = sy;
+        } else if (sy > nbr_max2_y) {
+            nbr_max2_y = sy;
+        }
     }
 
     float nbr_mean_y = nbr_w_sum > 1e-4 ? (nbr_y_sum / nbr_w_sum) : center_y;
+    float ref_max_y = nbr_valid_cnt >= 3 ? nbr_max2_y : nbr_max1_y;
     if (nbr_w_sum > 0.08) {
-        float ff_cap = max(nbr_max_y * 1.35, nbr_mean_y * 2.0) + 0.004;
+        float ff_cap = max(ref_max_y * 1.25, nbr_mean_y * 1.75) + 0.003;
         if (center_y > ff_cap) {
             center.rgb *= ff_cap / max(center_y, 1e-5);
             center_y = ff_cap;
@@ -388,7 +407,7 @@ void main() {
     float center_var = sqr(center.a);
     float sum_w2_var = sqr(center_k) * center_var;
     float sum_w_var = center_k * center_var;
-    float tap_ff_cap = max(max(center_y, nbr_mean_y) * 2.2, 0.015) + 0.01;
+    float tap_ff_cap = max(max(center_y, ref_max_y) * 1.55, nbr_mean_y * 1.9) + 0.008;
 
     for (int k = 0; k < 8; ++k) {
         float weight = tap_geom[k];

@@ -243,12 +243,16 @@ void main() {
     if (initial.sample_data.kind != restir_gi_kind_empty
         && initial.weight > 0.0 && initial.target_pdf > 0.0) {
         float p0_of_0 = initial.target_pdf;
-        float p1_of_0 = dot(prev_world_normal, world_normal) > 0.9999
-            ? p0_of_0
-            : (restir_gi_temporal_eligible(origin, prev_world_normal,
-                                           initial.sample_data, two_sided)
-                ? restir_gi_target_pdf(origin, prev_world_normal, initial.sample_data, two_sided)
-                : 0.0);
+        // Mirror line 214's temporal eligibility guard on the canonical sample:
+        // short (<0.25-block) or grazing (<0.08 cos) concave-corner hits are
+        // rejected from temporal reuse on the next frame, so p1_of_0 must be
+        // 0 (giving m0 = 1.0) instead of shrinking their weight to 1/(1+M_prev).
+        float p1_of_0 = 0.0;
+        if (restir_gi_temporal_eligible(origin, prev_world_normal, initial.sample_data, two_sided)) {
+            p1_of_0 = dot(prev_world_normal, world_normal) > 0.9999
+                ? p0_of_0
+                : restir_gi_target_pdf(origin, prev_world_normal, initial.sample_data, two_sided);
+        }
         float m0 = (m0_count * p0_of_0) / max(m0_count * p0_of_0 + m1_count * p1_of_0, 1e-20);
         float w0 = m0 * p0_of_0 * initial.weight;
         if (restir_gi_update(combined, initial.sample_data, w0, p0_of_0, random_dimension(gi_seed, 0))) {
