@@ -82,9 +82,8 @@ vec4 read_filter_input(ivec2 texel, bool even, out float age) {
 #endif
 }
 
-// Wide-to-narrow à-trous strides (8 -> 4 -> 2 -> 1): running dense stride-1
-// polish last eliminates sparse 8-texel / 16-pixel stepping bands along
-// 90-degree wall/ceiling joints and smooths wide-pass footprint discontinuities.
+// Wide-to-narrow à-trous strides (8 -> 4 -> 2 -> 1): dense stride-1 polish last
+// removes 8-texel corner stepping bands and wide-pass footprint seams.
 int rtgi_atrous_step() {
 #if RTGI_FILTER_PASS == 1
     #if RTGI_RESOLUTION == 0
@@ -150,9 +149,8 @@ void main() {
     float grazing = max(abs(dot(normal, normalize(center_view))), 0.02);
 
     int base_step = rtgi_atrous_step();
-    // Bound wide solid-surface à-trous strides in world blocks so close corners
-    // stay sharp while scaling gently with distance so far walls (15-40m) do
-    // not collapse all 4 passes to 1-texel kernels and leave distant speckles.
+    // Bound wide strides in world blocks for sharp close corners, scaling gently
+    // with distance so far walls (15-40m) don't collapse to 1-texel kernels.
     float depth_m = max(-center_view.z, 0.0);
 #if RTGI_FILTER_PASS == 1
     float young_hint = missing_center ? 1.0 : (1.0 - smoothstep(2.0, 12.0, age));
@@ -182,9 +180,8 @@ void main() {
     float foliage_max_dist = min(1.5, 0.40 + 0.35 * float(step_px) * footprint);
 
 #if RTGI_FILTER_PASS == 1
-    // Pass 1 estimates same-surface 3x3 spatial variance for ALL pixels (including
-    // dark/zero-variance and freshly disoccluded texels) before filtering so
-    // passes 2-4 never stall on underestimated temporal variance.
+    // Pass 1 computes 3x3 same-surface spatial variance for all pixels so passes
+    // 2-4 never stall on underestimated temporal variance.
     vec4 tap_val[8];
     float tap_geom[8];
     float tap_y[8];
@@ -254,9 +251,8 @@ void main() {
         return;
     }
 
-    // 3x3 same-surface firefly despeckle using the 2nd-largest neighbor (when
-    // >= 3 coplanar neighbors exist) so paired speckles cannot protect each
-    // other, while genuine lighting edges always have >= 2 bright neighbors.
+    // 3x3 coplanar despeckle via 2nd-largest neighbor (when >= 3 exist) so paired
+    // speckles cannot protect each other while real edges stay intact.
     float nbr_mean_y = nbr_w_sum > 1e-4 ? (nbr_y_sum / nbr_w_sum) : center_y;
     float ref_max_y = nbr_valid_cnt >= 3 ? nbr_max2_y : nbr_max1_y;
     if (!missing_center && nbr_w_sum > 0.10) {
@@ -275,9 +271,8 @@ void main() {
     float spatial_se = sqrt(local_var / max(age, 1.0));
     float young_factor = missing_center ? 1.0 : (1.0 - smoothstep(2.0, 12.0, age));
     float young_prior = (0.22 * local_mean + 0.003) * inversesqrt(max(age, 1.0)) * young_factor;
-    // Gate wide spatial variance strictly to young/disoccluded texels so
-    // converged sharp shadow edges are never mistaken for noise, while keeping
-    // a small neighbor SE floor so zero-variance dark corners stay smooth.
+    // Gate wide spatial variance to young/disoccluded texels to preserve sharp
+    // shadow edges, keeping a small SE floor so zero-variance corners stay smooth.
     float spatial_se_gate = (0.85 * young_factor) * spatial_se;
     float nbr_se_avg = nbr_se_sum / mom_w;
     float smooth_center_se = missing_center

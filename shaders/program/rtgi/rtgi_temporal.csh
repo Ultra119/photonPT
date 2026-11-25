@@ -169,9 +169,8 @@ RtgiHistory gather_history(
         }
     }
 
-    // Cutout-barrier bypass: when a thin foreground leaf/vine/grass cutout
-    // briefly occluded the 2x2 footprint on the previous frame, reach 1 texel
-    // around it with the exact same geometry gate to preserve converged history.
+    // Cutout-barrier bypass: reach 1 texel around thin foliage cutouts that
+    // briefly occluded the 2x2 footprint to preserve converged history.
     if (history.weight < 0.15) {
         ivec2 center_tap = ivec2(round(vec2(base) + fraction));
         float fb_chord = is_foliage ? 0.85 : min(3.0, 0.20 + 3.0 * footprint / grazing);
@@ -370,12 +369,8 @@ void main() {
     }
     if (support <= 1e-4) {
 #ifdef RTGI_WORLD_CACHE
-        // Hybrid disocclusion warm-start: seed newly revealed block faces with a
-        // face-oriented WorldCache prior. Normal walls/pillars use a light prior
-        // (age 1.5-3.0) since SVGF has ample same-surface neighbors; isolated
-        // background peepholes seen through tiny foliage/vine/grass cutouts have
-        // almost no spatial SVGF support, so give them a stronger converged
-        // WorldCache prior (age 8-20) to eliminate flickering 1-spp RTGI blobs.
+        // Disocclusion WorldCache prior: light (age 1.5-3) on open surfaces,
+        // stronger (age 8-20) on cutout peepholes lacking spatial SVGF support.
         if ((guide.w & rtgi_guide_emitter_changed) == 0u) {
             vec3 voxel_pos = scene_to_voxel_space(scene_pos);
             vec3 cached_rad;
@@ -452,16 +447,12 @@ void main() {
     }
 
     const float age_cap = float(RTGI_SPP_CAP) / float(RTGI_RAY_COUNT);
-    // Do not decay age by bilinear support on silhouette/cutout edges where
-    // 1-3 of the 4 bilinear taps cross onto another material (e.g. vines on
-    // wood, grass blades, leaf cutouts); history.mean is already normalized
-    // over strictly geometry-matched taps, whereas multiplying by support
-    // permanently trapped edge pixels at age 1.3-4.0 and fed raw fireflies in.
+    // Keep age undecayed by partial bilinear support on cutout/silhouette edges;
+    // history.mean is already normalized over geometry-matched taps.
     float age_retention = clamp01(support * 6.25);
     float age = min(history.stats.z * age_retention + 1.0, age_cap);
-    // Let stationary exact_static pixels converge down to 1 / RTGI_SPP_CAP
-    // (halving the RTGI_MIN_ACCUM floor) while moving pixels keep the full
-    // responsiveness floor and adaptive resets still catch lighting changes.
+    // Halve RTGI_MIN_ACCUM for stationary exact_static pixels to converge toward
+    // 1 / RTGI_SPP_CAP while moving pixels and adaptive resets stay responsive.
     float min_alpha = (exact_static ? 0.005 : 0.01) * RTGI_MIN_ACCUM;
     float alpha = max(1.0 / age, min_alpha);
     float previous_luminance = dot(history.mean.rgb, luminance_weights);
@@ -494,19 +485,13 @@ void main() {
                 return;
             }
             if (nbr_count >= 4) {
-                // Compare matched 3x3 same-surface raw vs previous means so steep
-                // 1/r^2 peaks have zero curvature bias. Under ReSTIR spatial/temporal
-                // reuse, neighboring pixels share correlated reservoirs, so use a
-                // conservative effective spatial count and 5-frame persistence gate
-                // to prevent stationary false adaptive resets (yellow dots in Reset).
+                // Compare matched 3x3 raw vs previous means (zero 1/r^2 curvature bias);
+                // use conservative effective count + 5-frame gate for correlated ReSTIR.
                 float nbr_delta = nbr_raw - nbr_prev;
                 float frame_sigma = sqrt(history.stats.x / max(1.0 - history.stats.y, 1e-5));
 #if (defined RTGI_EMITTER_SAMPLING && defined RTGI_RESTIR_DI) || defined RTGI_RESTIR_GI
-                // Under ReSTIR temporal/spatial reuse, distant emitter reservoirs
-                // stay autocorrelated for ~8-16 frames; use a higher persistence
-                // gate, floor, and gentler alpha so distant 15-20m emitter variance
-                // never triggers pulsing false resets (broken emitters already reset
-                // deterministically on frame 1 via rtgi_guide_emitter_changed).
+                // Use stricter gate, floor, and gentler alpha for autocorrelated distant
+                // ReSTIR emitters (broken lights already reset via rtgi_guide_emitter_changed).
                 float eff_nbr = min(float(nbr_count), 2.0);
                 const float evidence_limit = 10.0;
                 float nbr_sigma = frame_sigma * inversesqrt(eff_nbr);
@@ -532,10 +517,8 @@ void main() {
         }
     }
 
-    // Soft Winsorization for isolated single-pixel raw fireflies before
-    // temporal blending: prevents one 50x-150x rare ray or ReSTIR weight burst
-    // from burning a persistent white dot into exact_static history while
-    // leaving normal rays and corroborated lighting changes untouched.
+    // Soft Winsorization clips isolated single-pixel firefly bursts before
+    // temporal blending while leaving normal rays and corroborated changes intact.
     vec3 blend_raw = raw.rgb;
     if (reason != rtgi_reset_adaptive && history.stats.z >= 2.0) {
         float ref_y = nbr_count >= 3 ? max(previous_luminance, nbr_prev) : previous_luminance;
@@ -551,9 +534,8 @@ void main() {
     }
 
     vec3 mean = mix(history.mean.rgb, blend_raw, alpha);
-    // Decay stale pre-step variance by (1 - alpha)^2 (matching luminance^2
-    // scaling and q decay) so frame_sigma shrinks in step with mean instead of
-    // locking the detector shut halfway through a torch removal.
+    // Decay stale pre-step variance by (1 - alpha)^2 so frame_sigma shrinks with
+    // mean instead of locking the detector shut during torch removal.
     float variance = reason == rtgi_reset_adaptive
         ? sqr(1.0 - alpha) * history.stats.x
         : (1.0 - alpha) * (history.stats.x + alpha * sqr(delta));

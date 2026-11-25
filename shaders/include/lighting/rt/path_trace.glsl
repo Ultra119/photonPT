@@ -57,9 +57,8 @@ vec3 voxel_sun_visibility(usampler3D grid, vec3 origin, vec3 direction) {
     if (blocker.status != voxel_volume_exit && blocker.status != voxel_distance_limit) {
         return vec3(0.0);
     }
-    // Prefer exact near-field voxel glass transmittance when traversed so glass
-    // within `reach` is never double-tinted by shadowcolor0; fall back to
-    // shadowcolor0 for distant stained glass casters beyond `reach`.
+    // Prefer voxel glass transmittance within `reach` to avoid double-tinting;
+    // fall back to shadowcolor0 for distant stained glass beyond `reach`.
     vec3 transmittance = any(lessThan(blocker.transmittance, vec3(0.999)))
         ? blocker.transmittance
         : shadow_tint;
@@ -109,10 +108,8 @@ vec3 clamp_bounce_radiance(vec3 rad, int bounce) {
     if (RTGI_MAX_RADIANCE <= 0.0) {
         return rad;
     }
-    // Progressive per-bounce indirect luminance ceiling (Cycles/Lumen-style
-    // path regularization) so rare stray bounce-2/3 rays cannot hijack ReSTIR GI
-    // spatial reuse into large dynamic smoothed blobs, while keeping direct
-    // lighting and primary bounces unconstrained.
+    // Progressive indirect luminance cap (path regularization) so rare bounce-2/3
+    // outliers cannot hijack ReSTIR GI, while leaving direct light unconstrained.
     float cap = bounce == 0 ? 0.25 * RTGI_MAX_RADIANCE
               : bounce == 1 ? 0.14 * RTGI_MAX_RADIANCE
                             : 0.07 * RTGI_MAX_RADIANCE;
@@ -120,10 +117,8 @@ vec3 clamp_bounce_radiance(vec3 rad, int bounce) {
     return lum > cap ? rad * (cap / lum) : rad;
 }
 
-// Evaluates one primary cosine-hemisphere path and splits primary direct-emitter
-// MIS remainder (`direct_rgb`) from first-bounce indirect outgoing radiance
-// (`indirect_radiance`, un-tinted by primary glass so ReSTIR GI can reconnect
-// and apply receiver-specific glass transmittance cleanly).
+// Traces one primary cosine-hemisphere path, splitting direct-emitter MIS
+// (`direct_rgb`) from un-tinted first-bounce indirect radiance for ReSTIR GI.
 PathTraceSample evaluate_path_trace(
     vec3 receiver, vec3 receiver_origin, vec3 receiver_normal, float receiver_skylight,
     usampler3D grid, sampler2D sky_map, vec3 direct_sun_color, vec3 light_direction,
@@ -243,9 +238,8 @@ PathTraceSample evaluate_path_trace(
 #endif
                 vec3 visibility
                     = voxel_sun_visibility(grid, next_origin, sun_ray_dir) * cloud_vis;
-                // Cap artistic sunlight bounce boost per hit so high-albedo surfaces
-                // never exceed unit reflectance and create energy in 90-degree corners,
-                // while darker stone/foliage retains full cave-bounce reach and hue.
+                // Cap sunlight bounce boost so bright surfaces never exceed unit
+                // reflectance in corners while dark stone/foliage keeps cave reach.
                 float albedo_peak = max_of(material.albedo);
                 float sun_boost = albedo_peak > 0.0
                     ? min(SUN_INDIRECT_BOOST, max(1.0, 0.92 / albedo_peak))
@@ -255,9 +249,8 @@ PathTraceSample evaluate_path_trace(
             }
         }
 
-        // Direct block-light NEE paired with BSDF MIS on the subsequent bounce
-        // for every non-terminal bounce (eliminates un-MIS'd emitter fireflies
-        // at PT_BOUNCES == 3 as well as PT_BOUNCES == 2).
+        // Non-terminal bounce emitter NEE paired with BSDF MIS on the next bounce
+        // to eliminate un-MIS'd emitter fireflies at PT_BOUNCES >= 2.
         vec3 bounce_emitter = vec3(0.0);
 #ifdef RTGI_EMITTER_SAMPLING
         if (b < max_bounces - 1 && sample_emitters && max_of(material.albedo) > 0.0) {
@@ -295,8 +288,7 @@ PathTraceSample evaluate_path_trace(
         if (b == max_bounces - 1) {
 #ifdef RTGI_WORLD_CACHE
             // Query face-oriented world-space residual radiance cache (D_block +
-            // D_indirect, excluding direct sun which was already evaluated above)
-            // for infinite multi-bounce GI without double-counting or blowup.
+            // D_indirect, excluding sun) for multi-bounce GI without double-counting.
             vec3 cached_d_gi;
             if (world_cache_query(world_cache_cell_from_voxel(hit.cell), hit.normal, cached_d_gi)) {
                 vec3 safe_albedo = min(material.albedo, vec3(0.88));

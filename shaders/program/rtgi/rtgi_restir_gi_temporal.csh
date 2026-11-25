@@ -1,6 +1,5 @@
 // Dedicated ReSTIR GI temporal reuse pass (deferred1_b), split out of
-// rtgi_trace.csh so neither path tracing nor GI temporal reuse pays the
-// other's static VGPR footprint on Wave32 GPUs.
+// rtgi_trace.csh to minimize static VGPR footprint on Wave32 GPUs.
 
 #include "/include/global.glsl"
 
@@ -243,10 +242,8 @@ void main() {
     if (initial.sample_data.kind != restir_gi_kind_empty
         && initial.weight > 0.0 && initial.target_pdf > 0.0) {
         float p0_of_0 = initial.target_pdf;
-        // Mirror line 214's temporal eligibility guard on the canonical sample:
-        // short (<0.25-block) or grazing (<0.08 cos) concave-corner hits are
-        // rejected from temporal reuse on the next frame, so p1_of_0 must be
-        // 0 (giving m0 = 1.0) instead of shrinking their weight to 1/(1+M_prev).
+        // Mirror line 214's guard: short (<0.25) or grazing (<0.08 cos) corner hits
+        // are rejected next frame, so set p1_of_0 = 0 (m0 = 1.0) instead of 1/(1+M_prev).
         float p1_of_0 = 0.0;
         if (restir_gi_temporal_eligible(origin, prev_world_normal, initial.sample_data, two_sided)) {
             p1_of_0 = dot(prev_world_normal, world_normal) > 0.9999

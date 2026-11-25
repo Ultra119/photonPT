@@ -163,11 +163,8 @@ vec3 shadow_pcf(
     float opaque_sum = 0.0;
     vec3 shadow_sum = vec3(0.0);
 
-    // Combine opaque visibility and translucent transmittance per tap so
-    // colored penumbra edges evaluate avg(V * T) across the full kernel.
-    // Compress the PCF kernel along the uphill receiver gradient by |shadow_normal.z|
-    // and cap uphill depth bias strictly below 1-block roof thickness so wide cloud
-    // penumbras never stretch or punch sunlight through ceilings at wall-ceiling joints.
+    // Combine opaque visibility and transmittance per tap (avg(V * T)); compress
+    // uphill PCF by |shadow_normal.z| and cap bias below 1-block roof thickness.
     for (int i = 0; i < step_count; ++i) {
         vec2 offset
             = vogel_disc_sample(i, step_count, dither * tau) * filter_radius;

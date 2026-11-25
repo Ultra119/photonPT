@@ -41,10 +41,8 @@ const float voxel_receiver_bias = 0.012;
 const float voxel_bounce_bias = 0.001;
 const float voxel_endpoint_epsilon = 0.001;
 
-// Two-sided translucent leaf receiver (MATERIAL_LEAVES = 5u): reflects front
-// hemisphere (0.58) and transmits back hemisphere (0.42). Back-hemisphere rays
-// naturally pick up Beer-Lambert foliage attenuation in voxel_dda as they pass
-// through the leaf's own voxel, keeping total energy <= 1 (0.58 + 0.42 * 0.76).
+// Two-sided leaf receiver (MATERIAL_LEAVES = 5u): 58% front, 42% back; back rays
+// pick up Beer-Lambert attenuation in voxel_dda, keeping total energy <= 1.
 const float rtgi_leaf_front_prob = 0.58;
 const float rtgi_leaf_back_prob = 0.42;
 
@@ -288,9 +286,8 @@ VoxelHit trace_voxel_segment(
                             result.transmittance *= max0(voxel_tint_color_table[block_id - 81u] * rec709_to_rec2020);
                         }
                     } else if (leaf) {
-                        // Airy neutral Beer-Lambert canopy attenuation (0.76/voxel) with a
-                        // subtle one-time foliage tint (14%) so light under dense trees stays
-                        // soft and clean without compounding into green stains on stone/snow.
+                        // Neutral Beer-Lambert canopy attenuation (0.76/voxel) with a one-time
+                        // 14% foliage tint so under-tree light stays clean without green stains.
                         if (!leaf_tinted) {
                             vec3 leaf_albedo = unpack_unorm_rgb555(payload & 0x7FFFu);
                             float leaf_peak = max_of(leaf_albedo);
@@ -315,9 +312,8 @@ VoxelHit trace_voxel_segment(
                             if (voxel_shape_hit(ray, cell, payload, block_id, shape, t, cell_end, entry_normal,
                                                 hit_distance, normal)) {
                                 if (normal == vec3(0.0) && step == 0 && mode != voxel_ray_ao) {
-                                    // Visible receivers can start inside a coarse 1x1x1 voxel AABB
-                                    // (e.g. exposed walls above flowing/still lava or cauldrons,
-                                    // waving leaves, dirt path, farmland, cactus, or depth roundoff).
+                                    // Receivers can start inside a coarse 1x1x1 voxel AABB (e.g.
+                                    // lava/cauldrons, waving leaves, dirt path, farmland, or roundoff).
                                     if (block_id == 39u || block_id == voxel_lava_cauldron_id) {
                                         if (mode == voxel_ray_path) {
                                             if (ray.direction.y < 0.0) {

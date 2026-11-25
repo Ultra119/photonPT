@@ -31,11 +31,8 @@ vec3 get_voxel_emission(uint block_id, EmitterBox box) {
     float level = voxel_light_level_table[palette_id - 32u];
     vec3 color = max0(get_voxel_light_color(palette_id) * rec709_to_rec2020);
     vec3 areas = emitter_face_areas(box);
-    // Full-face emitters (full cubes, Sodium-culled recessed cubes, flat lava
-    // lakes, glow lichen, nether portals) keep constant surface radiance (1.0x)
-    // so embedding blocks in walls/ceilings never artificially brightens them.
-    // Compact sub-voxel emitters conserve approximate total flux, capped at 24x
-    // to prevent fireflies on tiny custom resource-pack models.
+    // Full-face emitters keep 1.0x surface radiance so wall-recessed blocks never
+    // brighten; compact sub-voxel emitters conserve approximate flux (capped at 24x).
     float area_scale = max_of(areas) >= 0.99
         ? 1.0
         : clamp(3.0 / max(dot(areas, vec3(1.0)), 1e-4), 1.0, 24.0);

@@ -34,9 +34,8 @@ layout(r32ui) writeonly uniform uimage2D rtgi_emitter_index_img;
 shared uint membership[512];
 shared uint word_counts[16];
 
-// True when all 6 faces of an emitter box are flush with the cell boundary and
-// completely buried by adjacent opaque cubes or overlapping emitter boxes
-// (matching voxel_occludes_emitter_face in rtgi_emitters.glsl).
+// True when all 6 flush faces are buried by adjacent cubes or emitter boxes
+// (matches voxel_occludes_emitter_face in rtgi_emitters.glsl).
 bool emitter_cell_buried(ivec3 cell, EmitterBox box) {
     const ivec3 offs[6] = ivec3[6](
         ivec3(1, 0, 0), ivec3(-1, 0, 0),

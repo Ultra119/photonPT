@@ -43,9 +43,8 @@ bool voxel_thin_plant_emitter(uint block_id) {
     return block_id == 49u || block_id == 59u;
 }
 
-// Emitters indexed in the octree for NEE / ReSTIR DI. Excludes ubiquitous L1
-// sculk family (46, 56, 57), non-emitting spawners/heads (47), and Nether flora
-// (49, 59) so dim decorative blocks do not dilute NEE/ReSTIR sampling budgets.
+// Emitters indexed for NEE / ReSTIR DI; excludes ubiquitous dim L1 sculk
+// (46, 56, 57), spawners/heads (47), and Nether flora (49, 59).
 bool voxel_box_emitter(uint block_id) {
     return voxel_emitter_id(block_id)
         && block_id != 46u && block_id != 47u

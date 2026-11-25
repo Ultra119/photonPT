@@ -15,9 +15,8 @@ layout(r32ui) uniform uimage3D voxel_img;
 
 #if defined PROGRAM_SHADOW || defined PROGRAM_GBUFFERS_TERRAIN || defined PROGRAM_GBUFFERS_WATER
 
-// Only terrain draw calls contribute to the world voxel grid.
-// In PROGRAM_GBUFFERS_TERRAIN and PROGRAM_GBUFFERS_WATER this is naturally terrain only.
-// In PROGRAM_SHADOW, renderStage ensures entities/particles do not overwrite world voxels.
+// Only terrain draws update voxels; in PROGRAM_SHADOW, renderStage excludes
+// entities and particles from overwriting world geometry.
 bool is_voxel_terrain_stage() {
 #if defined PROGRAM_GBUFFERS_TERRAIN || defined PROGRAM_GBUFFERS_WATER
     return true;
@@ -159,10 +158,8 @@ void update_rt_voxel_grid(
 
     bool is_emitter = voxel_emitter_id(block_id);
 
-    // Non-emitters share block center and face normal across all 4 vertices of
-    // a quad; write once per quad to cut atomic contention and vertex texture
-    // fetches by 4x. Emitters inspect all 4 vertices to capture the true 3D
-    // mesh AABB (vanilla orientations and custom 3D resource packs alike).
+    // Write non-emitters once per quad (4x less atomic/texture work); inspect all
+    // 4 vertices for emitters to capture the true 3D mesh AABB.
     if (!is_emitter && (gl_VertexID & 3) != 0) {
         return;
     }

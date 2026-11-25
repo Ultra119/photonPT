@@ -3,9 +3,7 @@
 
 #include "/include/utility/fast_math.glsl"
 
-// Euclidian distance is defined as sqrt(a^2 + b^2 + ...). This function instead
-// does quartic_root(a^4 + b^4 + ...). This results in smaller distances along
-// the diagonal axes
+// L4 norm: quartic_root(a^4 + b^4 + ...), yielding smaller diagonal distances.
 float quartic_length(vec2 v) { return sqrt(sqrt(pow4(v.x) + pow4(v.y))); }
 
 float get_distortion_factor(vec2 shadow_clip_pos) {
@@ -30,9 +28,8 @@ vec3 undistort_shadow_space(vec3 shadow_clip_pos) {
     return shadow_clip_pos;
 }
 
-// Shadow normal bias derived from the local distorted shadow-map texel width
-// so close/mid-range corners stay tight, scale with shadowMapResolution, and
-// avoid camera-distance-driven light leaking around block corners.
+// Normal bias scaled to distorted shadow texel width so corners stay tight
+// across shadowMapResolution without distance-driven light leaking.
 vec3 get_shadow_bias(vec3 normal, float NoL, float texel_world) {
     float sin_theta = sqrt(max0(1.0 - sqr(clamp01(NoL))));
     float bias_world = clamp(texel_world * (0.15 + 0.85 * sin_theta), 0.008, 0.35);
