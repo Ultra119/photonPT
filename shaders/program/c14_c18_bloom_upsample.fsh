@@ -38,6 +38,29 @@ uniform sampler2D colortex0;
 void main() {
     ivec2 texel = ivec2(gl_FragCoord.xy);
 
+#if BLOOM_TILE_INDEX == 4
+    vec2 tile_uv = (uv - tile_offset) * rcp(tile_scale);
+    if (all(greaterThanEqual(tile_uv, vec2(0.0)))
+        && all(lessThanEqual(tile_uv, vec2(1.0)))) {
+        vec2 pad_amount = 3.0 * view_pixel_size * rcp(tile_scale);
+        vec2 uv_src = clamp(tile_uv, pad_amount, 1.0 - pad_amount) * src_tile_scale
+            + src_tile_offset;
+
+        const float src_weight = mix(0.25, 0.90, 0.5 * BLOOM_SPREAD);
+        bloom_tile = texelFetch(SRC_SAMPLER, texel, 0).rgb * (1.0 - src_weight); // Destination tile.
+        bloom_tile += BLOOM_UPSAMPLING_FILTER(SRC_SAMPLER, uv_src).rgb * src_weight; // Source tile.
+    } else {
+        vec2 margin = 2.0 * view_pixel_size;
+        bool in_tile_1 = uv.x <= 0.75 + margin.x && uv.y >= 0.75 - margin.y;
+        bool in_tile_3 = uv.x >= 0.875 - margin.x && uv.x <= 0.9375 + margin.x
+            && uv.y >= 0.9375 - margin.y;
+        if (in_tile_1 || in_tile_3) {
+            bloom_tile = texelFetch(SRC_SAMPLER, texel, 0).rgb;
+        } else {
+            discard;
+        }
+    }
+#else
     vec2 pad_amount = 3.0 * view_pixel_size * rcp(tile_scale);
     vec2 uv_src = clamp(uv, pad_amount, 1.0 - pad_amount) * src_tile_scale
         + src_tile_offset;
@@ -45,5 +68,6 @@ void main() {
     const float src_weight = mix(0.25, 0.90, 0.5 * BLOOM_SPREAD);
     bloom_tile = texelFetch(SRC_SAMPLER, texel, 0).rgb * (1.0 - src_weight); // Destination tile.
     bloom_tile += BLOOM_UPSAMPLING_FILTER(SRC_SAMPLER, uv_src).rgb * src_weight; // Source tile.
+#endif
 }
 

@@ -24,9 +24,16 @@ const float tile_scale = bloom_tile_scale(BLOOM_TILE_INDEX);
 const vec2 tile_offset = bloom_tile_offset(BLOOM_TILE_INDEX);
 
 void main() {
+#if BLOOM_TILE_INDEX == 4
+    // Cover x in [0.5, 1.0] so composite14 can upsample Tile 4 while copying
+    // vertically-blurred Tiles 1 and 3 into the alternate colortex0 buffer
+    // that composite15 and composite17 read (preventing stale H-only blur).
+    vec2 vertex_pos = vec2(gl_Vertex.x * 0.5 + 0.5, gl_Vertex.y);
+    uv = vertex_pos;
+#else
     uv = gl_MultiTexCoord0.xy;
-
     vec2 vertex_pos = gl_Vertex.xy * tile_scale + tile_offset;
+#endif
 
     gl_Position = vec4(vertex_pos * 2.0 - 1.0, 0.0, 1.0);
 }
