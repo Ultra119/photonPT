@@ -11,6 +11,8 @@
 
 #include "/include/global.glsl"
 
+invariant gl_Position;
+
 out vec2 uv;
 out vec3 scene_pos;
 out vec4 tint;
@@ -153,13 +155,20 @@ void main() {
     uv_local = sign(uv - mc_midTexCoord) * 0.5 + 0.5;
 #endif
 
+    vec3 raw_view_pos = transform(gl_ModelViewMatrix, gl_Vertex.xyz);
+    vec3 pos = view_to_scene_space(raw_view_pos);
+#if defined PROGRAM_GBUFFERS_TERRAIN && (defined WAVING_PLANTS || defined WAVING_LEAVES)
     bool is_top_vertex = uv.y < mc_midTexCoord.y;
-
-    vec3 pos = transform(gl_ModelViewMatrix, gl_Vertex.xyz);
-    pos = view_to_scene_space(pos);
     vec3 world_pos = pos + cameraPosition;
-    pos += animate_vertex(world_pos, is_top_vertex, light_levels.y, material_mask)
+    vec3 anim_offset
+        = animate_vertex(world_pos, is_top_vertex, light_levels.y, material_mask)
         - world_pos;
+    bool animated = any(notEqual(anim_offset, vec3(0.0)));
+    pos += anim_offset;
+    vec3 view_pos = animated ? scene_to_view_space(pos) : raw_view_pos;
+#else
+    vec3 view_pos = raw_view_pos;
+#endif
 
     scene_pos = pos;
 
@@ -167,7 +176,6 @@ void main() {
     tangent_pos = (pos - gbufferModelViewInverse[3].xyz) * tbn;
 #endif
 
-    vec3 view_pos = scene_to_view_space(pos);
     vec4 clip_pos = gl_ProjectionMatrix * vec4(view_pos, 1.0);
 
 #if defined TAA && defined TAAU

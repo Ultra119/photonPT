@@ -11,6 +11,8 @@
 
 #include "/include/global.glsl"
 
+invariant gl_Position;
+
 out vec2 uv;
 
 uniform vec2 taa_offset;
@@ -21,7 +23,7 @@ void main() {
         + gl_TextureMatrix[0][3].xy;
 
     vec3 view_pos = transform(gl_ModelViewMatrix, gl_Vertex.xyz);
-    vec4 clip_pos = project(gl_ProjectionMatrix, view_pos);
+    vec4 clip_pos = gl_ProjectionMatrix * vec4(view_pos, 1.0);
 
 #if defined TAA && defined TAAU
     clip_pos.xy = clip_pos.xy * taau_render_scale

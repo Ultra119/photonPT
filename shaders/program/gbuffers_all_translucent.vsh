@@ -12,6 +12,8 @@
 
 #include "/include/global.glsl"
 
+invariant gl_Position;
+
 out vec2 uv;
 out vec3 position_view;
 out vec3 position_scene;
@@ -146,19 +148,23 @@ void main() {
     update_rt_voxel_grid(material_mask, tint.rgb, at_midBlock, light_levels, mc_midTexCoord, uv);
 #endif
 
+    vec3 raw_view_pos = transform(gl_ModelViewMatrix, gl_Vertex.xyz);
+    position_scene = view_to_scene_space(raw_view_pos);
+#if defined PROGRAM_GBUFFERS_WATER && defined WATER_DISPLACEMENT
     bool is_top_vertex = uv.y < mc_midTexCoord.y;
-
-    position_scene
-        = transform(gl_ModelViewMatrix, gl_Vertex.xyz); // To view space
-    position_scene = view_to_scene_space(position_scene); // To scene space
-    position_scene = position_scene + cameraPosition; // To world space
-    position_scene = animate_vertex(
-        position_scene,
+    vec3 world_pos = position_scene + cameraPosition;
+    vec3 anim_offset = animate_vertex(
+        world_pos,
         is_top_vertex,
         light_levels.y,
         material_mask
-    ); // Apply vertex animations
-    position_scene = position_scene - cameraPosition; // Back to scene space
+    ) - world_pos;
+    bool animated = any(notEqual(anim_offset, vec3(0.0)));
+    position_scene += anim_offset;
+    position_view = animated ? scene_to_view_space(position_scene) : raw_view_pos;
+#else
+    position_view = raw_view_pos;
+#endif
 
 #if defined PROGRAM_GBUFFERS_WATER
     tint.a = 1.0;
@@ -219,8 +225,7 @@ void main() {
     fog_params = get_fog_parameters(get_weather());
 #endif
 
-    position_view = scene_to_view_space(position_scene);
-    vec4 position_clip = project(gl_ProjectionMatrix, position_view);
+    vec4 position_clip = gl_ProjectionMatrix * vec4(position_view, 1.0);
 
 #if defined TAA && defined TAAU
     position_clip.xy = position_clip.xy * taau_render_scale
