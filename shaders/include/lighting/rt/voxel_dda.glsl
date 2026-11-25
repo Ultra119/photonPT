@@ -299,7 +299,10 @@ VoxelHit trace_voxel_segment(
                         } else {
                             result.transmittance *= 0.76;
                         }
-                    } else if (mode != voxel_ray_ao || (payload >> 31u) != 0u || (payload & (1u << 23u)) == 0u) {
+                    } else if (mode != voxel_ray_ao
+                        || ((payload >> 31u) == 0u
+                            ? (payload & (1u << 23u)) == 0u
+                            : emitter_box_is_full_cube(voxel_emitter_box_from_payload(payload)))) {
                         uint shape = (payload >> 31u) != 0u ? VOXEL_SHAPE_CUBE : ((payload >> 19u) & 15u);
                         bool thin = voxel_thin_plant_emitter(block_id);
                         if (thin && mode != voxel_ray_ao) {

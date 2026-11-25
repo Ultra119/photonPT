@@ -32,10 +32,11 @@ vec3 get_voxel_emission(uint block_id, EmitterBox box) {
     vec3 color = max0(get_voxel_light_color(palette_id) * rec709_to_rec2020);
     vec3 areas = emitter_face_areas(box);
     // Full-face emitters keep 1.0x surface radiance so wall-recessed blocks never
-    // brighten; compact sub-voxel emitters conserve approximate flux (capped at 24x).
+    // brighten; compact sub-voxel emitters conserve approximate flux (capped at 48x
+    // so trimmed 2/16 x 3/16 x 2/16 torch flames keep full lumen output).
     float area_scale = max_of(areas) >= 0.99
         ? 1.0
-        : clamp(3.0 / max(dot(areas, vec3(1.0)), 1e-4), 1.0, 24.0);
+        : clamp(3.0 / max(dot(areas, vec3(1.0)), 1e-4), 1.0, 48.0);
     return color * (EMISSION_ANCHOR * EMISSION_STRENGTH * voxel_light_response(level) * area_scale);
 }
 
