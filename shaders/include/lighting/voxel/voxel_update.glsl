@@ -186,9 +186,20 @@ void update_rt_voxel_grid(
     if (is_emitter) {
 #ifdef PROGRAM_SHADOW
         vec3 v_offset = mat3(shadowModelViewInverse) * (-c_offset_view);
+        vec3 e_normal = mat3(shadowModelViewInverse) * (mat3(gl_ModelViewMatrix) * gl_Normal);
 #else
         vec3 v_offset = mat3(gbufferModelViewInverse) * (-c_offset_view);
+        vec3 e_normal = mat3(gbufferModelViewInverse) * (mat3(gl_ModelViewMatrix) * gl_Normal);
 #endif
+        float n_len = length(e_normal);
+        float max_axis = n_len > 1e-4 ? max_of(abs(e_normal)) / n_len : 1.0;
+        // Automatically detect diagonal cross-quads (amethyst clusters, glow
+        // berries, fire, torchflowers, lantern chains, modded cross models;
+        // ~0.707) and full-span tilted flame sheets (~0.924) and pull them
+        // inward from cell boundaries so they never turn into fake 1x1x1 cubes.
+        if (max_axis < 0.85 || (max_axis < 0.98 && max_of(abs(v_offset)) >= 0.45)) {
+            v_offset *= 0.625;
+        }
         vec3 local_v = clamp((local - vec3(cell)) + v_offset, vec3(0.0), vec3(1.0));
         vec3 scaled = local_v * 16.0;
         uvec3 v_lo = uvec3(clamp(floor(scaled + 0.02), vec3(0.0), vec3(15.0)));

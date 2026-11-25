@@ -51,28 +51,8 @@ EmitterBox voxel_emitter_box_from_payload(uint payload) {
     vec3 lo = vec3(qlo) * (1.0 / 16.0);
     vec3 hi = vec3(qhi) * (1.0 / 16.0);
 
-    // Cross-quad / airy emitters (amethyst buds & clusters, glow berries, fire,
-    // torchflower): diagonal quad vertices span [0, 1] across the cell even
-    // though the glowing volume sits inside the block. Pulling full-span axes
-    // inward prevents a fake 1x1x1 cube from engulfing adjacent wall/ceiling
-    // torchflower)
-    bool is_cross_emitter = block_id == 55u || block_id == 37u || block_id == 40u
-        || ((block_id == 36u || block_id == 43u) && hi.y > 0.5);
-    if (is_cross_emitter) {
-        vec3 span = hi - lo;
-        for (int a = 0; a < 3; ++a) {
-            if (span[a] >= 0.75) {
-                lo[a] = max(lo[a], 3.0 / 16.0);
-                hi[a] = min(hi[a], 13.0 / 16.0);
-            } else {
-                if (lo[a] <= 0.0) lo[a] = min(1.0 / 16.0, hi[a] - 0.025);
-                if (hi[a] >= 1.0) hi[a] = max(15.0 / 16.0, lo[a] + 0.025);
-            }
-        }
-        return EmitterBox(lo, hi);
-    }
-
-    // Torches
+    // Torches: trim the wooden stick (painted on the same cuboid as the flame)
+    // to the glowing flame tip at the top-outer end of the captured AABB.
     bool is_torch = block_id == voxel_torch_id || block_id == voxel_soul_torch_id
         || block_id == voxel_copper_torch_id || block_id == voxel_redstone_torch_id;
     if (is_torch) {
@@ -88,34 +68,16 @@ EmitterBox voxel_emitter_box_from_payload(uint payload) {
         }
     }
 
-    // Lanterns
-    bool is_lantern = block_id == voxel_lantern_id || block_id == voxel_soul_lantern_id
-        || block_id == voxel_copper_lantern_id;
-    if (is_lantern) {
-        if (hi.y >= 1.0 && lo.y > 0.0) {
-            hi.y = min(hi.y, lo.y + 7.0 / 16.0);
-        }
-        if (lo.y <= 0.0) {
-            lo.y = max(lo.y, 1.0 / 16.0);
-        }
-    }
-
-    // Campfire
-    if (block_id == 36u || block_id == 43u) {
-        lo = max(lo, vec3(2.0 / 16.0, 1.0 / 16.0, 2.0 / 16.0));
-        hi = min(hi, vec3(14.0 / 16.0, max(hi.y, 6.0 / 16.0), 14.0 / 16.0));
-    }
-
-    // Dragon egg
+    // Dragon egg: tighten the tapered dome's AABB to its rounded body.
     if (block_id == voxel_dragon_egg_id) {
         lo = max(lo, vec3(2.0 / 16.0, 1.0 / 16.0, 2.0 / 16.0));
         hi = min(hi, vec3(14.0 / 16.0, 13.0 / 16.0, 14.0 / 16.0));
     }
 
-    // General safeguard for all non-full-cube emitters (end rods, candles, glow
-    // lichen, sea pickles, brewing stands, enchanting tables, modded lights):
-    // inset any boundary-flush face past voxel_receiver_bias (0.012) so adjacent
-    // wall/floor/ceiling receiver origins stay strictly outside the emitter box.
+    // General safeguard for all non-full-cube emitters (lanterns, end rods,
+    // candles, glow lichen, sea pickles, campfires, brewing stands, enchanting
+    // tables, modded lights): inset any boundary-flush face past
+    // voxel_receiver_bias (0.012) so adjacent receiver origins stay outside.
     EmitterBox box = EmitterBox(lo, hi);
     if (!emitter_box_is_full_cube(box)) {
         const float margin = 0.025;
