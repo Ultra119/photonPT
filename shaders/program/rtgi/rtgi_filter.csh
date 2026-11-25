@@ -82,19 +82,22 @@ vec4 read_filter_input(ivec2 texel, bool even, out float age) {
 #endif
 }
 
+// Wide-to-narrow à-trous strides (8 -> 4 -> 2 -> 1): running dense stride-1
+// polish last eliminates sparse 8-texel / 16-pixel stepping bands along
+// 90-degree wall/ceiling joints and smooths wide-pass footprint discontinuities.
 int rtgi_atrous_step() {
 #if RTGI_FILTER_PASS == 1
-    return 1;
-#elif RTGI_FILTER_PASS == 2
-    return 2;
-#elif RTGI_FILTER_PASS == 3
-    return 4;
-#else
     #if RTGI_RESOLUTION == 0
     return 4;
     #else
     return 8;
     #endif
+#elif RTGI_FILTER_PASS == 2
+    return 4;
+#elif RTGI_FILTER_PASS == 3
+    return 2;
+#else
+    return 1;
 #endif
 }
 
@@ -146,9 +149,33 @@ void main() {
     float footprint = rtgi_view_footprint(-center_view.z, grid.gi_active, gbufferProjection);
     float grazing = max(abs(dot(normal, normalize(center_view))), 0.02);
 
-    int step_px = rtgi_atrous_step();
+    int base_step = rtgi_atrous_step();
+    // Bound wide solid-surface à-trous strides in world blocks so filter reach
+    // stays consistent with camera distance while keeping dense local polish.
+#if RTGI_FILTER_PASS == 1
+    float young_hint = missing_center ? 1.0 : (1.0 - smoothstep(2.0, 12.0, age));
+    float max_world_step = mix(0.22, 0.35, young_hint);
+    int step_px = is_foliage
+        ? base_step
+        : clamp(int(round(max_world_step / max(footprint, 1e-4))), 1, base_step);
+#elif RTGI_FILTER_PASS == 2
+    const float max_world_step = 0.12;
+    int step_px = is_foliage
+        ? base_step
+        : clamp(int(round(max_world_step / max(footprint, 1e-4))), 1, base_step);
+#elif RTGI_FILTER_PASS == 3
+    const float max_world_step = 0.06;
+    int step_px = is_foliage
+        ? base_step
+        : clamp(int(round(max_world_step / max(footprint, 1e-4))), 1, base_step);
+#else
+    const float max_world_step = 0.04;
+    int step_px = 1;
+#endif
+    float world_sigma = max(0.24, 1.8 * max_world_step);
+    float inv_world_sigma_sq = 1.0 / sqr(world_sigma);
     // Bound solid-surface à-trous chord so extreme grazing views at 10+ blocks
-    // keep 1-texel grazing support without smearing across 4-6 blocks into blobs.
+    // keep local grazing support without smearing across 4-6 blocks into blobs.
     float max_chord = min(2.0, 0.25 + float(step_px) * 1.5 * footprint / grazing);
     float foliage_max_dist = min(1.5, 0.40 + 0.35 * float(step_px) * footprint);
 
@@ -173,7 +200,7 @@ void main() {
         tap_y[k] = 0.0;
         int index = k + int(k >= 4);
         ivec2 offset = ivec2(index % 3, index / 3);
-        ivec2 tap = texel + offset - 1;
+        ivec2 tap = texel + (offset - 1) * step_px;
         if (!rtgi_in_bounds(tap, active_size)) {
             continue;
         }
@@ -185,9 +212,11 @@ void main() {
             continue;
         }
         vec3 tap_normal = mat3(gbufferModelView) * rtgi_guide_normal(tap_guide);
+        vec3 delta_view = tap_view - center_view;
         float geom_w = is_foliage
-            ? rtgi_foliage_weight(tap_view - center_view, normal, tap_normal, material, foliage_max_dist)
-            : rtgi_geometry_weight(tap_view - center_view, normal, tap_normal, footprint, max_chord);
+            ? rtgi_foliage_weight(delta_view, normal, tap_normal, material, foliage_max_dist)
+            : rtgi_geometry_weight(delta_view, normal, tap_normal, footprint, max_chord)
+                * exp(-dot(delta_view, delta_view) * inv_world_sigma_sq);
         float gw = gauss3_kernel[offset.x] * gauss3_kernel[offset.y] * geom_w;
         if (gw <= 0.0) {
             continue;
@@ -221,7 +250,7 @@ void main() {
     // Real lighting edges have bright neighbors so center_y <= nbr_max_y.
     float nbr_mean_y = nbr_w_sum > 1e-4 ? (nbr_y_sum / nbr_w_sum) : center_y;
     if (!missing_center && nbr_w_sum > 0.10) {
-        float ff_cap = max(nbr_max_y * 1.35, nbr_mean_y * 2.2) + 0.06;
+        float ff_cap = max(nbr_max_y * 1.35, nbr_mean_y * 2.2) + 0.006;
         if (center_y > ff_cap) {
             float old_y = center_y;
             center.rgb *= ff_cap / max(old_y, 1e-5);
@@ -236,17 +265,22 @@ void main() {
     float spatial_se = sqrt(local_var / max(age, 1.0));
     float young_factor = missing_center ? 1.0 : (1.0 - smoothstep(2.0, 12.0, age));
     float young_prior = (0.22 * local_mean + 0.003) * inversesqrt(max(age, 1.0)) * young_factor;
+    // Gate wide spatial variance strictly to young/disoccluded texels so
+    // converged sharp shadow edges are never mistaken for noise, while keeping
+    // a small neighbor SE floor so zero-variance dark corners stay smooth.
+    float spatial_se_gate = (0.85 * young_factor) * spatial_se;
+    float nbr_se_avg = nbr_se_sum / mom_w;
     float smooth_center_se = missing_center
-        ? max(nbr_se_sum / mom_w, 0.25 * local_mean + 0.05)
-        : max(max(center.a, max(0.55 * nbr_se_sum / mom_w, young_prior)),
-              mix(0.60, 1.0, young_factor) * spatial_se);
+        ? max(nbr_se_avg, 0.25 * local_mean + 0.05)
+        : max(max(center.a, max(mix(0.15, 0.55, young_factor) * nbr_se_avg, young_prior)),
+              spatial_se_gate);
 
     vec3 sum_rgb = missing_center ? vec3(0.0) : 0.25 * center.rgb;
     float sum_w = missing_center ? 0.0 : 0.25;
     float sum_w2_var = missing_center ? 0.0 : sqr(0.25) * sqr(smooth_center_se);
     float sum_w_var = missing_center ? 0.0 : 0.25 * sqr(smooth_center_se);
 
-    float tap_ff_cap = max(max(center_y, nbr_mean_y) * 2.5, 0.15) + 0.12;
+    float tap_ff_cap = max(max(center_y, nbr_mean_y) * 2.5, 0.02) + 0.015;
     for (int k = 0; k < 8; ++k) {
         float gw = tap_geom[k];
         if (gw <= 0.0) {
@@ -259,15 +293,18 @@ void main() {
             sy = tap_ff_cap;
         }
         float w = gw;
+        float sv_se = max(sv.a, spatial_se_gate);
         if (!missing_center) {
             float delta = abs(sy - center_y);
-            float sym_se = 0.5 * (smooth_center_se + max(sv.a, 0.5 * spatial_se));
-            float luma_scale = RTGI_FILTER_PHI * sym_se
-                + 0.002 + 0.05 * min(center_y, sy)
+            float edge_se = mix(smooth_center_se,
+                                0.5 * (smooth_center_se + sv_se),
+                                0.15 + 0.50 * young_factor);
+            float phi_wide = mix(0.55, 1.0, young_factor) * RTGI_FILTER_PHI;
+            float luma_scale = phi_wide * edge_se
+                + 0.002 + 0.045 * min(center_y, sy)
                 + 1.5 * young_factor * spatial_se;
             w *= exp(-delta / max(luma_scale, 1e-5));
         }
-        float sv_se = max(sv.a, mix(0.5, 1.0, young_factor) * spatial_se);
         sum_rgb += w * sv.rgb;
         sum_w += w;
         sum_w2_var += sqr(w) * sqr(sv_se);
@@ -282,8 +319,99 @@ void main() {
     // Conservative variance propagation accounting for correlated ReSTIR taps,
     // floored by the young/spatial uncertainty bootstrap for passes 2-4.
     float prop_var = mix(sum_w2_var / sqr(sum_w), sum_w_var / sum_w, 0.70);
-    float out_se = max(sqrt(max(prop_var, 0.0)), max(young_prior, mix(0.60, 0.95, young_factor) * spatial_se));
+    float out_se = max(sqrt(max(prop_var, 0.0)), max(young_prior, spatial_se_gate));
     vec4 result = vec4(out_rgb, out_se);
+#else
+#if RTGI_FILTER_PASS == 4
+    // Final dense 3x3 polish pass: clamp any isolated 1-texel bright outlier
+    vec4 tap_val[8];
+    float tap_geom[8];
+    float tap_y[8];
+    float nbr_w_sum = 0.0;
+    float nbr_y_sum = 0.0;
+    float nbr_max_y = 0.0;
+
+    for (int k = 0; k < 8; ++k) {
+        tap_geom[k] = 0.0;
+        tap_val[k] = no_filter_sample;
+        tap_y[k] = 0.0;
+        int index = k + int(k >= 4);
+        ivec2 offset = ivec2(index % 3, index / 3);
+        ivec2 tap = texel + (offset - 1);
+        if (!rtgi_in_bounds(tap, active_size)) {
+            continue;
+        }
+        uvec4 tap_guide = even ? texelFetch(rtgi_guide_even_sampler, tap, 0)
+                               : texelFetch(rtgi_guide_odd_sampler, tap, 0);
+        vec3 tap_view;
+        if (!rtgi_guide_matches(tap_guide, material)
+            || !rtgi_view_from_guide(tap_guide, grid.full_size, jitter, gbufferProjection, tap_view)) {
+            continue;
+        }
+        vec3 tap_normal = mat3(gbufferModelView) * rtgi_guide_normal(tap_guide);
+        vec3 delta_view = tap_view - center_view;
+        float kernel = gauss3_kernel[offset.x] * gauss3_kernel[offset.y];
+        float geom_w = is_foliage
+            ? rtgi_foliage_weight(delta_view, normal, tap_normal, material, foliage_max_dist)
+            : rtgi_geometry_weight(delta_view, normal, tap_normal, footprint, max_chord)
+                * exp(-dot(delta_view, delta_view) * inv_world_sigma_sq);
+        float gw = kernel * geom_w;
+        if (gw <= 0.0) {
+            continue;
+        }
+        float tap_age;
+        vec4 sv = read_filter_input(tap, even, tap_age);
+        if (sv.a < 0.0) {
+            continue;
+        }
+        float sy = dot(sv.rgb, luminance_weights);
+        tap_val[k] = sv;
+        tap_geom[k] = gw;
+        tap_y[k] = sy;
+        nbr_w_sum += gw;
+        nbr_y_sum += gw * sy;
+        nbr_max_y = max(nbr_max_y, sy);
+    }
+
+    float nbr_mean_y = nbr_w_sum > 1e-4 ? (nbr_y_sum / nbr_w_sum) : center_y;
+    if (nbr_w_sum > 0.08) {
+        float ff_cap = max(nbr_max_y * 1.35, nbr_mean_y * 2.0) + 0.004;
+        if (center_y > ff_cap) {
+            center.rgb *= ff_cap / max(center_y, 1e-5);
+            center_y = ff_cap;
+        }
+    }
+
+    const float center_k = 0.25;
+    vec3 sum_rgb = center_k * center.rgb;
+    float sum_w = center_k;
+    float center_var = sqr(center.a);
+    float sum_w2_var = sqr(center_k) * center_var;
+    float sum_w_var = center_k * center_var;
+    float tap_ff_cap = max(max(center_y, nbr_mean_y) * 2.2, 0.015) + 0.01;
+
+    for (int k = 0; k < 8; ++k) {
+        float weight = tap_geom[k];
+        if (weight <= 0.0) {
+            continue;
+        }
+        vec4 sample_value = tap_val[k];
+        float sample_y = tap_y[k];
+        if (nbr_w_sum > 0.15 && sample_y > tap_ff_cap) {
+            sample_value.rgb *= tap_ff_cap / max(sample_y, 1e-5);
+            sample_y = tap_ff_cap;
+        }
+        float delta = abs(sample_y - center_y);
+        float sym_se = 0.5 * (center.a + sample_value.a);
+        float luminance_scale = RTGI_FILTER_PHI * sym_se
+            + 0.002 + 0.05 * min(center_y, sample_y);
+        weight *= exp(-delta / max(luminance_scale, 1e-5));
+        float sample_var = sqr(sample_value.a);
+        sum_rgb += weight * sample_value.rgb;
+        sum_w += weight;
+        sum_w2_var += sqr(weight) * sample_var;
+        sum_w_var += weight * sample_var;
+    }
 #else
     const float center_k = 0.25;
     vec3 sum_rgb = center_k * center.rgb;
@@ -307,10 +435,12 @@ void main() {
             continue;
         }
         vec3 tap_normal = mat3(gbufferModelView) * rtgi_guide_normal(tap_guide);
+        vec3 delta_view = tap_view - center_view;
         float kernel = gauss3_kernel[offset.x] * gauss3_kernel[offset.y];
         float geom_w = is_foliage
-            ? rtgi_foliage_weight(tap_view - center_view, normal, tap_normal, material, foliage_max_dist)
-            : rtgi_geometry_weight(tap_view - center_view, normal, tap_normal, footprint, max_chord);
+            ? rtgi_foliage_weight(delta_view, normal, tap_normal, material, foliage_max_dist)
+            : rtgi_geometry_weight(delta_view, normal, tap_normal, footprint, max_chord)
+                * exp(-dot(delta_view, delta_view) * inv_world_sigma_sq);
         float weight = kernel * geom_w;
         if (weight <= 0.0) {
             continue;
@@ -323,9 +453,17 @@ void main() {
         }
         float sample_y = dot(sample_value.rgb, luminance_weights);
         float delta = abs(sample_y - center_y);
-        float sym_se = 0.5 * (center.a + sample_value.a);
-        float luminance_scale = RTGI_FILTER_PHI * sym_se
-            + 0.002 + 0.05 * min(center_y, sample_y);
+        // Pass 2 (stride 4) stays center-biased to stop wide shadow-corner bleed;
+        // Pass 3 (stride 2) uses symmetric SE so local penumbra noise smooths out.
+#if RTGI_FILTER_PASS == 2
+        float edge_se = mix(center.a, 0.5 * (center.a + sample_value.a), 0.25);
+        float phi_pass = 0.70 * RTGI_FILTER_PHI;
+#else
+        float edge_se = 0.5 * (center.a + sample_value.a);
+        float phi_pass = 0.85 * RTGI_FILTER_PHI;
+#endif
+        float luminance_scale = phi_pass * edge_se
+            + 0.002 + 0.045 * min(center_y, sample_y);
         weight *= exp(-delta / max(luminance_scale, 1e-5));
         float sample_var = sqr(sample_value.a);
         sum_rgb += weight * sample_value.rgb;
@@ -333,6 +471,7 @@ void main() {
         sum_w2_var += sqr(weight) * sample_var;
         sum_w_var += weight * sample_var;
     }
+#endif
 
     if (sum_w <= 0.0) {
         imageStore(filter_output, texel, no_filter_sample);

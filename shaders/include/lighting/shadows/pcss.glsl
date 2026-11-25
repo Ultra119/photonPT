@@ -32,6 +32,7 @@ vec2 blocker_search(
     vec2 slope_dir,
     float slope_compress,
     float max_slope_dz,
+    float depth_to_world,
     float search_radius_world,
     float sss_radius_world,
     float dither,
@@ -53,6 +54,7 @@ vec2 blocker_search(
 
     float depth_sum = 0.0;
     float weight_sum = 0.0;
+    float nearest_blocker_depth = 0.0;
     float depth_sum_sss = 0.0;
 
     for (int i = 0; i < step_count; ++i) {
@@ -78,10 +80,19 @@ vec2 blocker_search(
 
         depth_sum += weight * depth;
         weight_sum += weight;
+        nearest_blocker_depth = max(nearest_blocker_depth, weight * depth);
         depth_sum_sss += max0(ref_z - depth);
     }
 
-    float blocker_depth = weight_sum == 0.0 ? 0.0 : depth_sum / weight_sum;
+    float blocker_depth = 0.0;
+    if (weight_sum > 0.0) {
+        float avg_blocker_depth = depth_sum / weight_sum;
+        // Bias toward the nearest contact blocker right at block corners so
+        // shadows start crisp at the corner and widen naturally down the wall.
+        float nearest_dist = max0(ref_z - nearest_blocker_depth) * depth_to_world;
+        float contact_blend = 1.0 - smoothstep(0.05, 0.85, nearest_dist);
+        blocker_depth = mix(avg_blocker_depth, nearest_blocker_depth, 0.85 * contact_blend);
+    }
     float sss_depth = -shadowProjectionInverse[2].z * depth_sum_sss
         * rcp(SHADOW_DEPTH_SCALE * float(step_count));
 
@@ -224,8 +235,6 @@ vec3 get_filtered_shadows(
 
     float NoL = dot(flat_normal, light_dir);
 
-    vec3 bias = get_shadow_bias(scene_pos, flat_normal, NoL, skylight);
-
 #ifdef PIXELATED_SHADOWS
     // Snap position to the nearest block texel
     const float pixel_scale = float(PIXELATED_SHADOWS_RESOLUTION);
@@ -234,6 +243,15 @@ vec3 get_filtered_shadows(
         + (0.5 / pixel_scale);
     scene_pos = scene_pos - cameraPosition;
 #endif
+
+    vec3 shadow_view_unbiased = transform(shadowModelView, scene_pos);
+    vec2 shadow_clip_xy_unbiased
+        = project_ortho(shadowProjection, shadow_view_unbiased).xy;
+    float bias_distortion = get_distortion_factor(shadow_clip_xy_unbiased);
+    float shadow_texel_world
+        = (2.0 * abs(shadowProjectionInverse[0].x) * shadow_map_pixel_size)
+        * (sqr(bias_distortion) * rcp(1.0 - SHADOW_DISTORTION));
+    vec3 bias = get_shadow_bias(flat_normal, NoL, shadow_texel_world);
 
     vec3 shadow_view_pos
         = transform(shadowModelView, scene_pos + bias);
@@ -296,6 +314,7 @@ vec3 get_filtered_shadows(
         slope_dir,
         slope_compress,
         max_slope_dz,
+        depth_to_world,
         search_radius_world,
         sss_radius_world,
         dither,

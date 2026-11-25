@@ -30,17 +30,13 @@ vec3 undistort_shadow_space(vec3 shadow_clip_pos) {
     return shadow_clip_pos;
 }
 
-// Shadow bias method from Complementary Reimagined by Emin
-// Many thanks to Emin for letting me use it <3
-// https://www.complementary.dev/reimagined
-vec3 get_shadow_bias(vec3 scene_pos, vec3 normal, float NoL, float skylight) {
-#if defined WORLD_END
-    skylight = 1.0;
-#endif
-
-    // Shadow bias without peter-panning
-    return 0.25 * normal * clamp01(0.12 + 0.01 * length(scene_pos))
-        * (2.0 - clamp01(NoL));
+// Shadow normal bias derived from the local distorted shadow-map texel width
+// so close/mid-range corners stay tight, scale with shadowMapResolution, and
+// avoid camera-distance-driven light leaking around block corners.
+vec3 get_shadow_bias(vec3 normal, float NoL, float texel_world) {
+    float sin_theta = sqrt(max0(1.0 - sqr(clamp01(NoL))));
+    float bias_world = clamp(texel_world * (0.15 + 0.85 * sin_theta), 0.008, 0.35);
+    return normal * bias_world;
 }
 
 #endif // INCLUDE_LIGHTING_DISTORTION

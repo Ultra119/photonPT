@@ -76,6 +76,7 @@ void store_history(
 }
 
 RtgiHistory gather_history(
+    ivec2 current_texel, bool exact_static,
     vec2 previous_pixel, RtgiGrid grid, vec2 previous_jitter, bool previous_even,
     vec3 predicted_view, vec3 world_normal, uint material
 ) {
@@ -91,6 +92,31 @@ RtgiHistory gather_history(
     float grazing = max(abs(dot(normal, normalize(predicted_view))), 0.02);
     float max_chord = min(6.0, 0.10 + 2.5 * footprint / grazing);
     bool is_foliage = rtgi_is_foliage(material);
+
+    if (exact_static && rtgi_in_bounds(current_texel, grid.gi_active)) {
+        uvec4 guide = load_guide(current_texel, previous_even);
+        vec3 view_pos;
+        if (rtgi_guide_matches(guide, material)
+            && rtgi_view_from_guide(guide, grid.full_size, previous_jitter,
+                                    gbufferPreviousProjection, view_pos)) {
+            vec3 tap_normal = mat3(gbufferPreviousModelView) * rtgi_guide_normal(guide);
+            float gw = is_foliage
+                ? rtgi_foliage_weight(view_pos - predicted_view, normal, tap_normal, material, 0.65)
+                : rtgi_geometry_weight(view_pos - predicted_view, normal,
+                                       tap_normal, footprint, max_chord);
+            if (gw > 0.5) {
+                vec4 mean = previous_even ? imageLoad(rtgi_accum_img, current_texel)
+                                          : imageLoad(rtgi_history_img, current_texel);
+                vec4 stats = previous_even ? imageLoad(rtgi_stats_even_img, current_texel)
+                                           : imageLoad(rtgi_stats_odd_img, current_texel);
+                if (rtgi_finite(mean) && all(greaterThanEqual(mean.rgb, vec3(0.0)))
+                    && rtgi_finite(stats) && stats.x >= 0.0 && stats.y > 0.0
+                    && stats.y <= 1.0 && stats.z >= 1.0) {
+                    return RtgiHistory(mean, stats, 1.0);
+                }
+            }
+        }
+    }
 
     for (int y = 0; y <= 1; ++y) {
         for (int x = 0; x <= 1; ++x) {
@@ -316,11 +342,14 @@ void main() {
             vec2 previous_pixel = rtgi_raster_position(clip.xy / clip.w, grid.full_size, previous_jitter);
             if (all(greaterThanEqual(previous_pixel, vec2(0.0)))
                 && all(lessThan(previous_pixel, vec2(grid.full_active)))) {
+                vec2 current_pixel = vec2(guide.x & 65535u, guide.x >> 16u) + 0.5;
+                vec2 motion_px = (previous_pixel - previous_jitter) - (current_pixel - jitter);
+                bool exact_static = dot(motion_px, motion_px) < sqr(0.08);
                 ivec2 p_base;
                 vec2 p_frac;
                 rtgi_footprint(previous_pixel, grid, p_base, p_frac);
-                prev_shift = ivec2(round(vec2(p_base) + p_frac)) - texel;
-                history = gather_history(previous_pixel, grid, previous_jitter,
+                prev_shift = exact_static ? ivec2(0) : (ivec2(round(vec2(p_base) + p_frac)) - texel);
+                history = gather_history(texel, exact_static, previous_pixel, grid, previous_jitter,
                                          !even, previous_view, world_normal, material);
                 reason = rtgi_reset_geometry;
             }
