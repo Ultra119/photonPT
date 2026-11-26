@@ -1,10 +1,12 @@
 #if !defined INCLUDE_SKY_CLOUDS_COVERAGE_MAP
 #define INCLUDE_SKY_CLOUDS_COVERAGE_MAP
 
-// Distance covered by the cumulus coverage map on each axis (m^2)
-const float clouds_cumulus_coverage_map_scale = 1.5e5;
+// Distance covered by the cumulus coverage map on each axis (m)
+// 320 km span (160 km radius) extends past the ~124 km Earth horizon of
+// 1200 m cumulus clouds so overcast decks curve all the way to the horizon.
+const float clouds_cumulus_coverage_map_scale = 3.2e5;
 
-const float clouds_coverage_map_distortion = 0.8;
+const float clouds_coverage_map_distortion = 0.88;
 
 float clouds_cumulus_local_coverage(vec2 pos) {
     const float wind_angle = CLOUDS_CUMULUS_WIND_ANGLE * degree;

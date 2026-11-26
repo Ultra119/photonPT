@@ -141,58 +141,83 @@ void main() {
 
     if (texel.x == sky_map_res.x) { // Store lighting colors
         sky_map = vec3(0.0);
-        switch (texel.y) {
-            case 0:
-                sky_map = light_color;
-                break;
-
-            case 1:
-                sky_map = ambient_color;
-                break;
-
-            case 2: {
-                // 32-sample cosine-weighted upper-hemisphere average of the
-                // previous frame's sky map (1 texel/frame = 32 fetches total).
-                // Supplies neutral sky+clouds ambient for water fog (matching
-                // stock Photon's SH skylight_up) without disturbing air fog.
-#if defined WORLD_OVERWORLD || defined WORLD_END
-                const int samples = 32;
-                const float golden_angle = 2.39996323;
-                vec3 sum = vec3(0.0);
-                for (int i = 0; i < samples; ++i) {
-                    float u = (float(i) + 0.5) / float(samples);
-                    float y = sqrt(u);
-                    float r = sqrt(max0(1.0 - u));
-                    float phi = float(i) * golden_angle;
-                    vec3 dir = vec3(r * cos(phi), y, r * sin(phi));
-                    vec3 s = textureLod(colortex4, project_sky(dir), 0.0).rgb;
-                    sum += (!any(isnan(s)) && !any(isinf(s))) ? max0(s) : vec3(0.0);
-                }
-                vec3 avg = sum / float(samples);
+        if (texel.y >= 4 && texel.y <= 100) {
 #if defined WORLD_OVERWORLD
-                float night = clamp01(time_midnight);
-                if (night > 0.0) {
-                    float sky_luma = dot(avg, luminance_weights_rec2020);
-                    vec3 night_sky = mix(avg, vec3(sky_luma), 0.30) * 0.72;
-                    avg = mix(avg, night_sky, night);
-                }
+            // 96-segment (97 texel, wrapped endpoints) unfogged horizon strip
+            // in column 191 so deferred4 BORDER_FOG samples it in 1 hardware
+            // linear fetch without double-fogging.
+            float az = (float(texel.y - 4) * rcp(96.0)) * tau - pi;
+            vec3 h_dir = normalize(vec3(sin(az), -0.1, -cos(az)));
+            sky_map = draw_sky(h_dir);
 #endif
-                sky_map = max_of(avg) > 1e-6 ? avg : ambient_color * rcp_pi;
+        } else {
+            switch (texel.y) {
+                case 0:
+                    sky_map = light_color;
+                    break;
+
+                case 1:
+                    sky_map = ambient_color;
+                    break;
+
+                case 2: {
+                    // 32-sample cosine-weighted upper-hemisphere average of the
+                    // previous frame's sky map (1 texel/frame = 32 fetches total).
+                    // Supplies neutral sky+clouds ambient for water fog (matching
+                    // stock Photon's SH skylight_up) without disturbing air fog.
+#if defined WORLD_OVERWORLD || defined WORLD_END
+                    const int samples = 32;
+                    const float golden_angle = 2.39996323;
+                    vec3 sum = vec3(0.0);
+                    for (int i = 0; i < samples; ++i) {
+                        float u = (float(i) + 0.5) / float(samples);
+                        float y = sqrt(u);
+                        float r = sqrt(max0(1.0 - u));
+                        float phi = float(i) * golden_angle;
+                        vec3 dir = vec3(r * cos(phi), y, r * sin(phi));
+                        vec3 s = textureLod(colortex4, project_sky(dir), 0.0).rgb;
+                        sum += (!any(isnan(s)) && !any(isinf(s))) ? max0(s) : vec3(0.0);
+                    }
+                    vec3 avg = sum / float(samples);
+#if defined WORLD_OVERWORLD
+                    float night = clamp01(time_midnight);
+                    if (night > 0.0) {
+                        float sky_luma = dot(avg, luminance_weights_rec2020);
+                        vec3 night_sky = mix(avg, vec3(sky_luma), 0.30) * 0.72;
+                        avg = mix(avg, night_sky, night);
+                    }
+#endif
+                    sky_map = max_of(avg) > 1e-6 ? avg : ambient_color * rcp_pi;
 #else
-                sky_map = ambient_color;
+                    sky_map = ambient_color;
 #endif
-                break;
+                    break;
+                }
+                case 3: {
+#if defined WORLD_OVERWORLD
+                    // Frame-constant overcast horizon mist (1 texel/frame) for
+                    // deferred4 draw_sky so sky pixels need zero extra VGPRs.
+                    sky_map = overcast_horizon_mist(
+                        sky_color,
+                        sun_color,
+                        moon_color,
+                        vec3(0.0, 1.0, 0.0)
+                    );
+#else
+                    sky_map = ambient_color;
+#endif
+                    break;
+                }
             }
         }
-    } else { // Draw sky map
+    } else { // Draw sky map (with cloud-shadowed analytic fog for cheap
+             // reflections; BORDER_FOG reads the unfogged strip in col 191)
         vec3 ray_dir = unproject_sky(uv);
 
         sky_map = draw_sky(ray_dir);
 
 #if defined WORLD_OVERWORLD
-        // Apply analytic fog over sky, attenuated by cloud shadows so overcast
-        // sky-map reflections and border fog match VL instead of glowing with
-        // unshadowed direct sun/moon light.
+        vec3 fog_dir = normalize(vec3(ray_dir.x, max(ray_dir.y, 0.01), ray_dir.z));
 #ifdef CLOUD_SHADOWS
 #ifdef LOD_MOD_ACTIVE
         float fog_end = float(lod_render_distance);
@@ -200,16 +225,16 @@ void main() {
         float fog_end = far;
 #endif
         float fog_shadow = (
-            get_cloud_shadows_fast(colortex8, ray_dir * (0.20 * fog_end))
-            + get_cloud_shadows_fast(colortex8, ray_dir * (0.50 * fog_end))
-            + get_cloud_shadows_fast(colortex8, ray_dir * (0.80 * fog_end))
+            get_cloud_shadows_fast(colortex8, fog_dir * (0.20 * fog_end))
+            + get_cloud_shadows_fast(colortex8, fog_dir * (0.50 * fog_end))
+            + get_cloud_shadows_fast(colortex8, fog_dir * (0.80 * fog_end))
         ) * rcp(3.0);
 #else
         const float fog_shadow = 1.0;
 #endif
         mat2x3 fog = air_fog_analytic(
             cameraPosition,
-            cameraPosition + ray_dir,
+            cameraPosition + fog_dir,
             true,
             eye_skylight,
             fog_shadow

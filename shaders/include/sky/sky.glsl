@@ -206,12 +206,16 @@ vec3 draw_sky(
         max(0.85 * smoothstep(0.45, 0.90, overcast), rainStrength)
     );
     float horizon_gap = 1.0 - smoothstep(0.0, 0.10, max0(ray_dir.y));
+#if defined PROGRAM_DEFERRED0
     vec3 overcast_horizon
-        = ambient_color * (rcp(tau) * mix(0.70, 1.0, rainStrength));
+        = overcast_horizon_mist(ambient_color, sun_color, moon_color, ray_dir);
+#else
+    vec3 overcast_horizon = texelFetch(colortex4, ivec2(191, 3), 0).rgb;
+#endif
     atmosphere = mix(
         atmosphere,
         overcast_horizon,
-        overcast_haze * horizon_gap * mix(1.0, 0.85, time_sunrise + time_sunset)
+        overcast_haze * horizon_gap * mix(1.0, 0.9, time_sunrise + time_sunset)
     );
 
     sky *= atmosphere_transmittance(ray_dir.y, planet_radius)

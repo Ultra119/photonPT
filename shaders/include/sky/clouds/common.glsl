@@ -104,6 +104,43 @@ float clouds_overcast_factor() {
     return clamp01(max(dry_overcast * 0.85, rainStrength));
 }
 
+// Physical overcast horizon mist driven by both diffuse skylight and
+// cloud-transmitted direct sun/moon light, desaturated like thick multi-scattered
+// stratus so dawn/sunset stays warm-taupe, midday stays silver-grey, and night
+// stays dark slate without a blue band.
+vec3 overcast_horizon_mist(
+    vec3 sky_col,
+    vec3 sun_col,
+    vec3 moon_col,
+    vec3 ray_dir
+) {
+    bool moonlit = sun_dir.y < -0.04;
+    vec3 active_light_dir = moonlit ? moon_dir : sun_dir;
+    vec3 active_light_col = moonlit ? moon_col : sun_col;
+
+    vec3 cloud_direct = sunlight_color
+        * atmosphere_transmittance(
+            max(active_light_dir.y, 0.02),
+            planet_radius + CLOUDS_CUMULUS_ALTITUDE
+        );
+    cloud_direct = atmosphere_post_processing(cloud_direct) * active_light_col;
+
+    float day_blend = smoothstep(-0.04, 0.04, sun_dir.y);
+    float base_dir_scatter = mix(
+        mix(0.04, 0.085, day_blend),
+        0.025,
+        rainStrength
+    );
+    float dir_scatter = base_dir_scatter
+        * mix(0.85, 1.25, 0.5 + 0.5 * dot(ray_dir, active_light_dir))
+        * smoothstep(-0.02, 0.15, active_light_dir.y);
+
+    vec3 mist = sky_col * (rcp(tau) * mix(0.50, 0.85, rainStrength))
+        + cloud_direct * (dir_scatter * rcp(tau));
+    float mist_luma = dot(mist, luminance_weights_rec2020);
+    return mix(vec3(mist_luma), mist, 0.45);
+}
+
 vec3 clouds_aerial_perspective(
     vec3 clouds_scattering,
     float clouds_transmittance,
@@ -133,13 +170,13 @@ vec3 clouds_aerial_perspective(
 
     // Blend distant clouds toward overcast horizon mist during both rain and
     // heavy dry overcast so the cloud deck merges smoothly into the horizon
-    // instead of fading into a dark clear-sky band.
+    // without a blue or dark clear-sky band.
     float overcast = clouds_overcast_factor();
     float overcast_haze = clamp01(
         max(0.85 * smoothstep(0.45, 0.90, overcast), rainStrength)
     );
     vec3 overcast_mist
-        = sky_color * (rcp(tau) * mix(0.70, 1.0, rainStrength));
+        = overcast_horizon_mist(sky_color, sun_color, moon_color, ray_dir);
     clear_sky = mix(
         clear_sky,
         overcast_mist,

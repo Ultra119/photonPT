@@ -607,10 +607,15 @@ void main() {
                 /* use_klein_nishina_phase */ false
             );
 #endif
-            vec3 horizon_dir = normalize(
-                vec3(direction_world.xz, min(direction_world.y, -0.1)).xzy
-            );
-            vec3 horizon_color = texture(colortex4, project_sky(horizon_dir)).rgb;
+            // Sample the wrapped 96-segment unfogged horizon strip in colortex4
+            // column 191 (rows 4..100) with 1 hardware-filtered fetch so
+            // BORDER_FOG avoids double-fogging without extra VGPR pressure.
+            float az = (direction_world.z != 0.0)
+                ? atan(direction_world.x, -direction_world.z)
+                : ((direction_world.x != 0.0) ? sign(direction_world.x) * half_pi : 0.0);
+            float v_horizon = (4.5 + fract(az * rcp(tau) + 0.5) * 96.0) * rcp(108.0);
+            vec3 horizon_color
+                = textureLod(colortex4, vec2(191.5 * rcp(192.0), v_horizon), 0.0).rgb;
 
             float horizon_factor
                 = linear_step(0.1, 1.0, exp(-75.0 * sqr(sun_dir.y + 0.0496)));

@@ -39,15 +39,16 @@ float clouds_cumulus_density(vec3 pos) {
 
 #if defined CLOUDS_USE_LOCAL_COVERAGE_MAP
     // Get local coverage from precomputed coverage map - saves 1 sample and
-    // some maths
-    vec2 coverage_map_uv = project_clouds_cumulus_coverage_map(pos);
-
-    if (r < clouds_cumulus_radius || r > clouds_cumulus_top_radius
-        || clamp01(coverage_map_uv) != coverage_map_uv) {
+    // some maths; fall back to procedural coverage beyond the map edge so high
+    // cloud decks still reach the true Earth horizon without a hard cutoff.
+    if (r < clouds_cumulus_radius || r > clouds_cumulus_top_radius) {
         return 0.0;
     }
 
-    float density = texture(colortex8, coverage_map_uv).z;
+    vec2 coverage_map_uv = project_clouds_cumulus_coverage_map(pos);
+    float density = (clamp01(coverage_map_uv) == coverage_map_uv)
+        ? texture(colortex8, coverage_map_uv).z
+        : clouds_cumulus_local_coverage(pos.xz);
 #else
     if (r < clouds_cumulus_radius || r > clouds_cumulus_top_radius) {
         return 0.0;
@@ -297,15 +298,6 @@ CloudsResult draw_cumulus_clouds(
         float distance_to_sample = distance(ray_origin, ray_pos);
         density
             *= smoothstep(1.0, 0.95, distance_to_sample * rcp(max_ray_length));
-
-#if defined CLOUDS_USE_LOCAL_COVERAGE_MAP
-        // Fade away at the edges of the local coverage map
-        density *= smoothstep(
-            1.0,
-            0.9,
-            length(ray_pos.xz) * rcp(0.5 * clouds_cumulus_coverage_map_scale)
-        );
-#endif
 
         float step_optical_depth
             = density * clouds_params.l0_extinction_coeff * step_length;
