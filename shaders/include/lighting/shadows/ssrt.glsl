@@ -19,29 +19,58 @@ bool raymarch_shadow(
 ) {
     const uint step_count = uint(SHADOW_SSRT_STEPS);
     const float step_ratio = 2.0; // geometric sample distribution
-    const float z_tolerance = 10.0; // assumed thickness in blocks
+    const float z_tolerance = 10.0; // assumed minimum thickness in blocks
 
-    vec3 ray_dir_screen = normalize(
-        view_to_screen_space(
-            projection_matrix,
-            ray_origin_view + ray_dir_view,
-            true
-        )
-        - ray_origin_screen
-    );
+    // Project a distance-scaled endpoint and interpolate 1/z linearly in screen
+    // space to avoid float32 catastrophic cancellation near depth = 1.0.
+    float z0 = max(-ray_origin_view.z, eps);
+    float max_probe = ray_dir_view.z > eps
+        ? max(0.05, (z0 - max(2.0 * near, 0.05)) * rcp(ray_dir_view.z))
+        : 1e6;
+    float probe_dist = min(max(4.0, 0.5 * z0), max_probe);
+    vec3 ray_end_view = ray_origin_view + probe_dist * ray_dir_view;
+    float z1 = max(-ray_end_view.z, eps);
 
-    float ray_length = ray_box_exit_unit(ray_origin_screen, ray_dir_screen);
+    vec2 ray_end_xy
+        = view_to_screen_space(projection_matrix, ray_end_view, true).xy;
+    vec2 delta_xy = ray_end_xy - ray_origin_screen.xy;
+    float delta_xy_len = length(delta_xy);
+    if (delta_xy_len < eps) {
+        sss_depth = 0.0;
+        return false;
+    }
+
+    vec2 dir_xy = delta_xy * rcp(delta_xy_len);
+    float inv_z0 = rcp(z0);
+    float inv_z1 = rcp(z1);
+    float d_inv_z_per_xy = (inv_z1 - inv_z0) * rcp(delta_xy_len);
+
+    // Parametric exit distance in screen XY [0, 1]^2
+    vec2 box_target = step(vec2(0.0), dir_xy);
+    bvec2 active_axis = greaterThan(abs(dir_xy), vec2(eps));
+    vec2 safe_dir = mix(vec2(1.0), dir_xy, active_axis);
+    vec2 box_dist
+        = mix(vec2(1e6), (box_target - ray_origin_screen.xy) / safe_dir, active_axis);
+    float ray_length = max0(min_of(box_dist));
     ray_length = min(
         ray_length,
         max(0.1, exp(-max0(length(ray_origin_view) * 0.025 - 1.0)))
     );
+    if (d_inv_z_per_xy < -eps) {
+        ray_length = min(ray_length, (inv_z0 * 0.999) * rcp(-d_inv_z_per_xy));
+    } else if (d_inv_z_per_xy > eps) {
+        float inv_z_near = rcp(max(near, 0.01));
+        ray_length = min(
+            ray_length,
+            max0(inv_z_near - inv_z0) * rcp(d_inv_z_per_xy)
+        );
+    }
 
     const float initial_step_scale = step_ratio == 1.0
         ? rcp(float(step_count))
         : (step_ratio - 1.0) / (pow(step_ratio, float(step_count)) - 1.0);
     float step_length = ray_length * initial_step_scale;
-
-    vec3 ray_pos = ray_origin_screen + length(view_pixel_size) * ray_dir_screen;
+    float s = length(view_pixel_size);
 
     ivec2 depth_size = textureSize(depth_sampler, 0);
     ivec2 max_texel = clamp(
@@ -55,45 +84,50 @@ bool raymarch_shadow(
     bool hit_after_sss = false;
     bool sss_raymarch = has_sss;
     bool found_exit = false;
-    vec3 exit_pos_screen = ray_origin_screen;
+    float exit_s = 0.0;
+    float exit_z = z0;
 
     for (int i = 0; i < step_count; ++i) {
-        vec3 ray_step = ray_dir_screen * step_length;
-        vec3 dithered_pos = ray_pos + dither * ray_step;
-        ray_pos += ray_step;
+        float s_dithered = s + dither * step_length;
+        s += step_length;
         step_length *= step_ratio;
 
-#ifdef LOD_MOD_ACTIVE
-        if (dithered_pos.z < 0.0) {
-            continue;
-        }
-#endif
-        if (clamp01(dithered_pos) != dithered_pos) {
+        vec2 sample_xy = ray_origin_screen.xy + s_dithered * dir_xy;
+        if (clamp01(sample_xy) != sample_xy) {
             break;
         }
 
+        float inv_z_ray = inv_z0 + s_dithered * d_inv_z_per_xy;
+        if (inv_z_ray <= eps) {
+            break;
+        }
+        float z_ray = rcp(inv_z_ray);
+
         ivec2 sample_texel = clamp(
-            ivec2(dithered_pos.xy * active_extent),
+            ivec2(sample_xy * active_extent),
             ivec2(0),
             max_texel
         );
         float depth = texelFetch(depth_sampler, sample_texel, 0).x;
 
-        float z_ray = screen_to_view_space_depth(
-            projection_matrix_inverse,
-            dithered_pos.z
-        );
-        float z_sample
-            = screen_to_view_space_depth(projection_matrix_inverse, depth);
+        bool inside = false;
+        if (depth > 0.0 && depth < 1.0) {
+            float z_sample
+                = screen_to_view_space_depth(projection_matrix_inverse, depth);
 
-        float dz = z_ray - z_sample;
-        bool inside = depth != 0.0 && depth < dithered_pos.z
-            && dz > 0.0 && dz < z_tolerance;
+            float dz = z_ray - z_sample;
+            // Cover 24-bit depth quantization and 1-pixel slope steps on
+            // distant terrain so surfaces never self-shadow in depth bands.
+            float z_bias = 0.03 + 0.002 * z_ray;
+            float z_tol = max(z_tolerance, 0.05 * z_ray);
+            inside = dz > z_bias && dz < z_tol;
+        }
         hit = inside || hit;
 
         if (sss_raymarch) {
             if (!inside) {
-                exit_pos_screen = dithered_pos;
+                exit_s = s_dithered;
+                exit_z = z_ray;
                 found_exit = true;
                 sss_raymarch = false;
             }
@@ -105,12 +139,10 @@ bool raymarch_shadow(
         }
     }
 
-    vec3 exit_pos_view = found_exit
-        ? screen_to_view_space(projection_matrix_inverse, exit_pos_screen, true)
-        : ray_origin_view;
-    sss_depth = hit_after_sss
-        ? -1.0
-        : max0(distance(ray_origin_view, exit_pos_view) * 0.2);
+    float exit_dist = found_exit
+        ? probe_dist * (exit_s * rcp(delta_xy_len)) * (exit_z * inv_z1)
+        : 0.0;
+    sss_depth = hit_after_sss ? -1.0 : max0(exit_dist * 0.2);
 
     return hit;
 }
