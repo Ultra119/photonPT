@@ -63,19 +63,12 @@ uniform sampler2D colortex8; // cloud shadow map
 uniform sampler3D depthtex0; // atmosphere scattering LUT
 uniform sampler2D depthtex1;
 
-
-#ifdef BLOCKY_CLOUDS
-uniform sampler2D blocky_clouds_tex;
-#endif
-
 #ifndef WORLD_NETHER
-#ifdef SHADOW
 uniform sampler2D shadowtex0;
 uniform sampler2DShadow shadowtex1;
 
 #ifdef SHADOW_COLOR
 uniform sampler2D shadowcolor0;
-#endif
 #endif
 #endif
 
@@ -157,7 +150,6 @@ const bool colortex11MipmapEnabled = true;
 #include "/include/misc/lod_mod_support.glsl"
 #include "/include/misc/purkinje_shift.glsl"
 #include "/include/sky/sky.glsl"
-#include "/include/surface/edge_highlight.glsl"
 #include "/include/surface/material.glsl"
 #include "/include/surface/rain_puddles.glsl"
 #include "/include/utility/bicubic.glsl"
@@ -168,9 +160,6 @@ const bool colortex11MipmapEnabled = true;
 #if defined WORLD_OVERWORLD
 #include "/include/sky/clouds/sampling.glsl"
 #include "/include/sky/rainbow.glsl"
-#if defined BLOCKY_CLOUDS
-#include "/include/sky/blocky_clouds.glsl"
-#endif
 #endif
 
 #if defined CLOUD_SHADOWS
@@ -260,60 +249,10 @@ void main() {
     float clouds_apparent_distance;
     vec4 clouds_and_aurora
         = read_clouds_and_aurora(uv, clouds_apparent_distance);
-
-    // Atmosphere is needed immediately for sky and blocky clouds, or lazily
-    // for terrain pixels inside border fog.
-#ifdef BLOCKY_CLOUDS
-    vec3 atmosphere = atmosphere_scattering(
-        direction_world,
-        sun_color,
-        sun_dir,
-        moon_color,
-        moon_dir,
-        /* use_klein_nishina_phase */ is_sky
-    );
-#endif
-
-    // Blocky clouds
-
-#ifdef BLOCKY_CLOUDS
-    vec3 world_start_pos = gbufferModelViewInverse[3].xyz + cameraPosition;
-    vec3 world_end_pos = position_world;
-
-    float dither = texelFetch(noisetex, texel & 511, 0).b;
-    dither = r1(frameCounter, dither);
-
-    vec4 blocky_clouds = raymarch_blocky_clouds(
-        world_start_pos,
-        world_end_pos,
-        is_sky,
-        blocky_clouds_altitude_l0,
-        dither
-    );
-
-#ifdef BLOCKY_CLOUDS_LAYER_2
-    float visibility = pow4(blocky_clouds.a);
-    vec4 blocky_clouds_l2 = raymarch_blocky_clouds(
-        world_start_pos,
-        world_end_pos,
-        is_sky,
-        blocky_clouds_altitude_l1,
-        dither
-    );
-    blocky_clouds.rgb += blocky_clouds_l2.xyz * visibility;
-    blocky_clouds.a *= mix(1.0, blocky_clouds_l2.a, visibility);
-#endif
-
-    float new_alpha = sqr(sqr(blocky_clouds.a));
-    blocky_clouds.rgb
-        += atmosphere * (1.0 - new_alpha) * (blocky_clouds.a - new_alpha);
-    blocky_clouds.a = new_alpha;
-#endif
 #endif
 
     if (is_sky) {
 #if defined WORLD_OVERWORLD
-#ifndef BLOCKY_CLOUDS
         vec3 atmosphere = atmosphere_scattering(
             direction_world,
             sun_color,
@@ -322,7 +261,6 @@ void main() {
             moon_dir,
             /* use_klein_nishina_phase */ true
         );
-#endif
         fragment_color = draw_sky(
             direction_world,
             atmosphere,
@@ -332,11 +270,6 @@ void main() {
         );
 #else
         fragment_color = draw_sky(direction_world);
-#endif
-
-        // Apply blocky clouds
-#if defined WORLD_OVERWORLD && defined BLOCKY_CLOUDS
-        fragment_color = fragment_color * blocky_clouds.w + blocky_clouds.xyz;
 #endif
 
         // Apply common fog
@@ -455,7 +388,6 @@ void main() {
             float sss_depth_near = 0.0;
             float sss_depth_distant = 0.0;
 
-#ifdef SHADOW
             shadow_near = get_filtered_shadows(
                 position_scene,
                 flat_normal,
@@ -465,7 +397,6 @@ void main() {
                 shadow_distance_fade,
                 sss_depth_near
             );
-#endif
 
             // Calculate distant shadows
             if (shadow_distance_fade >= eps) {
@@ -546,12 +477,8 @@ void main() {
 
 #if defined WORLD_OVERWORLD || defined WORLD_END
         if (has_direct_light && NoL > eps && max_of(shadows) > eps) {
-            vec3 direct_specular = get_specular_highlight(material, NoL, NoV, NoH, LoV, LoH)
+            fragment_color += get_specular_highlight(material, NoL, NoV, NoH, LoV, LoH)
                 * light_color * shadows * cloud_shadows;
-#ifdef RT_AO_IN_DIRECT
-            direct_specular *= ao;
-#endif
-            fragment_color += direct_specular;
         }
 #endif
 
@@ -576,18 +503,6 @@ void main() {
             );
         }
 #endif
-        // Edge highlight
-
-#ifdef EDGE_HIGHLIGHT
-        fragment_color *= 1.0
-            + 0.5
-                * get_edge_highlight(
-                    position_scene,
-                    flat_normal,
-                    depth,
-                    material_mask
-                );
-#endif
 
         // Apply fog
 
@@ -597,7 +512,6 @@ void main() {
         float border_fog = border_fog(position_scene, direction_world);
         if (border_fog < 0.9999) {
 #if defined WORLD_OVERWORLD
-#ifndef BLOCKY_CLOUDS
             vec3 atmosphere = atmosphere_scattering(
                 direction_world,
                 sun_color,
@@ -606,7 +520,6 @@ void main() {
                 moon_dir,
                 /* use_klein_nishina_phase */ false
             );
-#endif
             // Sample the wrapped 96-segment unfogged horizon strip in colortex4
             // column 191 (rows 4..100) with 1 hardware-filtered fetch so
             // BORDER_FOG avoids double-fogging without extra VGPR pressure.
@@ -643,14 +556,10 @@ void main() {
 #if defined WORLD_OVERWORLD
         // Apply clouds in front of terrain
 
-#ifdef BLOCKY_CLOUDS
-        fragment_color = fragment_color * blocky_clouds.w + blocky_clouds.xyz;
-#else
         if (sqr(clouds_apparent_distance) < length_squared(position_view)) {
             fragment_color
                 = fragment_color * clouds_and_aurora.w + clouds_and_aurora.xyz;
         }
-#endif
 
         // Apply rainbows in front of terrain
 

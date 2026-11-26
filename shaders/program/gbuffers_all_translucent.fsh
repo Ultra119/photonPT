@@ -71,21 +71,11 @@ uniform sampler2D colortex8; // Cloud shadow map
 uniform sampler2D depthtex1;
 
 
-#ifdef SHADOW
-#ifdef WORLD_OVERWORLD
+#if defined WORLD_OVERWORLD || defined WORLD_END
 uniform sampler2D shadowtex0;
 uniform sampler2DShadow shadowtex1;
 #ifdef SHADOW_COLOR
 uniform sampler2D shadowcolor0;
-#endif
-#endif
-
-#ifdef WORLD_END
-uniform sampler2D shadowtex0;
-uniform sampler2DShadow shadowtex1;
-#ifdef SHADOW_COLOR
-uniform sampler2D shadowcolor0;
-#endif
 #endif
 #endif
 
@@ -207,54 +197,6 @@ Material get_water_material(
 ) {
     Material material = water_material;
     alpha = 0.01;
-
-    // Water texture
-
-#if WATER_TEXTURE == WATER_TEXTURE_HIGHLIGHT \
-    || WATER_TEXTURE == WATER_TEXTURE_HIGHLIGHT_UNDERGROUND
-    vec4 base_color = texture(gtexture, uv, lod_bias);
-    float texture_highlight = dampen(
-        0.5 * sqr(linear_step(0.63, 1.0, base_color.r)) + 0.03 * base_color.r
-    );
-#if WATER_TEXTURE == WATER_TEXTURE_HIGHLIGHT_UNDERGROUND
-    texture_highlight *= 1.0 - cube(linear_step(0.0, 0.5, light_levels.y));
-#endif
-
-    material.albedo
-        = clamp01(0.5 * exp(-2.0 * water_absorption_coeff) * texture_highlight);
-    material.roughness += 0.3 * texture_highlight;
-    alpha += texture_highlight;
-#elif WATER_TEXTURE == WATER_TEXTURE_VANILLA
-    vec4 base_color = texture(gtexture, uv, lod_bias) * tint;
-    material.albedo = srgb_eotf_inv(base_color.rgb * base_color.a)
-        * rec709_to_working_color;
-    alpha = base_color.a;
-#endif
-
-    // Water edge highlight
-
-#ifdef WATER_EDGE_HIGHLIGHT
-    float dist = layer_dist * max(abs(direction_world.y), eps);
-
-#if WATER_TEXTURE == WATER_TEXTURE_HIGHLIGHT \
-    || WATER_TEXTURE == WATER_TEXTURE_HIGHLIGHT_UNDERGROUND
-    float edge_highlight
-        = cube(max0(1.0 - 2.0 * dist)) * (1.0 + 8.0 * texture_highlight);
-#else
-    float edge_highlight = cube(max0(1.0 - 2.0 * dist));
-#endif
-    edge_highlight *= WATER_EDGE_HIGHLIGHT_INTENSITY * max0(normal.y)
-        * (1.0 - 0.5 * sqr(light_levels.y));
-    ;
-
-    material.albedo += 0.1 * edge_highlight
-        / mix(1.0,
-              max(dot(ambient_color, luminance_weights_rec2020), 0.5),
-              light_levels.y);
-    material.albedo = clamp01(material.albedo);
-    alpha += edge_highlight;
-#endif
-
     return material;
 }
 
@@ -609,7 +551,7 @@ void main() {
 #define cloud_shadows 1.0
 #endif
 
-#if defined SHADOW && (defined WORLD_OVERWORLD || defined WORLD_END)
+#if defined WORLD_OVERWORLD || defined WORLD_END
     float sss_depth = 0.0;
     float shadow_distance_fade = 0.0;
     vec3 shadows = get_filtered_shadows(

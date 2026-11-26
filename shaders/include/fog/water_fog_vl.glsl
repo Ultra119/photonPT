@@ -80,7 +80,7 @@ mat2x3 raymarch_water_fog(
              caustics_pos += caustics_step) {
         vec3 shadow_screen_pos = distort_shadow_space(shadow_pos) * 0.5 + 0.5;
 
-#if defined SHADOW && (defined WORLD_OVERWORLD || defined WORLD_END)
+#if defined WORLD_OVERWORLD || defined WORLD_END
         bool in_shadow_map = clamp01(shadow_screen_pos) == shadow_screen_pos;
         float shadow
             = in_shadow_map ? texture(shadowtex1, shadow_screen_pos) : 1.0;

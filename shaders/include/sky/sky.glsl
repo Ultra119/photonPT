@@ -22,7 +22,7 @@
 #if defined PROGRAM_DEFERRED0
 #include "/include/sky/clouds.glsl"
 
-#if defined CREPUSCULAR_RAYS && !defined BLOCKY_CLOUDS
+#ifdef CREPUSCULAR_RAYS
 #include "/include/sky/crepuscular_rays.glsl"
 #endif
 #endif
@@ -149,7 +149,6 @@ vec3 draw_sky(
 ) {
     vec3 sky = vec3(0.0);
 
-#if defined SHADOW
     // Trick to make stars rotate with sun and moon
     mat3 rot = (sunAngle < 0.5)
         ? mat3(shadowModelViewInverse)
@@ -160,9 +159,6 @@ vec3 draw_sky(
           );
 
     vec3 celestial_dir = ray_dir * rot;
-#else
-    vec3 celestial_dir = ray_dir;
-#endif
 
     // Galaxy
 
@@ -173,31 +169,20 @@ vec3 draw_sky(
     const float galaxy_luminance = 0.0;
 #endif
 
-    // Sun, moon stars
+    // Sun, moon, stars
 
 #if defined PROGRAM_DEFERRED4
-    vec3 skytextured_output
-        = texelFetch(colortex0, ivec2(gl_FragCoord.xy), 0).rgb;
-    sky += texelFetch(colortex0, ivec2(gl_FragCoord.xy), 0).rgb;
-
 #ifdef STARS
-    // Stars
-    float stars_visibility
-        = clamp01(1.0 - dot(skytextured_output, vec3(0.33) * 256.0));
-    sky += draw_stars(celestial_dir, galaxy_luminance) * stars_visibility;
+    sky += draw_stars(celestial_dir, galaxy_luminance);
 #endif
 
-#ifndef VANILLA_SUN
     // Shader sun
     sky += draw_sun(ray_dir);
-#endif
 
-#ifndef VANILLA_MOON
     // Shader moon
     vec4 moon = draw_moon(ray_dir);
     sky *= 1.0 - moon.a;
     sky += moon.rgb;
-#endif
 #endif
 
     // Atmosphere
@@ -265,7 +250,6 @@ vec4 get_clouds_and_aurora(
 
     // Clouds
 
-#ifndef BLOCKY_CLOUDS
     const vec3 air_viewer_pos = vec3(0.0, planet_radius, 0.0);
     CloudsResult result
         = draw_clouds(air_viewer_pos, ray_dir, clear_sky, -1.0, dither);
@@ -273,9 +257,6 @@ vec4 get_clouds_and_aurora(
     // Lightning flash
     result.scattering.rgb += LIGHTNING_FLASH_UNIFORM * lightning_flash_intensity
         * result.scattering.a;
-#else
-    CloudsResult result = clouds_not_hit;
-#endif
 
     clouds_apparent_distance = result.apparent_distance;
 
@@ -290,7 +271,7 @@ vec4 get_clouds_and_aurora(
 
     // Crepuscular rays
 
-#if defined CREPUSCULAR_RAYS && !defined BLOCKY_CLOUDS
+#ifdef CREPUSCULAR_RAYS
     vec4 crepuscular_rays
         = draw_crepuscular_rays(colortex8, ray_dir, false, 0.5);
     clouds_and_aurora *= crepuscular_rays.w;

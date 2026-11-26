@@ -1,7 +1,7 @@
 #if !defined INCLUDE_LIGHTING_SHADOWS
 #define INCLUDE_LIGHTING_SHADOWS
 
-#if defined SHADOW && (defined WORLD_OVERWORLD || defined WORLD_END)
+#if !defined NO_SHADOW_MAP && (defined WORLD_OVERWORLD || defined WORLD_END)
 
 #include "/include/lighting/shadows/common.glsl"
 #include "/include/lighting/shadows/distortion.glsl"
@@ -231,15 +231,6 @@ vec3 get_filtered_shadows(
     sss_depth = 0.0;
 
     float NoL = dot(flat_normal, light_dir);
-
-#ifdef PIXELATED_SHADOWS
-    // Snap position to the nearest block texel
-    const float pixel_scale = float(PIXELATED_SHADOWS_RESOLUTION);
-    scene_pos = scene_pos + cameraPosition;
-    scene_pos = floor(scene_pos * pixel_scale + 0.01) * rcp(pixel_scale)
-        + (0.5 / pixel_scale);
-    scene_pos = scene_pos - cameraPosition;
-#endif
 
     vec3 shadow_view_unbiased = transform(shadowModelView, scene_pos);
     vec2 shadow_clip_xy_unbiased

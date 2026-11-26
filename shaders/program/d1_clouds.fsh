@@ -115,7 +115,7 @@ uniform float biome_humidity;
 #include "/include/sky/aurora.glsl"
 #include "/include/sky/clouds.glsl"
 
-#if defined CREPUSCULAR_RAYS && !defined BLOCKY_CLOUDS
+#ifdef CREPUSCULAR_RAYS
 #include "/include/sky/crepuscular_rays.glsl"
 #endif
 #endif
@@ -212,7 +212,6 @@ void main() {
     float dither = texelFetch(noisetex, ivec2(checkerboard_pos & 511), 0).b;
     dither = r1(frameCounter / checkerboard_area, dither);
 
-#ifndef BLOCKY_CLOUDS
     CloudsResult result = draw_clouds(
         ray_origin,
         ray_dir,
@@ -229,15 +228,10 @@ void main() {
     bool terrain_occluded = (distance_to_terrain >= 0.0)
         && (result.apparent_distance >= 9.9e4);
     clouds_data.y = terrain_occluded ? -1.0 : max0(result.scattering.w);
-#else
-    clouds = vec4(0.0, 0.0, 0.0, 1.0);
-    clouds_data.x = 60000.0;
-    clouds_data.y = 0.0;
-#endif
 
     // Crepuscular rays
 
-#if defined CREPUSCULAR_RAYS && !defined BLOCKY_CLOUDS
+#ifdef CREPUSCULAR_RAYS
     vec4 crepuscular_rays = draw_crepuscular_rays(
         colortex8,
         ray_dir,

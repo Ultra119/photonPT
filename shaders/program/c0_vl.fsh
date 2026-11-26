@@ -42,12 +42,10 @@ uniform sampler2D depthtex0;
 uniform sampler2D depthtex1;
 
 #ifndef WORLD_NETHER
-#ifdef SHADOW
 uniform sampler2D shadowtex0;
 uniform sampler2DShadow shadowtex1;
 #ifdef SHADOW_COLOR
 uniform sampler2D shadowcolor0;
-#endif
 #endif
 #endif
 

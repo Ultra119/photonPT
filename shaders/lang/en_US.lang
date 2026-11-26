@@ -26,7 +26,6 @@ screen.light_sources                   = Light Sources
 screen.shadows                         = Shadows
 screen.color_grading                   = Color Grading
 screen.exposure                        = Exposure
-screen.box                             = Selection Box
 screen.developer                       = Developer Options
 
 screen.distant_horizons                = Distant Horizons
@@ -39,7 +38,6 @@ screen.clouds_cumulus                  = Cumulus Clouds Settings
 screen.clouds_altocumulus              = Altocumulus Clouds Settings
 screen.clouds_cumulus_congestus        = Cumulus Congestus Clouds Settings
 screen.clouds_cirrus                   = Cirrus/Cirrocumulus Clouds Settings
-screen.clouds_minecrafty               = Blocky Clouds Settings
 screen.clouds_noctilucent              = Noctilucent Clouds Settings
 
 screen.fog_rlh                         = Rayleigh Fog
@@ -66,7 +64,6 @@ screen.end_light_color                 = Light Color
 screen.end_ambient_color               = Ambient Color
 screen.nether_color                    = Static Color
 
-screen.distance_view                   = Distance View
 
 option.INFO                            = Photon PT
 option.INFO.comment                    = Voxel path-traced fork of Photon Shaders by @Ultra119.\nBased on Photon Shaders by SixthSurge.
@@ -90,10 +87,6 @@ option.SEA_LEVEL                       = Sea Level
 option.SEA_LEVEL.comment               = The y coordinate of the sea/ground.\n\n-60.0: Superflat post-1.18.\n4.0: Superflat pre-1.18.\n63.0: Normal.
 option.SNOW_OPACITY                    = Snow Opacity
 option.SNOW_OPACITY.comment            = Adjust the opacity of snow particles
-option.EDGE_HIGHLIGHT                  = Edge Highlight
-option.EDGE_HIGHLIGHT.comment          = Edge highlighting effect inspired by Minecraft Dungeons
-option.EDGE_HIGHLIGHT_SCALE            = Edge Highlight Scale
-option.EDGE_HIGHLIGHT_SCALE.comment    = Controls the thickness of the edge highlight; change this to match your resource pack resolution
 option.MOON_PHASE_AFFECTS_BRIGHTNESS   = Moon Phase Affects Lighting
 option.MOON_PHASE_AFFECTS_BRIGHTNESS.comment = Night time brightness is affected by the moon phase
 option.DESERT_SANDSTORM                = Desert Sandstorm
@@ -121,10 +114,7 @@ option.SSS_SHEEN                       = SSS Sheen
 option.SSS_SHEEN.comment               = Specular "sheen" effect on plants and leaves, helps tall grass and stuff to blend better with the grass specular
 option.SSS_INTENSITY                   = SSS Intensity
 option.SSS_INTENSITY.comment           = Adjusts the brightness of subsurface scattering (SSS)
-option.SHADING_STRENGTH                = Shading Strength
-option.SHADING_STRENGTH.comment        = Adjusts the contrast of direct light shading. Reducing this option makes faces facing away from the sun that aren't in shadow brighter; increasing it makes them darker
 
-option.SHADOW                          = Shadow Mapping
 option.SHADOW_PCF                      = Shadow Map Filtering
 option.SHADOW_SSRT                     = SSRT Distant Shadows
 option.SHADOW_SSRT_STEPS               = SSRT Shadow Steps
@@ -140,9 +130,6 @@ option.SHADOW_PENUMBRA_SCALE.comment   = Adjust the softness of shadows
 option.ENTITY_SHADOWS                  = Entity Shadows
 option.ENTITY_SHADOWS.comment          = Whether entities can cast shadows.\nDisable this to improve performance in survival bases with large farms
 option.BLOCK_ENTITY_SHADOWS            = Block Entity Shadows
-option.PIXELATED_SHADOWS               = Pixelated Shadows
-option.PIXELATED_SHADOWS.comment       = Shadows snap to block texels, creating a pixelated look
-option.PIXELATED_SHADOWS_RESOLUTION    = Pixelated Shadows Resolution
 option.SSS_STEPS                       = SSS Steps 
 option.SSS_STEPS.comment               = Increase to reduce noise on foliage and other materials with SSS, at the cost of performance.
 
@@ -186,8 +173,6 @@ option.BLOCKLIGHT_B                    = §9▍ §fBlue
 option.BLOCKLIGHT_I                    = Blocklight Intensity
 
 
-
-
 suffix.shadowMapResolution             = ²
 suffix.sunPathRotation                 = °
 
@@ -214,12 +199,8 @@ value.shadowDistance.4096.0            = 256 chunks
 
 # Sky settings
 
-option.VANILLA_SUN                     = Vanilla Sun
-option.VANILLA_MOON                    = Vanilla Moon
 option.SUN_ANGULAR_RADIUS              = Sun Angular Radius
 option.MOON_ANGULAR_RADIUS             = Moon Angular Radius
-option.SKY_GROUND                      = Sky Ground
-option.SKY_GROUND.comment              = Visible planet surface below the horizon
 option.STARS                           = Enabled
 option.STARS.comment                   = Stars in the night sky. Low performance impact
 option.STARS_INTENSITY                 = Intensity
@@ -299,35 +280,9 @@ option.CLOUDS_CUMULUS_CONGESTUS_DETAIL_STRENGTH       = Detail Strength
 
 option.CLOUDS_NOCTILUCENT               = Noctilucent Clouds
 
-option.BLOCKY_CLOUDS                     = Blocky Clouds
-option.BLOCKY_CLOUDS.comment             = Vanilla-styled volumetric clouds. Enabling this option disables all other cloud types
-option.BLOCKY_CLOUDS_LAYER_2             = Second Layer
-option.BLOCKY_CLOUDS_LAYER_2.comment     = A second layer of Minecrafty volumetric clouds! Beware that enabling this option doubles the performance impact of the clouds
-option.BLOCKY_CLOUDS_THICKNESS           = Tallness
-option.BLOCKY_CLOUDS_THICKNESS.comment   = Adjust the thickness of the clouds
-option.BLOCKY_CLOUDS_ALTITUDE            = Altitude
-option.BLOCKY_CLOUDS_ALTITUDE.comment    = Adjust the height of the clouds
 suffix.BLOCKY_CLOUDS_ALTITUDE            = m
-option.BLOCKY_CLOUDS_ALTITUDE_2          = Second Layer Altitude
-option.BLOCKY_CLOUDS_ALTITUDE_2.comment  = Adjust the height of the second layer of clouds
 suffix.BLOCKY_CLOUDS_ALTITUDE_2          = m
-option.BLOCKY_CLOUDS_ROUNDNESS           = Roundness
-option.BLOCKY_CLOUDS_ROUNDNESS.comment   = Cloud edge roundness
-option.BLOCKY_CLOUDS_SHARPNESS           = Sharpness
-option.BLOCKY_CLOUDS_SHARPNESS.comment   = Cloud edge sharpness
-option.BLOCKY_CLOUDS_PRIMARY_STEPS       = Primary Steps
-option.BLOCKY_CLOUDS_LIGHTING_STEPS      = Lighting Steps
-option.BLOCKY_CLOUDS_DENSITY             = Density
-option.BLOCKY_CLOUDS_DENSITY.comment     = Adjusts the density of the clouds. Higher values increase noise
-option.BLOCKY_CLOUDS_BRIGHTNESS          = Brightness
-option.BLOCKY_CLOUDS_BOTTOMLIGHT         = Bottom Brightness
-option.BLOCKY_CLOUDS_BOTTOMLIGHT.comment = Increases the brightness of the undersides of clouds
-option.BLOCKY_CLOUDS_SIZE                = Size
-option.BLOCKY_CLOUDS_ATMOSPHERIC_SCATTERING         = Atmospheric Scattering
-option.BLOCKY_CLOUDS_ATMOSPHERIC_SCATTERING.comment = When enabled, tints clouds slightly red. This effect increases with distance
-option.BLOCKY_CLOUDS_WIND_SPEED          = Wind Speed
 suffix.BLOCKY_CLOUDS_WIND_SPEED          = m/s
-option.BLOCKY_CLOUDS_WIND_ANGLE          = Wind Angle
 suffix.BLOCKY_CLOUDS_WIND_ANGLE          = °
 
 option.CLOUDS_TEMPORAL_UPSCALING       = Temporal Upscaling
@@ -506,8 +461,6 @@ option.SSR_INTERSECTION_STEPS_ROUGH    = Intersection Steps - Rough
 option.SSR_INTERSECTION_STEPS_ROUGH.comment = Adjusts the accuracy of rough reflections, at the expense of performance
 option.SSR_REFINEMENT_STEPS            = Refinement Steps
 option.SSR_REFINEMENT_STEPS.comment    = Adjusts the accuracy of all reflections, at the expense of performance
-option.SSR_ROUGHNESS_THRESHOLD         = Roughness Threshold
-option.SSR_ROUGHNESS_THRESHOLD.comment = Adjusts how smooth a surface must be for reflections to appear
 
 
 # Water settings
@@ -516,20 +469,11 @@ option.WATER_CAUSTICS                  = Water Caustics
 option.WATER_CAUSTICS.comment          = Dancing light patterns beneath water
 option.WATER_CAUSTICS_INTENSITY        = Water Caustics Intensity
 option.WATER_CAUSTICS_INTENSITY.comment = Adjust the brightness of water caustics
-option.WATER_EDGE_HIGHLIGHT            = Water Edge Highlight
-option.WATER_EDGE_HIGHLIGHT.comment    = White highlights where water meets terrain. Helps to make water more easily visible in some cases
-option.WATER_EDGE_HIGHLIGHT_INTENSITY  = Water Edge Highlight Intensity
 option.SNELLS_WINDOW                   = Snell's Window
 option.SNELLS_WINDOW.comment           = Total internal reflection underwater
-option.WATER_TEXTURE                   = Water Texture
-option.WATER_TEXTURE.comment           = How to use the vanilla water texture.\n\nOff - no water texture.\nHighlights: water texture adds highlights to the water, like how it works in Bedrock RTX.\nVanilla: water texture is used like any other texture
 option.BIOME_WATER_COLOR               = Biome-Colored Water
 option.BIOME_WATER_COLOR.comment       = Water absorption takes the biome water colour into account
 
-value.WATER_TEXTURE.WATER_TEXTURE_OFF                   = Off
-value.WATER_TEXTURE.WATER_TEXTURE_HIGHLIGHT             = Highlights
-value.WATER_TEXTURE.WATER_TEXTURE_VANILLA               = Vanilla
-value.WATER_TEXTURE.WATER_TEXTURE_HIGHLIGHT_UNDERGROUND = Highlights (Underground only)
 
 option.WATER_WAVES                     = Enabled
 option.WATER_WAVE_ITERATIONS           = Iterations
@@ -652,16 +596,8 @@ option.DEBUG_VIEW                      = Debug View
 option.DEBUG_SAMPLER                   = Debug Sampler
 option.WHITE_WORLD                     = White World
 option.WHITE_WORLD.comment             = Set every albedo texture to white
-option.TONEMAP_COMPARISON              = Tonemap Comparison
-option.TONEMAP_COMPARISON.comment      = Compare two tonemapping functions on the left and right halves of your screen
-option.tonemap_left                    = Left Tonemap
-option.tonemap_right                   = Right Tonemap
 option.FANCY_NETHER_PORTAL             = Fancy Nether Portal
 option.FANCY_NETHER_PORTAL.comment     = Fancy nether portal effect inspired by Complementary Reimagined Shaders by EminGT, thanks to Emin for letting me use his idea! May not work as well with some resource packs
-option.CUSTOM_SKY                      = Custom Sky
-option.CUSTOM_SKY.comment              = Enable custom skies from resource packs
-option.CUSTOM_SKY_BRIGHTNESS           = Custom Sky Brightness
-option.CUSTOM_SKY_BRIGHTNESS.comment   = Adjust custom sky brightness
 option.ENCHANTMENT_GLINT_BRIGHTNESS    = Enchantment Glint Brightness
 option.DITHERED_TRANSLUCENCY_FALLBACK  = Dithered Translucency Fallback
 option.DITHERED_TRANSLUCENCY_FALLBACK.comment = Uses dithered translucency to improve the look of objects that should be translucent but can't when separateEntityDraws is enabled.
@@ -690,58 +626,20 @@ value.GI_DEBUG.GI_DEBUG_RESET          = Reset Reason
 value.GI_DEBUG.GI_DEBUG_BYPASS         = Filter Convergence
 value.GI_DEBUG.GI_DEBUG_EMITTER        = Direct Emitter Sample
 
-value.tonemap_left.tonemap_aces_fit       = ACES Fit
-value.tonemap_left.tonemap_aces_full      = ACES Full
-value.tonemap_left.tonemap_lottes         = Lottes
-value.tonemap_left.tonemap_hejl_burgess   = Hejl-Burgess
-value.tonemap_left.tonemap_uncharted_2    = Uncharted 2
-value.tonemap_left.tonemap_tech           = Tech
-value.tonemap_left.tonemap_ozius          = Ozius
-value.tonemap_left.tonemap_reinhard       = Reinhard
-value.tonemap_left.tonemap_reinhard_jodie = Reinhard-Jodie
-
-value.tonemap_right.tonemap_aces_fit       = ACES Fit
-value.tonemap_right.tonemap_aces_full      = ACES Full
-value.tonemap_right.tonemap_lottes         = Lottes
-value.tonemap_right.tonemap_hejl_burgess   = Hejl-Burgess
-value.tonemap_right.tonemap_uncharted_2    = Uncharted 2
-value.tonemap_right.tonemap_tech           = Tech
-value.tonemap_right.tonemap_ozius          = Ozius
-value.tonemap_right.tonemap_reinhard       = Reinhard
-value.tonemap_right.tonemap_reinhard_jodie = Reinhard-Jodie
 
 # Distance View 
 
-option.DISTANCE_VIEW                   = Enabled
-option.DISTANCE_VIEW_METHOD            = Method
-option.DISTANCE_VIEW_MAX_DISTANCE      = Max Distance
 suffix.DISTANCE_VIEW_MAX_DISTANCE      = m
 
-value.DISTANCE_VIEW_METHOD.DISTANCE_VIEW_DISTANCE = Distance
-value.DISTANCE_VIEW_METHOD.DISTANCE_VIEW_DEPTH    = Depth
 
 # Box
 
-option.BOX_MODE                 = Mode
-option.BOX_MODE.comment         = Selection Box Mode
-value.BOX_MODE.BOX_MODE_NONE    = Default
-value.BOX_MODE.BOX_MODE_COLOR   = Custom Color
-value.BOX_MODE.BOX_MODE_RAINBOW = Rainbow
-option.BOX_COLOR_R              = §c▍ §fRed
-option.BOX_COLOR_G              = §a▍ §fGreen
-option.BOX_COLOR_B              = §9▍ §fBlue
-option.BOX_EMISSION             = Emission
-option.BOX_EMISSION.comment     = Scales color past 1. Requires bloom.
-option.BOX_LINE_WIDTH           = Line Width
 
 # Distant Horizons
 
 option.DH_OVERDRAW_DISTANCE     = Overdraw Distance
 option.DH_OVERDRAW_FADE_LENGTH  = Overdraw Fade Length
 option.NOISE_ON_DH_TERRAIN      = Noise on DH Terrain
-
-
-
 
 
 # Ray Tracing & GI
@@ -767,8 +665,6 @@ option.RT_AO_RADIUS = RT Contact AO Radius
 option.RT_AO_RADIUS.comment = Maximum contact-occlusion distance in blocks. Keep this small; large-scale occlusion comes from RTGI.
 option.RT_AO_RAYS = RT Contact AO Rays
 option.RT_AO_RAYS.comment = Visibility rays per half-resolution contact-AO pixel. More rays reduce noise at a performance cost.
-option.RT_AO_IN_DIRECT = Contact AO in Direct Light
-option.RT_AO_IN_DIRECT.comment = Applies RT contact occlusion to direct sun/moon lighting as an artistic contact detail. Shadow-map visibility remains enabled separately.
 option.RTGI_VOXELIZE_ENTITIES                                       = Voxelize Entities
 option.RTGI_VOXELIZE_ENTITIES.comment                               = Experimental: voxelizes mobs and entities into the voxel scene in the shadow pass. Allows dynamic entities to cast and receive indirect voxel shadows.
 value.RTGI_VOXELIZE_ENTITIES.0                                      = OFF

@@ -175,12 +175,7 @@ void main() {
 
     scene_color = grade_input(scene_color);
 
-#ifdef TONEMAP_COMPARISON
-    scene_color
-        = uv.x < 0.5 ? tonemap_left(scene_color) : tonemap_right(scene_color);
-#else
     scene_color = tonemap(scene_color);
-#endif
 
     scene_color = clamp01(scene_color * working_to_display_color);
     scene_color = grade_output(scene_color);

@@ -66,29 +66,9 @@ void main() {
     vec4 base_color = tint;
     vec2 adjusted_light_levels = light_levels;
 
-#if defined PROGRAM_GBUFFERS_LINE && BOX_MODE != BOX_MODE_NONE
-    if (renderStage == MC_RENDER_STAGE_OUTLINE) {
-#if BOX_MODE == BOX_MODE_COLOR
-        base_color.rgb = vec3(BOX_COLOR_R, BOX_COLOR_G, BOX_COLOR_B);
-#else // BOX_MODE_RAINBOW
-        vec2 uv = gl_FragCoord.xy * view_pixel_size;
-        base_color.rgb = hsl_to_rgb(
-            vec3(fract(uv.y + uv.x * uv.y + frameTimeCounter * 0.1), 1.0, 1.0)
-        );
-#endif
-
-        adjusted_light_levels.x
-            = clamp01(adjusted_light_levels.x + BOX_EMISSION);
-    }
-#endif
-
     scene_color.rgb = srgb_eotf_inv(base_color.rgb) * rec709_to_working_color;
     // see note in function
     scene_color.a = fixup_translucent(tint.a);
-
-    if (renderStage == MC_RENDER_STAGE_OUTLINE) {
-        scene_color.rgb *= 1.0 + BOX_EMISSION;
-    }
 
     vec2 encoded_normal = encode_unit_vector(normal);
 

@@ -28,7 +28,7 @@ uniform sampler2D DEBUG_SAMPLER;
 uniform float viewHeight;
 uniform float frameTimeCounter;
 
-#if defined WORLD_NETHER || !defined SHADOW
+#if defined WORLD_NETHER
 uniform sampler2D shadowtex0;
 #endif
 
@@ -37,26 +37,7 @@ uniform sampler2D shadowtex0;
 #include "/include/utility/dithering.glsl"
 #include "/include/utility/text_rendering.glsl"
 
-#ifdef DISTANCE_VIEW
-uniform sampler2D depthtex0;
-
-uniform mat4 gbufferModelView;
-uniform mat4 gbufferModelViewInverse;
-uniform mat4 gbufferProjection;
-uniform mat4 gbufferProjectionInverse;
-
-uniform vec2 view_res;
-uniform vec2 taa_offset;
-
-uniform float near;
-uniform float far;
-
-#include "/include/misc/lod_mod_support.glsl"
-#include "/include/utility/space_conversion.glsl"
-#endif
-
 #if DEBUG_VIEW == DEBUG_VIEW_GI
-#ifndef DISTANCE_VIEW
 uniform mat4 gbufferModelView;
 uniform mat4 gbufferModelViewInverse;
 uniform mat4 gbufferProjection;
@@ -67,7 +48,6 @@ uniform vec2 taa_offset;
 
 uniform float near;
 uniform float far;
-#endif
 
 uniform vec3 cameraPosition;
 uniform int frameCounter;
@@ -195,43 +175,7 @@ void main() {
     fragment_color = gi_debug_stamp_swatch(fragment_color, texel);
 #endif
 
-#ifdef DISTANCE_VIEW
-    float depth
-        = texelFetch(depthtex0, ivec2(uv * view_res * taau_render_scale), 0).x;
-
-    vec3 position_screen = vec3(uv, depth);
-    vec3 position_view
-        = screen_to_view_space(gbufferProjectionInverse, position_screen, true);
-
-    bool is_sky = depth == 1.0;
-
-#ifdef LOD_MOD_ACTIVE
-    float depth_lod = texelFetch(lod_depth_tex, texel, 0).x;
-    bool is_lod = is_lod_terrain(depth, depth_lod);
-
-    if (is_lod) {
-        position_view = screen_to_view_space(
-            dhProjectionInverse,
-            vec3(uv, depth_lod),
-            true
-        );
-    }
-
-    is_sky = is_sky && depth_lod == 1.0;
-#endif
-
-#if DISTANCE_VIEW_METHOD == DISTANCE_VIEW_DISTANCE
-    float dist = length(position_view);
-#elif DISTANCE_VIEW_METHOD == DISTANCE_VIEW_DEPTH
-    float dist = -position_view.z;
-#endif
-
-    fragment_color = is_sky
-        ? vec3(1.0)
-        : vec3(clamp01(dist * rcp(DISTANCE_VIEW_MAX_DISTANCE)));
-#endif
-
-#if defined WORLD_NETHER || !defined SHADOW
+#if defined WORLD_NETHER
     // Must sample shadowtex0 so that the shadow map is rendered
     if (uv.x < 0.0) {
         fragment_color = texture(shadowtex0, uv).rgb;

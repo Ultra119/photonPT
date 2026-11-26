@@ -279,10 +279,8 @@ vec3 atmosphere_scattering(
     float mu_s,
     bool use_klein_nishina_phase
 ) {
-#ifndef SKY_GROUND
     float horizon_mu = mix(-0.01, 0.03, smoothstep(-0.05, 0.1, mu_s));
     mu = max(mu, horizon_mu);
-#endif
 
     vec3 uv = atmosphere_scattering_uv(nu, mu, mu_s);
 
@@ -333,14 +331,12 @@ vec3 atmosphere_scattering(
     float mu_sun = sun_dir.y;
     float mu_moon = moon_dir.y;
 
-#ifndef SKY_GROUND
     float horizon_mu = mix(
         -0.01,
         0.03,
         clamp01(smoothstep(-0.05, 0.1, mu_sun) + smoothstep(0.05, 0.1, mu_moon))
     );
     mu = max(mu, horizon_mu);
-#endif
 
     // Improved mapping for nu from Spectrum by Zombye
 

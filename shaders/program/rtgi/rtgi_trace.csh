@@ -37,7 +37,7 @@ layout(rgba16f) writeonly uniform image2D rtgi_emitter_debug_img;
 #endif
 
 #include "/include/lighting/rt/voxel_samplers.glsl"
-#if defined SHADOW && !defined WORLD_NETHER
+#ifndef WORLD_NETHER
 uniform sampler2DShadow shadowtex1;
 #ifdef SHADOW_COLOR
 uniform sampler2D shadowtex0;

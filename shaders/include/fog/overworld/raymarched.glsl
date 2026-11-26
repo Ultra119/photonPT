@@ -115,7 +115,7 @@ mat2x3 raymarch_air_fog(
          ++i, world_pos += world_step, shadow_pos += shadow_step) {
         vec3 shadow_screen_pos = distort_shadow_space(shadow_pos) * 0.5 + 0.5;
 
-#if defined SHADOW && !defined PROGRAM_DEFERRED0
+#ifndef PROGRAM_DEFERRED0
         bool in_shadow_map = clamp01(shadow_screen_pos) == shadow_screen_pos;
         float opaque_shadow
             = in_shadow_map ? texture(shadowtex1, shadow_screen_pos) : 1.0;

@@ -56,16 +56,9 @@ uniform sampler2D colortex8; // Cloud shadow map
 uniform sampler2D depthtex0;
 
 
-#ifdef SHADOW
-#ifdef WORLD_OVERWORLD
+#if defined WORLD_OVERWORLD || defined WORLD_END
 uniform sampler2D shadowtex0;
 uniform sampler2DShadow shadowtex1;
-#endif
-
-#ifdef WORLD_END
-uniform sampler2D shadowtex0;
-uniform sampler2DShadow shadowtex1;
-#endif
 #endif
 
 uniform mat4 gbufferModelView;

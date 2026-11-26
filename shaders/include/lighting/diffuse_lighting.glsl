@@ -314,9 +314,9 @@ vec3 get_diffuse_lighting(
 
     // Sunlight/moonlight
 
-#if defined SHADOW || defined SHADOW_SSRT
+#ifndef NO_SHADOW_MAP
     vec3 diffuse = vec3(
-        lift(max0(NoL), 0.25 * rcp(SHADING_STRENGTH))
+        lift(max0(NoL), 0.25)
         * (1.0 - 0.20 * material.sss_amount)
     );
 
@@ -336,10 +336,6 @@ vec3 get_diffuse_lighting(
     // ambient irradiance term.
     sss *= mix(1.0, ao * (clamp01(NoL) * 0.8 + 0.2), clamp01(shadow_distance_fade));
 
-#ifdef RT_AO_IN_DIRECT
-    diffuse *= sqr(ao);
-#endif
-
 #ifdef SHADOW_VPS
     // Add SSS and diffuse
     direct_lighting += diffuse * shadows + sss;
@@ -348,14 +344,14 @@ vec3 get_diffuse_lighting(
     direct_lighting += mix(diffuse, sss, material.sss_amount) * shadows;
 #endif
 #else
-    // Simple shading for when shadows are disabled
+    // Simple shading for passes without shadow-map sampling (e.g. Voxy LODs)
     vec3 sss = 0.08 * sss_scale * pi
         + 0.5 * material.sheen_amount * rcp(material.albedo + eps)
             * henyey_greenstein_phase(-LoV, 0.5)
             * linear_step(-0.8, -0.2, -LoV);
 
     vec3 diffuse
-        = vec3(lift(max0(NoL), 0.5 * rcp(SHADING_STRENGTH)) * 0.6 + 0.4)
+        = vec3(lift(max0(NoL), 0.5) * 0.6 + 0.4)
         * (shadows * 0.8 + 0.2);
     diffuse = diffuse + max0(sss * lift(material.sss_amount, 5.0));
     diffuse *= 1.0 * (0.9 + 0.1 * normal.x) * (0.8 + 0.2 * abs(flat_normal.y));

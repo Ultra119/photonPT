@@ -135,13 +135,9 @@ mat2x3 raymarch_end_fog(
          ++i, world_pos += world_step, shadow_pos += shadow_step) {
         vec3 shadow_screen_pos = distort_shadow_space(shadow_pos) * 0.5 + 0.5;
 
-#ifdef SHADOW
         bool in_shadow_map = clamp01(shadow_screen_pos) == shadow_screen_pos;
         float shadow
             = in_shadow_map ? texture(shadowtex1, shadow_screen_pos) : 1.0;
-#else
-#define shadow 1.0
-#endif
 
         float density = end_fog_density(world_pos) * step_length;
 
