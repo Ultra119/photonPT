@@ -14,6 +14,9 @@
 
 #if defined WORLD_OVERWORLD
 #include "/include/fog/overworld/analytic.glsl"
+#ifdef CLOUD_SHADOWS
+#include "/include/lighting/cloud_shadows.glsl"
+#endif
 #endif
 
 // ----------------------
@@ -279,7 +282,13 @@ vec3 trace_specular_ray(
         // object
         float fog_shadow = hit ? 1.0 - sqr(max0(dot(light_dir, ray_dir))) : 1.0;
 #else
-        const float fog_shadow = 1.0;
+        float fog_shadow = 1.0;
+#endif
+#ifdef CLOUD_SHADOWS
+        fog_shadow *= get_cloud_shadows_fast(
+            colortex8,
+            0.5 * ((world_pos - cameraPosition) + hit_pos_scene)
+        );
 #endif
 
         // Apply analytic fog in reflection

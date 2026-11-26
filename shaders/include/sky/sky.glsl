@@ -144,7 +144,8 @@ vec3 draw_sky(
     vec3 ray_dir,
     vec3 atmosphere,
     vec4 clouds_and_aurora,
-    float clouds_apparent_distance
+    float clouds_apparent_distance,
+    float overcast
 ) {
     vec3 sky = vec3(0.0);
 
@@ -200,6 +201,18 @@ vec3 draw_sky(
 #endif
 
     // Atmosphere
+
+    float overcast_haze = clamp01(
+        max(0.85 * smoothstep(0.45, 0.90, overcast), rainStrength)
+    );
+    float horizon_gap = 1.0 - smoothstep(0.0, 0.10, max0(ray_dir.y));
+    vec3 overcast_horizon
+        = ambient_color * (rcp(tau) * mix(0.70, 1.0, rainStrength));
+    atmosphere = mix(
+        atmosphere,
+        overcast_horizon,
+        overcast_haze * horizon_gap * mix(1.0, 0.85, time_sunrise + time_sunset)
+    );
 
     sky *= atmosphere_transmittance(ray_dir.y, planet_radius)
         * (1.0 - rainStrength);
@@ -299,7 +312,8 @@ vec3 draw_sky(vec3 ray_dir) {
         ray_dir,
         atmosphere,
         clouds_and_aurora,
-        clouds_apparent_distance
+        clouds_apparent_distance,
+        clouds_overcast_factor()
     );
 }
 #endif

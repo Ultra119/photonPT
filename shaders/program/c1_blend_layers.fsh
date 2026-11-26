@@ -137,7 +137,7 @@ uniform float time_midnight;
 #include "/include/fog/overworld/analytic.glsl"
 #include "/include/sky/clouds/sampling.glsl"
 
-#ifdef LOD_MOD_ACTIVE
+#if defined CLOUD_SHADOWS || defined LOD_MOD_ACTIVE
 uniform sampler2D colortex8;
 uniform mat4 shadowModelViewInverse;
 
@@ -184,12 +184,21 @@ vec3 blend_layers_with_fog(
 
 #if defined WORLD_OVERWORLD
     if (is_translucent) {
+#ifdef CLOUD_SHADOWS
+        vec3 fog_mid_scene = is_sky
+            ? (front_position_world - cameraPosition)
+            : (0.5 * (front_position_world + back_position_world)
+               - cameraPosition);
+        float behind_fog_shadow = get_cloud_shadows_fast(colortex8, fog_mid_scene);
+#else
+        const float behind_fog_shadow = 1.0;
+#endif
         mat2x3 analytic_fog = air_fog_analytic(
             front_position_world,
             back_position_world,
             is_sky,
             eye_skylight,
-            1.0
+            behind_fog_shadow
         );
 
         background_color = background_color * analytic_fog[1] + analytic_fog[0];
@@ -542,13 +551,27 @@ void main() {
     } else {
 #if defined WORLD_OVERWORLD
         // Overworld fog
+#ifdef CLOUD_SHADOWS
+#ifdef LOD_MOD_ACTIVE
+        float fog_end = float(lod_render_distance);
+#else
+        float fog_end = far;
+#endif
+        vec3 fog_sample_scene = is_sky
+            ? direction_world * (0.5 * fog_end)
+            : 0.5 * front_position_scene;
+        float analytic_fog_shadow
+            = get_cloud_shadows_fast(colortex8, fog_sample_scene);
+#else
+        const float analytic_fog_shadow = 1.0;
+#endif
 
         mat2x3 analytic_fog = air_fog_analytic(
             cameraPosition,
             front_position_world,
             is_sky,
             eye_skylight,
-            1.0
+            analytic_fog_shadow
         );
 
         fragment_color *= analytic_fog[1];

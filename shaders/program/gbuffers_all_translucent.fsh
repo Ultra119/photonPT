@@ -263,12 +263,13 @@ vec4 water_absorption_approx(
     float sss_depth,
     float layer_dist,
     float LoV,
-    float NoV,
+    float flat_NoV,
+    float fresnel,
     float cloud_shadows
 ) {
     vec3 biome_water_color = srgb_eotf_inv(tint.rgb) * rec709_to_working_color;
     vec3 absorption_coeff = biome_water_coeff(biome_water_color);
-    float dist = layer_dist * float(isEyeInWater != 1 || NoV >= 0.0);
+    float dist = layer_dist * float(isEyeInWater != 1 || flat_NoV >= 0.0);
 
     mat2x3 water_fog = water_fog_simple(
         light_color * cloud_shadows,
@@ -283,11 +284,16 @@ vec4 water_absorption_approx(
     float brightness_control = 1.0 - exp(-0.33 * layer_dist);
     brightness_control *= max(light_levels.x, light_levels.y);
 
+    // Conserve energy across the air-water interface: refracted underwater
+    // scattering and seabed transmission are attenuated by (1 - F) so grazing
+    // angles do not stack 100% underwater scatter on top of ~100% reflection.
+    float transmission = (isEyeInWater == 1) ? 1.0 : (1.0 - clamp01(fresnel));
+
     return vec4(
         color.rgb
-            + water_fog[0] * (1.0 + 6.0 * sqr(water_fog[1]))
+            + transmission * water_fog[0] * (1.0 + 6.0 * sqr(water_fog[1]))
                 * brightness_control,
-        1.0 - water_fog[1].x
+        1.0 - transmission * water_fog[1].x
     );
 }
 
@@ -684,12 +690,14 @@ void main() {
 
 #if defined PROGRAM_GBUFFERS_WATER
     if (is_water) {
+        float water_fresnel = fresnel_dielectric(NoV, material.f0.x).x;
         fragment_color = water_absorption_approx(
             fragment_color,
             sss_depth,
             layer_dist,
             LoV,
             dot(tbn[2], direction_world),
+            water_fresnel,
             cloud_shadows
         );
 

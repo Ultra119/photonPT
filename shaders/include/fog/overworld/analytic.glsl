@@ -11,21 +11,35 @@ vec2 air_fog_analytic_airmass(
     vec3 ray_direction_world,
     float ray_length
 ) {
-    // Integral of density function with respect to t
+    // Exact piecewise integral of raymarched.glsl's height-clamped density
+    // exp2(min((y - falloff_start) / -half_life, 0.0)) along [0, ray_length]
+    // so analytic reflection/sky-map fog never spikes above VL near sea level.
 
     const vec2 mul = -rcp(air_fog_falloff_half_life);
     const vec2 add = -mul * air_fog_falloff_start;
 
-    vec2 a = ray_origin_world.y * mul + add;
-    vec2 p1 = exp2(ray_length * ray_direction_world.y * mul + a);
-    vec2 p2 = exp2(a);
+    float y0 = ray_origin_world.y;
+    float dy = ray_length * ray_direction_world.y;
+    float y_lo = min(y0, y0 + dy);
+    float y_hi = max(y0, y0 + dy);
+    float abs_vy = abs(ray_direction_world.y);
 
-    return clamp(
-               (p1 - p2) * rcp(log(2.0) * mul * ray_direction_world.y),
-               0.0,
-               ray_length
-           )
-        * (0.5 * OVERWORLD_FOG_INTENSITY);
+    vec2 integral;
+    if (abs_vy < 1e-5) {
+        integral = ray_length * exp2(min(y0 * mul + add, 0.0));
+    } else {
+        float rcp_abs_vy = rcp(abs_vy);
+        vec2 len_below
+            = clamp(air_fog_falloff_start - y_lo, 0.0, y_hi - y_lo) * rcp_abs_vy;
+        vec2 ya = max(vec2(y_lo), air_fog_falloff_start);
+        vec2 yb = max(vec2(y_hi), air_fog_falloff_start);
+        vec2 p_a = exp2(ya * mul + add);
+        vec2 p_b = exp2(yb * mul + add);
+        vec2 len_above = (p_a - p_b) * rcp(-log(2.0) * mul * abs_vy);
+        integral = len_below + len_above;
+    }
+
+    return clamp(integral, 0.0, ray_length) * (0.5 * OVERWORLD_FOG_INTENSITY);
 }
 
 mat2x3 air_fog_analytic(

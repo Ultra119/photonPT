@@ -3,6 +3,7 @@
 
 #include "/include/sky/clouds/constants.glsl"
 #include "/include/sky/clouds/parameters.glsl"
+#include "/include/utility/color.glsl"
 #include "/include/weather/core.glsl"
 
 float clouds_cumulus_congestus_blend(Weather weather, vec2 l0_coverage) {
@@ -237,6 +238,16 @@ vec3 apply_overcast_sky_color(
     vec3 weather_sky_color,
     float overcast
 ) {
+    // Physically, an overcast cloud deck cannot emit light: during twilight
+    // and night, keep the weather target luminance bounded by clear-sky
+    // irradiance (preserving weather chromaticity and moon-phase scaling) so
+    // overcast clouds and fog never glow brighter than a clear night sky.
+    float clear_luma = dot(clear_sky_color, luminance_weights_rec2020);
+    float weather_luma = dot(weather_sky_color, luminance_weights_rec2020);
+    float night_cap = smoothstep(0.05, -0.05, sun_dir.y);
+    float capped_scale = min(weather_luma, clear_luma) / max(weather_luma, eps);
+    weather_sky_color *= mix(1.0, capped_scale, night_cap);
+
     float blend = clamp01(
         max(0.45 * smoothstep(0.20, 0.90, overcast), rainStrength)
     );

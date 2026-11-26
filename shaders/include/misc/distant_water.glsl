@@ -36,33 +36,6 @@ vec4 draw_distant_water(
     const float cloud_shadows = 1.0;
 #endif
 
-    // Water absorption approx (must match gbuffers_water)
-
-#ifdef DISTANT_HORIZONS
-    tint.rgb *= 1.45;
-#endif
-
-    vec3 biome_water_color = srgb_eotf_inv(tint.rgb) * rec709_to_working_color;
-    vec3 absorption_coeff = biome_water_coeff(biome_water_color);
-
-    mat2x3 water_fog = water_fog_simple(
-        light_color * cloud_shadows,
-        ambient_color,
-        absorption_coeff,
-        light_levels,
-        layer_distance,
-        dot(light_dir, direction_world),
-        0.0
-    );
-
-    float brightness_control = 1.0 - exp(-0.33 * layer_distance);
-    brightness_control
-        = (1.0 - light_levels.y) + brightness_control * light_levels.y;
-
-    water_color.rgb = water_fog[0] * (1.0 + 6.0 * sqr(water_fog[1]))
-        * brightness_control * fog_visibility;
-    water_color.a = 1.0 - water_fog[1].x;
-
     // Get water wave normal
 
     // Account for 1/8 height difference between water and terrain
@@ -85,11 +58,42 @@ vec4 draw_distant_water(
     }
 #endif
 
+    // Water absorption approx (must match gbuffers_water)
+
+#ifdef DISTANT_HORIZONS
+    tint.rgb *= 1.45;
+#endif
+
+    vec3 biome_water_color = srgb_eotf_inv(tint.rgb) * rec709_to_working_color;
+    vec3 absorption_coeff = biome_water_coeff(biome_water_color);
+
+    mat2x3 water_fog = water_fog_simple(
+        light_color * cloud_shadows,
+        water_ambient_color,
+        absorption_coeff,
+        light_levels,
+        layer_distance,
+        dot(light_dir, direction_world),
+        0.0
+    );
+
+    float brightness_control = 1.0 - exp(-0.33 * layer_distance);
+    brightness_control
+        = (1.0 - light_levels.y) + brightness_control * light_levels.y;
+
+    float NoV = clamp01(dot(normal, -direction_world));
+    float water_fresnel = fresnel_dielectric(NoV, water_material.f0.x).x;
+    float transmission
+        = (isEyeInWater == 1) ? 1.0 : (1.0 - clamp01(water_fresnel));
+
+    water_color.rgb = transmission * water_fog[0]
+        * (1.0 + 6.0 * sqr(water_fog[1])) * brightness_control * fog_visibility;
+    water_color.a = 1.0 - transmission * water_fog[1].x;
+
     // Specular highlight
 
 #if (defined WORLD_OVERWORLD || defined WORLD_END)
     float NoL = dot(normal, light_dir);
-    float NoV = clamp01(dot(normal, -direction_world));
     float LoV = dot(light_dir, -direction_world);
     float halfway_norm = inversesqrt(max(2.0 * LoV + 2.0, 1e-6));
     float NoH = (NoL + NoV) * halfway_norm;

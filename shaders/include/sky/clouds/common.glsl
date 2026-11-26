@@ -84,6 +84,26 @@ float clouds_powder_effect(float density, float cos_theta) {
     return powder;
 }
 
+float clouds_overcast_factor() {
+    float l0_cover = 0.0;
+#ifdef CLOUDS_CUMULUS
+    l0_cover = clamp01(
+        dot(clouds_params.l0_coverage, vec2(0.55, 0.45))
+        * (1.0 + 0.30 * clouds_params.l0_cumulus_stratus_blend)
+    );
+#endif
+    float l1_cover = 0.0;
+#ifdef CLOUDS_ALTOCUMULUS
+    l1_cover = clamp01(
+        dot(clouds_params.l1_coverage, vec2(0.55, 0.45))
+        * (1.0 + 0.25 * clouds_params.l1_cumulus_stratus_blend)
+    );
+#endif
+    float combined_cover = 1.0 - (1.0 - l0_cover) * (1.0 - 0.65 * l1_cover);
+    float dry_overcast = smoothstep(0.50, 0.90, combined_cover);
+    return clamp01(max(dry_overcast * 0.85, rainStrength));
+}
+
 vec3 clouds_aerial_perspective(
     vec3 clouds_scattering,
     float clouds_transmittance,
@@ -111,14 +131,22 @@ vec3 clouds_aerial_perspective(
         air_transmittance = clamp01(trans_1 / trans_0);
     }
 
-    // Blend to rain color during rain
+    // Blend distant clouds toward overcast horizon mist during both rain and
+    // heavy dry overcast so the cloud deck merges smoothly into the horizon
+    // instead of fading into a dark clear-sky band.
+    float overcast = clouds_overcast_factor();
+    float overcast_haze = clamp01(
+        max(0.85 * smoothstep(0.45, 0.90, overcast), rainStrength)
+    );
+    vec3 overcast_mist
+        = sky_color * (rcp(tau) * mix(0.70, 1.0, rainStrength));
     clear_sky = mix(
         clear_sky,
-        sky_color * rcp(tau),
-        rainStrength * mix(1.0, 0.9, time_sunrise + time_sunset)
+        overcast_mist,
+        overcast_haze * mix(1.0, 0.9, time_sunrise + time_sunset)
     );
     air_transmittance
-        = mix(air_transmittance, vec3(air_transmittance.x), 0.8 * rainStrength);
+        = mix(air_transmittance, vec3(air_transmittance.x), 0.8 * overcast_haze);
 
     return mix(
         (1.0 - clouds_transmittance) * clear_sky,

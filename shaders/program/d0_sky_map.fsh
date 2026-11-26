@@ -121,6 +121,9 @@ uniform float biome_may_snow;
 
 #if defined WORLD_OVERWORLD
 #include "/include/fog/overworld/analytic.glsl"
+#ifdef CLOUD_SHADOWS
+#include "/include/lighting/cloud_shadows.glsl"
+#endif
 #include "/include/sky/aurora.glsl"
 #endif
 
@@ -187,13 +190,29 @@ void main() {
         sky_map = draw_sky(ray_dir);
 
 #if defined WORLD_OVERWORLD
-        // Apply analytic fog over sky
+        // Apply analytic fog over sky, attenuated by cloud shadows so overcast
+        // sky-map reflections and border fog match VL instead of glowing with
+        // unshadowed direct sun/moon light.
+#ifdef CLOUD_SHADOWS
+#ifdef LOD_MOD_ACTIVE
+        float fog_end = float(lod_render_distance);
+#else
+        float fog_end = far;
+#endif
+        float fog_shadow = (
+            get_cloud_shadows_fast(colortex8, ray_dir * (0.20 * fog_end))
+            + get_cloud_shadows_fast(colortex8, ray_dir * (0.50 * fog_end))
+            + get_cloud_shadows_fast(colortex8, ray_dir * (0.80 * fog_end))
+        ) * rcp(3.0);
+#else
+        const float fog_shadow = 1.0;
+#endif
         mat2x3 fog = air_fog_analytic(
             cameraPosition,
             cameraPosition + ray_dir,
             true,
             eye_skylight,
-            1.0
+            fog_shadow
         );
         sky_map = sky_map * fog[1] + fog[0];
 #endif

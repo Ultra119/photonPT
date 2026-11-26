@@ -31,6 +31,7 @@ flat in OverworldFogParameters fog_params;
 
 
 flat in float rainbow_amount;
+flat in float sky_overcast;
 #endif
 
 // ------------
@@ -326,7 +327,8 @@ void main() {
             direction_world,
             atmosphere,
             clouds_and_aurora,
-            clouds_apparent_distance
+            clouds_apparent_distance,
+            sky_overcast
         );
 #else
         fragment_color = draw_sky(direction_world);

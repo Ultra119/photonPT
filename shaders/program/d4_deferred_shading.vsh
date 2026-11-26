@@ -25,6 +25,7 @@ flat out vec3 moon_color;
 flat out OverworldFogParameters fog_params;
 
 flat out float rainbow_amount;
+flat out float sky_overcast;
 #endif
 
 // ------------
@@ -147,6 +148,7 @@ void main() {
     fog_params = get_fog_parameters(weather);
 
     rainbow_amount = get_rainbow_amount(weather);
+    sky_overcast = overcast;
 #endif
 
     vec2 vertex_pos = gl_Vertex.xy * taau_render_scale;
